@@ -58,3 +58,11 @@ void ethernetBegin() {
 bool ethernetConnected() {
     return g_ethConnected;
 }
+
+bool ethernetLocalIpv4(uint32_t *out) {
+    if (out == nullptr || !g_ethConnected) {
+        return false;
+    }
+    *out = static_cast<uint32_t>(ETH.localIP());
+    return *out != 0;
+}

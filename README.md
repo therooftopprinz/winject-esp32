@@ -2,19 +2,24 @@
 
 Firmware for the Wireless-Tag **WT32-ETH01** (ESP32 + LAN8720 Ethernet), built with PlatformIO and the Arduino framework.
 
+This board is a **bfc-tunnel external multicast** radio: Ethernet UDP in/out, raw 802.11 monitor/inject on WiFi. See [docs/winject.md](docs/winject.md). It is not a copy of original WInject.
+
 ## Layout
 
 ```
 include/          Public headers and board config
 lib/              Project-local libraries (optional)
-src/              Firmware sources
-test/             PlatformIO unit tests (optional)
+src/common/       Shared sources (Ethernet bring-up)
+src/winject/      WT32-ETH01 firmware (env:wt32-eth01)
+src/test/         WT32-ETH01 hardware test (env:test)
 platformio.ini    Board, framework, and serial settings
 ```
 
+`pio run` builds `wt32-eth01`. `pio run -e test` builds the board bring-up firmware. See [docs/flashing.md](docs/flashing.md).
+
 ## Build and flash
 
-The WT32-ETH01 has no USB port. Connect a 3.3 V USB-UART adapter to `TXD`/`RXD`/`GND`, hold `BOOT` (IO0) while resetting to enter download mode, then:
+The WT32-ETH01 has no USB port. Connect a 3.3 V USB-UART adapter to `TXD`/`RXD`/`GND`, hold `BOOT` (IO0) to GND, then apply power:
 
 ```powershell
 & "$env:APPDATA\Python\Python311\Scripts\platformio.exe" run
@@ -29,6 +34,8 @@ Set `upload_port` in `platformio.ini` only if auto-detect picks the wrong COM po
 ## Ethernet
 
 Default PHY wiring matches the WT32-ETH01: LAN8720 at address `1`, MDC `23`, MDIO `18`, oscillator enable `16`, RMII clock `GPIO0` in. Hostname and MAC are set in `include/config.h`. If the link never comes up, switch `ETH_CLK_MODE` to `ETH_CLOCK_GPIO17_OUT`.
+
+If DHCP does not assign an address within 5 seconds, WiFi also starts an open AP `winject-<STA MAC>` at `192.168.4.1`. The radio stays in monitor/inject. OTA and the console listen on Ethernet whenever it has a lease. See [docs/winject.md](docs/winject.md).
 
 ## PlatformIO install (Windows)
 
