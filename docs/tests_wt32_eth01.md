@@ -2,7 +2,7 @@
 
 Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [winject.md](winject.md).
 
-The runner **sets channel and modulation on both radios** over TCP `2323` (`set_channel`, `set_modulation`) before each rate. Default is a sweep of every firmware modulation.
+The runner **sets channel, modulation, and CCA on both radios** over TCP `2323` (`set_channel`, `set_modulation`, `set_cca_enabled`) before each rate. Default is a sweep of every firmware modulation with CCA enabled.
 
 # Topology
 
@@ -18,6 +18,7 @@ host  <--UDP 9001--  radio A  <--802.11 RX--  air  <--802.11 TX--  radio B  <--U
 | Host | this machine | TCP console `2323`; UDP listen `9001` / `9002` |
 | Channel | `1` | `set_channel` on both radios before each modulation |
 | Modulation | `all` | `set_modulation` on both radios; see list below |
+| CCA | enabled | `set_cca_enabled`; `--no-cca` skips wait-for-idle |
 | Payload | 1400 bytes | UDP body only; firmware max 1476 |
 
 The host must be on the same IPv4 subnet as both Ethernet ports. STA MACs are chip-unique; BSSID is `BA:DD:CA:FE:BA:BE` on both. Radios do not loop their own TX back to `upstream_tx`.
@@ -30,6 +31,7 @@ python3 tools/bw_test.py --channel 1 --modulation all
 python3 tools/bw_test.py --modulation DSS_1M_L
 python3 tools/bw_test.py --modulation OFDM_6M,OFDM_24M,OFDM_54M --channel 6
 python3 tools/bw_test.py --kbps 400 --modulation CCK_11M_S
+python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 ```
 
 | Flag | Default | Meaning |
@@ -43,6 +45,7 @@ python3 tools/bw_test.py --kbps 400 --modulation CCK_11M_S
 | `--drain` | `1` | Wait after sending for late frames |
 | `--kbps` | auto | Payload offer in kbit/s. `-1` (default) is 85% of estimated 802.11 goodput for **that** modulation. `0` floods the Ethernet inject path (not a goodput test) |
 | `--integrity` | `20` | Packets per direction before bandwidth |
+| `--cca` / `--no-cca` | enabled | `set_cca_enabled` on both radios. `--no-cca` skips wait-for-idle |
 | `--skip-config` | off | Do not send console commands |
 | `--skip-bidir` | off | Skip the simultaneous A+B phase |
 | `--verbose` | off | Print full console replies |
@@ -52,6 +55,7 @@ Each modulation step sends, on both radios:
 ```
 set_channel <channel>
 set_modulation <modulation>
+set_cca_enabled <0|1>
 ```
 
 Upstream ports are configured once at the start. After a modulation change the runner waits 0.8 s so `esp_wifi` can reapply rate/channel/monitor.
@@ -76,7 +80,7 @@ Both directions send at once. Each direction is offered **half** the unidirectio
 
 | Check | Pass |
 |-------|------|
-| Config | `set_channel` and `set_modulation` return `ok` on both radios |
+| Config | `set_channel`, `set_modulation`, and `set_cca_enabled` return `ok` on both radios |
 | Integrity | 20/20 each way (after retry) |
 | Unidirectional | each direction `loss%` ≤ 5 at the auto/`--kbps` offer |
 | Simultaneous | each direction `loss%` ≤ 10 at half uni offer |

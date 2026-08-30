@@ -3,7 +3,7 @@
 
 UDP into one radio's upstream_rx, 802.11 in the air, UDP out the other
 radio's upstream_tx to this host. Measures integrity and payload goodput.
-Sets channel and modulation on both radios over the TCP console.
+Sets channel, modulation, and CCA on both radios over the TCP console.
 """
 
 from __future__ import annotations
@@ -204,12 +204,15 @@ def configure_upstream(ip: str, host: str, tx_port: int, quiet: bool) -> bool:
     return replies_ok(replies)
 
 
-def configure_radio(ip: str, channel: int, modulation: str, quiet: bool) -> bool:
+def configure_radio(
+    ip: str, channel: int, modulation: str, cca: bool, quiet: bool
+) -> bool:
     replies = console(
         ip,
         [
             f"set_channel {channel}",
             f"set_modulation {modulation}",
+            f"set_cca_enabled {1 if cca else 0}",
         ],
         quiet=quiet,
     )
@@ -382,6 +385,12 @@ def parse_args() -> argparse.Namespace:
         help="paced payload offer in kbit/s (-1 = auto from modulation, 0 = flood)",
     )
     p.add_argument("--integrity", type=int, default=20, help="integrity packets per direction")
+    p.add_argument(
+        "--cca",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
+    )
     p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
     p.add_argument("--skip-bidir", action="store_true", help="skip simultaneous A+B phase")
     p.add_argument("--verbose", action="store_true", help="print full console replies")
@@ -443,7 +452,8 @@ def main() -> int:
     host = args.host or detect_host(args.a)
     quiet = not args.verbose
     print(f"host {host}")
-    print(f"A {args.a}  B {args.b}  channel {args.channel}")
+    cca_label = "enabled" if args.cca else "disabled"
+    print(f"A {args.a}  B {args.b}  channel {args.channel}  cca {cca_label}")
     print(f"modulations ({len(mods)}): {' '.join(mods)}")
     print(f"payload {args.size} B  duration {args.duration}s  drain {args.drain}s")
 
@@ -509,13 +519,16 @@ def main() -> int:
         if offer < 0:
             offer = auto_offer_kbps(mod, args.size)
         paced = offer > 0
-        print(f"\n=== [{idx}/{len(mods)}] ch {args.channel}  {mod}  offer {offer:.0f} kbps ===")
+        print(
+            f"\n=== [{idx}/{len(mods)}] ch {args.channel}  {mod}  "
+            f"cca {cca_label}  offer {offer:.0f} kbps ==="
+        )
         result = ModResult(modulation=mod, channel=args.channel, offer=offer)
 
         if not args.skip_config:
             try:
-                ok_a = configure_radio(args.a, args.channel, mod, quiet)
-                ok_b = configure_radio(args.b, args.channel, mod, quiet)
+                ok_a = configure_radio(args.a, args.channel, mod, args.cca, quiet)
+                ok_b = configure_radio(args.b, args.channel, mod, args.cca, quiet)
             except OSError as err:
                 result.config_ok = False
                 result.note = "CONFIG"
@@ -527,7 +540,7 @@ def main() -> int:
                 result.config_ok = False
                 result.note = "CONFIG"
                 result.overall = False
-                print("set_channel/set_modulation failed")
+                print("set_channel/set_modulation/set_cca_enabled failed")
                 all_results.append(result)
                 continue
             time.sleep(0.8)

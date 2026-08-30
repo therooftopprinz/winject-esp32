@@ -5,8 +5,10 @@ WInject-ESP is a **bfc-tunnel external multicast** radio. It is not a clone of o
 ```
 bfc-tunnel  --UDP payload-->  WT32-ETH01  --802.11 TX-->  WiFi
 bfc-tunnel  <--UDP payload--  WT32-ETH01  <--802.11 RX--  WiFi
-bfc-tunnel  --TCP/Serial cmds-->  control plane
+bfc-tunnel  --TCP/UART cmds-->  control plane
 ```
+
+WiFi driver and `esp_wifi_80211_tx` run on **CPU0**. Ethernet, lwIP, the TCP console, and HTTP OTA run on **CPU1**.
 
 # 802.11 frame
 
@@ -27,7 +29,7 @@ RX accepts Data (and QoS Data) with Addr1 broadcast and Addr3 `BA:DD:CA:FE:BA:BE
 
 # Control Plane Console
 
-Available on **Serial** (115200) and **TCP** `2323` after Ethernet has an IP, or after the WiFi AP fallback is up.
+Available on **UART0** (115200) and **TCP** `2323` after Ethernet has an IP, or after the WiFi AP fallback is up.
 
 Commands:
 
@@ -88,17 +90,16 @@ If no IPv4 lease arrives within **5 seconds**, WiFi **also** starts an **open** 
 - AP address `192.168.4.1`
 - TCP console `2323` and OTA on that address **and** on Ethernet if a lease arrives later
 
-The STA MAC is the base MAC from `ETH_MAC_BYTES` in `include/config.h`.
+The STA MAC is the chip-unique factory MAC (eFuse). Ethernet uses the derived `ESP_MAC_ETH` address. One firmware image can be flashed to every radio.
 
 # OTA
 
-Once any IPv4 address is up (Ethernet and/or AP), both endpoints are served:
+Once any IPv4 address is up (Ethernet and/or AP), HTTP OTA is served on port 80:
 
-- **ArduinoOTA** UDP `3232` (PlatformIO `espota`)
-- **HTTP** `GET /` upload form, `POST /update` firmware blob
+- `GET /` upload form
+- `POST /update` firmware blob (multipart or raw)
 
 ```bash
-pio run -t upload --upload-protocol espota --upload-port 192.168.4.1
 curl -F "firmware=@.pio/build/wt32-eth01/firmware.bin" http://192.168.4.1/update
 ```
 
