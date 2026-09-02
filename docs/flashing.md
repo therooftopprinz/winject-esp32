@@ -40,10 +40,11 @@ pio run -t upload
 pio device monitor
 ```
 
-Bring-up image instead of winject:
+Bring-up image instead of winject (`src/test/main.cpp` plus the same `src/winject/` modules). It logs `PASS`/`FAIL` for Ethernet, WiFi radio, frame wrap/unwrap, air loopback, upstream UDP, TCP console, and HTTP OTA:
 
 ```bash
 pio run -e test -t upload
+pio run -e test -t monitor
 ```
 
 On Windows without PlatformIO on PATH:
@@ -62,14 +63,14 @@ Notes:
 
 ## OTA (network)
 
-After the board has an IPv4 address — Ethernet DHCP, and/or the open AP `winject-<MAC>` at `192.168.4.1` if DHCP did not arrive in 5 s — firmware can be updated without UART:
+After the board has an IPv4 address — Ethernet DHCP in `AUTO`, or the static address from `set_ip` — firmware can be updated without UART. A missed DHCP lease falls back to static `192.168.32.1/24` (no DHCP server unless `set_network STATIC` and `set_enable_dhcp_server 1`):
 
 ```bash
-curl -F "firmware=@.pio/build/wt32-eth01/firmware.bin" http://192.168.4.1/update
+curl -F "firmware=@.pio/build/wt32-eth01/firmware.bin" http://192.168.32.1/update
 ```
 
-Use the Ethernet IP when the cable has a lease. HTTP `GET /` is the upload form; `POST /update` accepts the firmware blob (multipart from the form or `curl -F`). The partition table is `partitions.csv` (two OTA app slots). There is no ArduinoOTA / UDP 3232.
+Use the Ethernet IP when the cable has a DHCP lease. HTTP `GET /` is the upload form; `POST /update` accepts the firmware blob (multipart from the form or `curl -F`). The partition table is `partitions.csv` (two OTA app slots). There is no ArduinoOTA / UDP 3232.
 
 ## After it boots
 
-Ethernet PHY wiring is already set for this board in `include/config.h` (LAN8720, addr 1, MDC 23, MDIO 18, oscillator enable 16, clock on GPIO0). If the Ethernet link never comes up, try `ETH_CLK_GPIO17_OUT` instead of `ETH_CLK_GPIO0_IN`.
+Ethernet PHY wiring is already set for this board in `src/winject/config.h` (LAN8720, addr 1, MDC 23, MDIO 18, oscillator enable 16, clock on GPIO0). If the Ethernet link never comes up, try `ETH_CLK_GPIO17_OUT` instead of `ETH_CLK_GPIO0_IN`.

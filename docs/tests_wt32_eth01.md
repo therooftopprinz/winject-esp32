@@ -2,7 +2,7 @@
 
 Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [winject.md](winject.md).
 
-The runner **sets channel, modulation, and CCA on both radios** over TCP `2323` (`set_channel`, `set_modulation`, `set_cca_enabled`) before each rate. Default is a sweep of every firmware modulation with CCA enabled.
+The runner **sets CCA on both radios** over TCP `2323` (`set_cca_enabled`) before each rate. Channel and modulation are left as already configured unless `--channel`, `--modulation`, or `--all` is given. `--all` sweeps every firmware modulation.
 
 # Topology
 
@@ -16,19 +16,21 @@ host  <--UDP 9001--  radio A  <--802.11 RX--  air  <--802.11 TX--  radio B  <--U
 | Radio A | `192.168.253.11` | `set_upstream_rx 9000`, `set_upstream_tx <host> 9001` |
 | Radio B | `192.168.253.12` | `set_upstream_rx 9000`, `set_upstream_tx <host> 9002` |
 | Host | this machine | TCP console `2323`; UDP listen `9001` / `9002` |
-| Channel | `1` | `set_channel` on both radios before each modulation |
-| Modulation | `all` | `set_modulation` on both radios; see list below |
+| Channel | existing | omit `--channel` to keep; `--channel N` sends `set_channel` on both radios before each modulation |
+| Modulation | existing | omit `--modulation` to keep; `--modulation NAME` sets both radios; `--all` sweeps every rate |
 | CCA | enabled | `set_cca_enabled`; `--no-cca` skips wait-for-idle |
 | Payload | 1400 bytes | UDP body only; firmware max 1476 |
 
-The host must be on the same IPv4 subnet as both Ethernet ports. STA MACs are chip-unique; BSSID is `BA:DD:CA:FE:BA:BE` on both. Radios do not loop their own TX back to `upstream_tx`.
+The host must be on the same IPv4 subnet as both Ethernet ports. Default mode is `BFC_TUNNEL_DEVICE` (the runner does not send `set_mode`). STA MACs are chip-unique; BSSID is `BA:DD:CA:FE:BA:BE` on both. Radios drop their own TX SA so it is not forwarded to `upstream_tx`.
+
+`STANDALONE` uses a different BSSID and you|peer airport addresses; see [winject.md](winject.md). For that mode use `python3 scripts/stand_alone_test.py` (same flags as this runner, plus `--airport-a` / `--airport-b` / `--dual`). `--airport-b` must be the 3-byte swap of `--airport-a`.
 
 # Runner
 
 ```bash
 python3 tools/bw_test.py
-python3 tools/bw_test.py --channel 1 --modulation all
-python3 tools/bw_test.py --modulation DSS_1M_L
+python3 tools/bw_test.py --all
+python3 tools/bw_test.py --bidir --modulation DSS_1M_L
 python3 tools/bw_test.py --modulation OFDM_6M,OFDM_24M,OFDM_54M --channel 6
 python3 tools/bw_test.py --kbps 400 --modulation CCK_11M_S
 python3 tools/bw_test.py --no-cca --modulation OFDM_24M
@@ -38,8 +40,9 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 |------|---------|---------|
 | `--a` / `--b` | `.11` / `.12` | Radio Ethernet addresses |
 | `--host` | auto | Address the radios send `upstream_tx` back to |
-| `--channel` | `1` | `set_channel` on **both** radios (1–13) |
-| `--modulation` | `all` | One name, comma-separated list, or `all` |
+| `--channel` | omit | `set_channel` on **both** radios (1–13). Omit to keep the radios’ current channel |
+| `--modulation` | omit | One name or comma-separated list. Omit to keep the radios’ current modulation |
+| `--all` | off | Sweep every firmware modulation (`set_modulation` on both radios). Not with `--modulation` |
 | `--size` | `1400` | UDP payload bytes (16–1476) |
 | `--duration` | `5` | Seconds per bandwidth phase |
 | `--drain` | `1` | Wait after sending for late frames |
@@ -47,20 +50,14 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 | `--integrity` | `20` | Packets per direction before bandwidth |
 | `--cca` / `--no-cca` | enabled | `set_cca_enabled` on both radios. `--no-cca` skips wait-for-idle |
 | `--skip-config` | off | Do not send console commands |
-| `--skip-bidir` | off | Skip the simultaneous A+B phase |
+| `--bidir` | off | Run the simultaneous A+B phase |
 | `--verbose` | off | Print full console replies |
 
-Each modulation step sends, on both radios:
+Each rate step sends `set_cca_enabled <0|1>` on both radios. If `--modulation` or `--all` is given, `set_modulation <modulation>` is sent first. If `--channel` is given, `set_channel <channel>` is sent first.
 
-```
-set_channel <channel>
-set_modulation <modulation>
-set_cca_enabled <0|1>
-```
+Upstream ports are configured once at the start. After a channel or modulation change the runner waits 1.2 s so `esp_wifi` can reapply rate/channel/monitor.
 
-Upstream ports are configured once at the start. After a modulation change the runner waits 0.8 s so `esp_wifi` can reapply rate/channel/monitor.
-
-Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP before inject (`udp_rx_drop`), goodput collapses, and the boards can reboot.
+Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP before inject, goodput collapses, and the boards can reboot.
 
 # Test cases (per modulation)
 
@@ -74,28 +71,20 @@ Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP bef
 
 ## Simultaneous bidirectional bandwidth
 
-Both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit.
+Only with `--bidir`. Both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit.
 
 # Pass criteria (per modulation)
 
 | Check | Pass |
 |-------|------|
-| Config | `set_channel`, `set_modulation`, and `set_cca_enabled` return `ok` on both radios |
+| Config | `set_cca_enabled` returns `ok` on both radios (`set_channel` / `set_modulation` too if those flags were given) |
 | Integrity | 20/20 each way (after retry) |
 | Unidirectional | each direction `loss%` ≤ 5 at the auto/`--kbps` offer |
-| Simultaneous | each direction `loss%` ≤ 10 at half uni offer |
+| Simultaneous | `--bidir` only; each direction `loss%` ≤ 10 at half uni offer |
 
 Sweep exit status is 0 only if **every** listed modulation passes. High PHY rates can fail the loss limit because the ESP32 inject path cannot offer the estimated air goodput; the table still records delivered **goodput kbps**.
 
-# Counters
-
-| Counter | Meaning |
-|---------|--------|
-| `udp_rx` | Ethernet datagrams accepted and injected |
-| `udp_rx_drop` | Ethernet datagrams not injected (too long, inject fail, or overflow) |
-| `wifi_tx` / `wifi_tx_fail` | Inject attempts |
-| `wifi_rx` | Promiscuous frames that matched DA broadcast + BSSID |
-| `udp_tx` | Payloads forwarded to the host |
+CRC-fail DATA is queued to upstream only if `set_allow_failed_crc 1`. Packet counters and air snapshots are not currently reported.
 
 # Modulations
 
@@ -108,7 +97,7 @@ Same names as `set_modulation` / `help`:
 Bench, 2026-08-30, channel 1, 1400-byte payload, 5 s phases, auto offer. `set_channel 1` and `set_modulation` applied on both radios before each row.
 
 ```bash
-python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --modulation all
+python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --all --bidir
 ```
 
 | modulation      | ch | offer kbps |  int A->B |  int B->A | A->B kbps | A->B loss | B->A kbps | B->A loss | A+B A kbps | A+B B kbps | A+B A loss | A+B B loss | result |
@@ -151,3 +140,18 @@ python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --mod
 - `OFDM_48M` / `OFDM_54M` and MCS5–7 LGI still deliver ~20–23 Mbps but miss the 5%/10% loss limits — the ESP32 inject path cannot fill the estimated air rate.
 - `OFDM_MCS0_LGI` failed only integrity (18/20 on retry); goodput was fine.
 - `OFDM_MCS3_SGI`–`MCS7_SGI` going to 0/20 in that sweep was **not** an SGI PHY bug. Isolated probes (20-byte integrity) pass MCS3/MCS7 SGI 20/20 with `wifi_tx`/`wifi_rx` matching. Replaying `MCS2_SGI` → `MCS3_SGI` → `MCS7_SGI` after a cold start: MCS2/MCS3 SGI pass the loss limits; MCS7 SGI delivers ~23.5 Mbps but misses 5% loss at a 27 Mbps offer (same inject ceiling as MCS7 LGI). The original blackout was leftover radio state after the long high-rate sweep (`MCS2_SGI` bidir was already 22% loss there vs ~3% on a short replay). Re-run SGI rows on their own before treating them as unsupported.
+
+# Follow-up, 2026-08-30 evening
+
+Same pair, after OTA. `country.max_tx_power` had been `20`, which IDF treats as **5 dBm** (0.25 dBm units). It is now `80` (**20 dBm**) plus `esp_wifi_set_max_tx_power(80)`. CCA still defaults to enabled. Activity LEDs are poll-driven (no GPIO in the WiFi RX callback).
+
+TX is not the bottleneck: `udp_rx` == `wifi_tx`, `wifi_tx_fail` ≈ 0, `wifi_rx_drop` = 0. Loss is air RX.
+
+| test | offer kbps | int | uni A/B kbps | uni loss | bidir loss | vs morning bench |
+|------|-----------:|----:|-------------:|---------:|-----------:|------------------|
+| OFDM_24M auto | 14323 | 20/20 | 14217 / 14157 | 0.8% / 1.2% | 14.9% / 16.5% | uni matches; bidir was 2.0% / 2.4% |
+| OFDM_54M 20 Mbps | 20000 | 18/19 | 14466 / 13254 | 27.7% / 33.7% | 35.7% / 48.3% | morning auto-offer delivered ~21 / 20 Mbps |
+| OFDM_54M auto | 23743 | 18/16 | 16903 / 14475 | 28.8% / 39.0% | 45.9% / 46.9% | morning 21276 / 19972 kbps, 10.4% / 15.9% |
+| OFDM_MCS4_LGI auto | 19747 | 18/19 | 18675 / 18397 | 5.4% / 6.8% | 23.4% / 25.4% | morning 19609 / 19291, 0.7% / 2.3% |
+
+Channels 6 and 11 were as bad as channel 1 for `OFDM_54M` at 20 Mbps. Disabling the IO5/IO17 LEDs entirely did not restore 54M. Before the 20 dBm fix, 54M at 20 Mbps was ~11 Mbps with ~45% loss.

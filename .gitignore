@@ -1,4 +1,5 @@
-.pio
+manager/build/
+compile_commands.json
 sdkconfig
 sdkconfig.old
 sdkconfig.wt32-eth01

@@ -3,17 +3,26 @@
 
 UDP into one radio's upstream_rx, 802.11 in the air, UDP out the other
 radio's upstream_tx to this host. Measures integrity and payload goodput.
-Sets channel, modulation, and CCA on both radios over the TCP console.
+Sets CCA on both radios over the TCP console. Sets channel and modulation
+only when --channel, --modulation, or --all is given; omitted leaves the
+radios as they are.
+
+--fec starts tools/fec.py encode/decode proxies on the host. The radios
+still see opaque UDP; the test measures application payloads after decode.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
+import select
 import socket
+import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -23,6 +32,19 @@ INJECT_PORT = 9000
 HOST_PORT_A = 9001  # frames heard by radio A
 HOST_PORT_B = 9002  # frames heard by radio B
 MAX_PAYLOAD = 1476
+FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
+FEC_ENC_A = 19100  # host -> encode -> radio A inject
+FEC_ENC_B = 19110  # host -> encode -> radio B inject
+FEC_APP_A = 19101  # decode of radio A upstream_tx (B -> A)
+FEC_APP_B = 19102  # decode of radio B upstream_tx (A -> B)
+FEC_BLOCK_HDR = 8
+FEC_LEN_PREFIX = 2
+FEC_INTRA_HDR = 2
+MAX_BLOCK_ORIG = MAX_PAYLOAD - FEC_BLOCK_HDR - FEC_LEN_PREFIX  # 1466
+DEFAULT_FEC_K = 8
+DEFAULT_FEC_N = 12
+DEFAULT_FEC_NSYM = 32
+DEFAULT_FEC_TIMEOUT_MS = 20
 
 # Named PHY rates from docs/winject.md (20 MHz column for MCS).
 PHY_KBPS = {
@@ -103,7 +125,7 @@ class PhaseResult:
 @dataclass
 class ModResult:
     modulation: str
-    channel: int
+    channel: int | None
     offer: float
     config_ok: bool = True
     integrity_ab: int = 0
@@ -204,18 +226,49 @@ def configure_upstream(ip: str, host: str, tx_port: int, quiet: bool) -> bool:
     return replies_ok(replies)
 
 
+def parse_status_field(text: str, key: str) -> str | None:
+    for line in text.splitlines():
+        parts = line.split()
+        try:
+            i = parts.index(key)
+        except ValueError:
+            continue
+        if i + 1 < len(parts):
+            return parts[i + 1]
+    return None
+
+
+def parse_status_channel(text: str) -> int | None:
+    raw = parse_status_field(text, "channel")
+    if raw is not None and raw.isdigit():
+        return int(raw)
+    return None
+
+
+def parse_status_modulation(text: str) -> str | None:
+    raw = parse_status_field(text, "modulation")
+    return raw.upper() if raw else None
+
+
+def log_status(ip: str, label: str) -> str:
+    print(f"\n=== status {label} {ip} ===")
+    try:
+        return console(ip, ["status"], quiet=False)[0]
+    except OSError as err:
+        print(f"status failed: {err}")
+        return ""
+
+
 def configure_radio(
-    ip: str, channel: int, modulation: str, cca: bool, quiet: bool
+    ip: str, channel: int | None, modulation: str | None, cca: bool, quiet: bool
 ) -> bool:
-    replies = console(
-        ip,
-        [
-            f"set_channel {channel}",
-            f"set_modulation {modulation}",
-            f"set_cca_enabled {1 if cca else 0}",
-        ],
-        quiet=quiet,
-    )
+    cmds: list[str] = []
+    if channel is not None:
+        cmds.append(f"set_channel {channel}")
+    if modulation is not None:
+        cmds.append(f"set_modulation {modulation}")
+    cmds.append(f"set_cca_enabled {1 if cca else 0}")
+    replies = console(ip, cmds, quiet=quiet)
     return replies_ok(replies)
 
 
@@ -297,6 +350,184 @@ def auto_offer_kbps(modulation: str, size: int) -> float:
     return (size * 8.0) / (air_us / 1000.0) * 0.85
 
 
+def intra_air_size(payload_len: int, nsym: int) -> int:
+    if payload_len <= 0:
+        return FEC_INTRA_HDR
+    chunk = 255 - nsym
+    if chunk < 1:
+        raise SystemExit(f"--fec-nsym {nsym} is too large")
+    n_chunks = (payload_len + chunk - 1) // chunk
+    return FEC_INTRA_HDR + payload_len + n_chunks * nsym
+
+
+def fec_max_orig(intra: bool, nsym: int) -> int:
+    if not intra:
+        return MAX_BLOCK_ORIG
+    for size in range(MAX_PAYLOAD - FEC_INTRA_HDR, 0, -1):
+        if intra_air_size(size, nsym) <= MAX_PAYLOAD:
+            return size
+    return 0
+
+
+def fec_air_size(size: int, intra: bool, nsym: int) -> int:
+    if intra:
+        return intra_air_size(size, nsym)
+    return min(MAX_PAYLOAD, size + FEC_BLOCK_HDR + FEC_LEN_PREFIX)
+
+
+def auto_offer_kbps_fec(
+    modulation: str, size: int, k: int, n: int, intra: bool, nsym: int
+) -> float:
+    """App-layer offer so air frames stay near the usual 85% PHY estimate."""
+    air_size = fec_air_size(size, intra, nsym)
+    air_offer = auto_offer_kbps(modulation, air_size)
+    scale = size / air_size if air_size else 1.0
+    if intra:
+        return air_offer * scale
+    return air_offer * (k / n) * scale
+
+
+def fec_label(args: argparse.Namespace) -> str:
+    if not args.fec:
+        return "off"
+    if args.fec_intra:
+        return f"intra nsym={args.fec_nsym}"
+    return f"block k={args.fec_k} n={args.fec_n} timeout={args.fec_timeout:g}ms"
+
+
+class FecProxies:
+    """Four host-side fec.py processes: encode A/B, decode A/B."""
+
+    def __init__(
+        self,
+        radio_a: str,
+        radio_b: str,
+        k: int,
+        n: int,
+        nsym: int,
+        timeout_ms: float,
+        intra: bool,
+        verbose: bool,
+    ) -> None:
+        self.radio_a = radio_a
+        self.radio_b = radio_b
+        self.k = k
+        self.n = n
+        self.nsym = nsym
+        self.timeout_ms = timeout_ms
+        self.intra = intra
+        self.verbose = verbose
+        self.procs: list[subprocess.Popen[str]] = []
+        self._drains: list[threading.Thread] = []
+
+    def start(self) -> None:
+        if not FEC_SCRIPT.is_file():
+            raise SystemExit(f"missing {FEC_SCRIPT}")
+        common = [sys.executable, str(FEC_SCRIPT)]
+        if self.intra:
+            fec_args = ["--intra", "--nsym", str(self.nsym)]
+        else:
+            fec_args = ["--k", str(self.k), "--n", str(self.n), "--timeout", str(self.timeout_ms)]
+        if self.verbose:
+            fec_args.append("--verbose")
+        specs = [
+            (
+                "enc-a",
+                [
+                    "--encode",
+                    "--from",
+                    str(FEC_ENC_A),
+                    "--to",
+                    f"{self.radio_a}:{INJECT_PORT}",
+                    *fec_args,
+                ],
+            ),
+            (
+                "enc-b",
+                [
+                    "--encode",
+                    "--from",
+                    str(FEC_ENC_B),
+                    "--to",
+                    f"{self.radio_b}:{INJECT_PORT}",
+                    *fec_args,
+                ],
+            ),
+            (
+                "dec-a",
+                ["--decode", "--from", str(HOST_PORT_A), "--to", f"127.0.0.1:{FEC_APP_A}"],
+            ),
+            (
+                "dec-b",
+                ["--decode", "--from", str(HOST_PORT_B), "--to", f"127.0.0.1:{FEC_APP_B}"],
+            ),
+        ]
+        try:
+            for name, extra in specs:
+                self._spawn(name, common + extra)
+        except Exception:
+            self.stop()
+            raise
+
+    def _spawn(self, name: str, argv: list[str]) -> None:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.procs.append(proc)
+        deadline = time.monotonic() + 5.0
+        started = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                err = proc.stderr.read() if proc.stderr else ""
+                raise SystemExit(f"fec {name} exited {proc.returncode}: {err.strip()}")
+            if proc.stderr is None:
+                break
+            ready = select_readable(proc.stderr, timeout=0.2)
+            if not ready:
+                continue
+            line = proc.stderr.readline()
+            if self.verbose and line:
+                print(f"[fec {name}] {line}", end="")
+            if "listening" in line:
+                started = True
+                break
+        if not started:
+            raise SystemExit(f"fec {name} did not print listening")
+        t = threading.Thread(target=self._drain, args=(name, proc), daemon=True)
+        t.start()
+        self._drains.append(t)
+
+    def _drain(self, name: str, proc: subprocess.Popen[str]) -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            if self.verbose:
+                print(f"[fec {name}] {line}", end="")
+
+    def stop(self) -> None:
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.terminate()
+        deadline = time.monotonic() + 2.0
+        for proc in self.procs:
+            remaining = deadline - time.monotonic()
+            try:
+                proc.wait(timeout=max(0.05, remaining))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1.0)
+        self.procs.clear()
+
+
+def select_readable(stream: object, timeout: float) -> bool:
+    readable, _, _ = select.select([stream], [], [], timeout)
+    return bool(readable)
+
+
 def send_window(
     dest: tuple[str, int],
     tag: bytes,
@@ -349,7 +580,7 @@ def loss_ok(phase: PhaseResult, limit: float, paced: bool) -> bool:
 def parse_modulations(text: str) -> list[str]:
     raw = text.strip()
     if raw.lower() == "all":
-        return list(MODULATIONS)
+        raise SystemExit("use --all to sweep every modulation")
     names = [part.strip() for part in raw.split(",") if part.strip()]
     if not names:
         raise SystemExit("no modulations given")
@@ -369,11 +600,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--a", default="192.168.253.11", help="radio A Ethernet IP")
     p.add_argument("--b", default="192.168.253.12", help="radio B Ethernet IP")
     p.add_argument("--host", default="", help="host IP that both radios send back to")
-    p.add_argument("--channel", type=int, default=1, help="set_channel on both radios (1-13)")
+    p.add_argument(
+        "--channel",
+        type=int,
+        default=None,
+        help="set_channel on both radios (1-13); omit to keep existing",
+    )
     p.add_argument(
         "--modulation",
-        default="all",
-        help="one name, comma-separated list, or 'all' (default: all)",
+        default=None,
+        help="one name or comma-separated list; omit to keep existing",
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="sweep every firmware modulation",
     )
     p.add_argument("--size", type=int, default=1400, help="UDP payload bytes (max 1476)")
     p.add_argument("--duration", type=float, default=5.0, help="seconds per bandwidth phase")
@@ -392,24 +633,44 @@ def parse_args() -> argparse.Namespace:
         help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
     )
     p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
-    p.add_argument("--skip-bidir", action="store_true", help="skip simultaneous A+B phase")
+    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase")
     p.add_argument("--verbose", action="store_true", help="print full console replies")
+    p.add_argument(
+        "--fec",
+        action="store_true",
+        help="send/receive through tools/fec.py (app-layer loss after decode)",
+    )
+    p.add_argument(
+        "--fec-intra",
+        action="store_true",
+        help="per-frame RS instead of packet-block FEC (implies --fec)",
+    )
+    p.add_argument("--fec-k", type=int, default=DEFAULT_FEC_K, help="FEC data packets per block")
+    p.add_argument("--fec-n", type=int, default=DEFAULT_FEC_N, help="FEC total packets per block")
+    p.add_argument("--fec-nsym", type=int, default=DEFAULT_FEC_NSYM, help="intra RS parity bytes")
+    p.add_argument(
+        "--fec-timeout",
+        type=float,
+        default=DEFAULT_FEC_TIMEOUT_MS,
+        metavar="MS",
+        help="encode partial-block flush timeout in ms",
+    )
     return p.parse_args()
 
 
-def fmt_summary(results: list[ModResult], paced: bool, skip_bidir: bool) -> str:
+def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
     header = (
         "| modulation      | ch | offer kbps |  int A->B |  int B->A |"
         " A->B kbps | A->B loss | B->A kbps | B->A loss |"
     )
-    if not skip_bidir:
+    if bidir:
         header += " A+B A kbps | A+B B kbps | A+B A loss | A+B B loss |"
     header += " result |"
     sep = (
         "|-----------------|---:|-----------:|----------:|----------:"
         "|----------:|----------:|----------:|----------:|"
     )
-    if not skip_bidir:
+    if bidir:
         sep += "-----------:|-----------:|-----------:|-----------:|"
     sep += "--------|"
     lines = [header, sep]
@@ -427,12 +688,13 @@ def fmt_summary(results: list[ModResult], paced: bool, skip_bidir: bool) -> str:
         verdict = "PASS" if r.overall else "FAIL"
         if r.note:
             verdict = r.note
+        ch = "-" if r.channel is None else r.channel
         line = (
-            f"| {r.modulation:<15} | {r.channel:>2} | {r.offer:>10.0f} |"
+            f"| {r.modulation:<15} | {ch:>2} | {r.offer:>10.0f} |"
             f" {int_ab:>9} | {int_ba:>9} |"
             f" {ab_k:>9} | {ab_l:>9} | {ba_k:>9} | {ba_l:>9} |"
         )
-        if not skip_bidir:
+        if bidir:
             a_k, a_l = cell(r.bidir_ab)
             b_k, b_l = cell(r.bidir_ba)
             line += f" {a_k:>10} | {b_k:>10} | {a_l:>10} | {b_l:>10} |"
@@ -443,19 +705,69 @@ def fmt_summary(results: list[ModResult], paced: bool, skip_bidir: bool) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.fec_intra:
+        args.fec = True
     if args.size < 16 or args.size > MAX_PAYLOAD:
         raise SystemExit(f"--size must be 16..{MAX_PAYLOAD}")
-    if args.channel < 1 or args.channel > 13:
+    if args.fec:
+        if not 1 <= args.fec_k < args.fec_n <= 255:
+            raise SystemExit(f"need 1 <= --fec-k < --fec-n <= 255, got k={args.fec_k} n={args.fec_n}")
+        if not 1 <= args.fec_nsym <= 254:
+            raise SystemExit(f"--fec-nsym must be 1..254, got {args.fec_nsym}")
+        if args.fec_timeout < 0:
+            raise SystemExit("--fec-timeout must be >= 0")
+        max_orig = fec_max_orig(args.fec_intra, args.fec_nsym)
+        if args.size > max_orig:
+            raise SystemExit(
+                f"--size {args.size} exceeds FEC max {max_orig} "
+                f"({'intra' if args.fec_intra else 'block'} must fit in {MAX_PAYLOAD} on the air)"
+            )
+    if args.channel is not None and (args.channel < 1 or args.channel > 13):
         raise SystemExit("--channel must be 1-13")
+    if args.all and args.modulation is not None:
+        raise SystemExit("use --all or --modulation, not both")
 
-    mods = parse_modulations(args.modulation)
+    apply_modulation = args.all or args.modulation is not None
+    if args.all:
+        mods = list(MODULATIONS)
+    elif args.modulation is not None:
+        mods = parse_modulations(args.modulation)
+    else:
+        mods = []
+
     host = args.host or detect_host(args.a)
     quiet = not args.verbose
-    print(f"host {host}")
     cca_label = "enabled" if args.cca else "disabled"
-    print(f"A {args.a}  B {args.b}  channel {args.channel}  cca {cca_label}")
-    print(f"modulations ({len(mods)}): {' '.join(mods)}")
+    print(f"host {host}")
+
+    status_a = log_status(args.a, "A")
+    status_b = log_status(args.b, "B")
+    display_channel: int | None = args.channel
+    if args.channel is None:
+        ch_a = parse_status_channel(status_a)
+        ch_b = parse_status_channel(status_b)
+        display_channel = ch_a
+        if ch_a is not None and ch_b is not None and ch_a != ch_b:
+            print(f"warning: A is on channel {ch_a}, B is on channel {ch_b}")
+
+    if not apply_modulation:
+        mod_a = parse_status_modulation(status_a)
+        mod_b = parse_status_modulation(status_b)
+        if mod_a is not None and mod_b is not None and mod_a != mod_b:
+            print(f"warning: A is {mod_a}, B is {mod_b}")
+        current = mod_a or mod_b
+        if current is None:
+            raise SystemExit("could not read existing modulation; pass --modulation or --all")
+        mods = [current]
+
+    channel_label = str(display_channel) if display_channel is not None else "existing"
+    if args.channel is None:
+        channel_label += " (unchanged)"
+    mod_label_suffix = " (unchanged)" if not apply_modulation else ""
+    print(f"\nA {args.a}  B {args.b}  channel {channel_label}  cca {cca_label}")
+    print(f"modulations ({len(mods)}): {' '.join(mods)}{mod_label_suffix}")
     print(f"payload {args.size} B  duration {args.duration}s  drain {args.drain}s")
+    print(f"fec {fec_label(args)}")
 
     if not args.skip_config:
         print("\n=== configure upstream ===")
@@ -464,14 +776,38 @@ def main() -> int:
         if not configure_upstream(args.b, host, HOST_PORT_B, quiet):
             raise SystemExit("failed to configure upstream on B")
 
-    listen_a = Listener(host, HOST_PORT_A)
-    listen_b = Listener(host, HOST_PORT_B)
+    fec: FecProxies | None = None
+    if args.fec:
+        print("\n=== start fec proxies ===")
+        fec = FecProxies(
+            radio_a=args.a,
+            radio_b=args.b,
+            k=args.fec_k,
+            n=args.fec_n,
+            nsym=args.fec_nsym,
+            timeout_ms=args.fec_timeout,
+            intra=args.fec_intra,
+            verbose=args.verbose,
+        )
+        fec.start()
+        atexit.register(fec.stop)
+        listen_a = Listener("127.0.0.1", FEC_APP_A)
+        listen_b = Listener("127.0.0.1", FEC_APP_B)
+        dest_a = ("127.0.0.1", FEC_ENC_A)
+        dest_b = ("127.0.0.1", FEC_ENC_B)
+        print(
+            f"encode {dest_a[1]}/{dest_b[1]} -> radios:{INJECT_PORT}; "
+            f"decode {HOST_PORT_A}/{HOST_PORT_B} -> app {FEC_APP_A}/{FEC_APP_B}"
+        )
+    else:
+        listen_a = Listener(host, HOST_PORT_A)
+        listen_b = Listener(host, HOST_PORT_B)
+        dest_a = (args.a, INJECT_PORT)
+        dest_b = (args.b, INJECT_PORT)
+
     listen_a.start()
     listen_b.start()
     time.sleep(0.2)
-
-    dest_a = (args.a, INJECT_PORT)
-    dest_b = (args.b, INJECT_PORT)
 
     def reset() -> None:
         listen_a.stats.clear()
@@ -517,18 +853,24 @@ def main() -> int:
     for idx, mod in enumerate(mods, 1):
         offer = args.kbps
         if offer < 0:
-            offer = auto_offer_kbps(mod, args.size)
+            if args.fec:
+                offer = auto_offer_kbps_fec(
+                    mod, args.size, args.fec_k, args.fec_n, args.fec_intra, args.fec_nsym
+                )
+            else:
+                offer = auto_offer_kbps(mod, args.size)
         paced = offer > 0
         print(
-            f"\n=== [{idx}/{len(mods)}] ch {args.channel}  {mod}  "
-            f"cca {cca_label}  offer {offer:.0f} kbps ==="
+            f"\n=== [{idx}/{len(mods)}] ch {channel_label}  {mod}{mod_label_suffix}  "
+            f"cca {cca_label}  fec {fec_label(args)}  offer {offer:.0f} kbps ==="
         )
-        result = ModResult(modulation=mod, channel=args.channel, offer=offer)
+        result = ModResult(modulation=mod, channel=display_channel, offer=offer)
 
         if not args.skip_config:
+            set_mod = mod if apply_modulation else None
             try:
-                ok_a = configure_radio(args.a, args.channel, mod, args.cca, quiet)
-                ok_b = configure_radio(args.b, args.channel, mod, args.cca, quiet)
+                ok_a = configure_radio(args.a, args.channel, set_mod, args.cca, quiet)
+                ok_b = configure_radio(args.b, args.channel, set_mod, args.cca, quiet)
             except OSError as err:
                 result.config_ok = False
                 result.note = "CONFIG"
@@ -540,10 +882,11 @@ def main() -> int:
                 result.config_ok = False
                 result.note = "CONFIG"
                 result.overall = False
-                print("set_channel/set_modulation/set_cca_enabled failed")
+                print("radio config failed")
                 all_results.append(result)
                 continue
-            time.sleep(0.8)
+            if args.channel is not None or apply_modulation:
+                time.sleep(1.2)
 
         print("-- integrity")
         a_to_b, b_to_a = run_integrity()
@@ -572,7 +915,7 @@ def main() -> int:
         )
         result.uni_ok = loss_ok(result.uni_ab, 5.0, paced) and loss_ok(result.uni_ba, 5.0, paced)
 
-        if not args.skip_bidir:
+        if args.bidir:
             bidir_offer = (offer / 2.0) if paced else offer
             print(f"-- simultaneous ({bidir_offer:.0f} kbps each)")
             snaps = phase(
@@ -603,13 +946,15 @@ def main() -> int:
 
     listen_a.stop()
     listen_b.stop()
+    if fec is not None:
+        fec.stop()
 
     print("\n=== result ===")
     paced = args.kbps != 0
-    print(fmt_summary(all_results, paced, args.skip_bidir))
+    print(fmt_summary(all_results, paced, args.bidir))
 
     passed = sum(1 for r in all_results if r.overall)
-    print(f"\n{passed}/{len(all_results)} modulations PASS  channel {args.channel}")
+    print(f"\n{passed}/{len(all_results)} modulations PASS  channel {channel_label}")
     return 0 if passed == len(all_results) else 1
 
 

@@ -1,5 +1,8 @@
 # Google C++ style with Allman braces (opening brace on its own line).
 BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+AccessModifierOffset: -4
 BreakBeforeBraces: Allman
 DerivePointerAlignment: false
 PointerAlignment: Left
@@ -12,7 +15,7 @@ AllowShortLoopsOnASingleLine: false
 InsertBraces: true
 IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '^"(config|console|ethernet|frame|ota|upstream|wifi_radio)\.h"'
+  - Regex: '^"(config|console|dhcp_client|dhcp_server|ethernet|ethernet_rmii|frame|indicator_led|ota|packet_pool|packet_queue|semaphore|upstream_rx|upstream_tx|wifi|wifi_rx|wifi_tx)\.h"'
     Priority: 1
   - Regex: '^<'
     Priority: 2
