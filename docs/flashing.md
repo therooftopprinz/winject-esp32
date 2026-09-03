@@ -24,7 +24,7 @@ The ESP32 starts the ROM downloader when **IO0 is low at the moment power (or EN
 1. Unplug WT32 power (`5V` / `3.3V`).
 2. Hold **IO0 (`BOOT`)** to GND.
 3. Apply power. Keep IO0 held.
-4. Run `pio run -t upload` (or `pio run -e test -t upload`).
+4. Run `pio run -t upload`.
 5. When esptool is writing, you can release IO0.
 6. After upload, **release IO0** and power-cycle so it boots your firmware, not the ROM downloader.
 
@@ -40,12 +40,13 @@ pio run -t upload
 pio device monitor
 ```
 
-Bring-up image instead of winject (`src/test/main.cpp` plus the same `src/winject/` modules). It logs `PASS`/`FAIL` for Ethernet, WiFi radio, frame wrap/unwrap, air loopback, upstream UDP, TCP console, and HTTP OTA:
+Host unit tests (Google Test) live under `src/test/` — not a PlatformIO env. Run them with:
 
 ```bash
-pio run -e test -t upload
-pio run -e test -t monitor
+pio run -t test
 ```
+
+They cover 802.11 wrap/unwrap plus manager config and TCP stream logic; they do not replace two-radio air tests in [tests_wt32_eth01.md](tests_wt32_eth01.md).
 
 On Windows without PlatformIO on PATH:
 
@@ -73,4 +74,4 @@ Use the Ethernet IP when the cable has a DHCP lease. HTTP `GET /` is the upload 
 
 ## After it boots
 
-Ethernet PHY wiring is already set for this board in `src/winject/config.h` (LAN8720, addr 1, MDC 23, MDIO 18, oscillator enable 16, clock on GPIO0). If the Ethernet link never comes up, try `ETH_CLK_GPIO17_OUT` instead of `ETH_CLK_GPIO0_IN`.
+Ethernet PHY wiring is already set for this board in `src/winject-esp32/config.h` (LAN8720, addr 1, MDC 23, MDIO 18, oscillator enable 16, clock on GPIO0). If the Ethernet link never comes up, try `ETH_CLK_GPIO17_OUT` instead of `ETH_CLK_GPIO0_IN`.

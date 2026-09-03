@@ -151,6 +151,8 @@ def configure_standalone(
 ) -> tuple[bool, str]:
     cmds = [
         "set_mode STANDALONE",
+        f"unset_upstream_rx {airport}",
+        f"unset_upstream_tx {airport}",
         f"set_upstream_rx {airport} {inject_port}",
         f"set_upstream_tx {airport} {host} {tx_port}",
         *extras,
@@ -182,10 +184,14 @@ def configure_pair(
     extras_b: list[str] = []
     if args.dual:
         extras_a = [
+            f"unset_upstream_rx {DEFAULT_AIRPORT_A2}",
+            f"unset_upstream_tx {DEFAULT_AIRPORT_A2}",
             f"set_upstream_rx {DEFAULT_AIRPORT_A2} {INJECT_PORT2}",
             f"set_upstream_tx {DEFAULT_AIRPORT_A2} {host} {HOST_PORT_A2}",
         ]
         extras_b = [
+            f"unset_upstream_rx {DEFAULT_AIRPORT_B2}",
+            f"unset_upstream_tx {DEFAULT_AIRPORT_B2}",
             f"set_upstream_rx {DEFAULT_AIRPORT_B2} {INJECT_PORT2}",
             f"set_upstream_tx {DEFAULT_AIRPORT_B2} {host} {HOST_PORT_B2}",
         ]

@@ -36,8 +36,8 @@ def _load_compile_commands(path: Path) -> list:
 
 def _install_clangd_db() -> None:
     by_file = {}
-    # test first so the default env wins for shared sources.
-    for env_name in ("test", "wt32-eth01"):
+    # wt32-eth01 is the only firmware env; host tests use `pio run -t test`.
+    for env_name in ("wt32-eth01",):
         src = project / ".pio" / "build" / env_name / "compile_commands.json"
         for entry in _load_compile_commands(src):
             f = entry.get("file")

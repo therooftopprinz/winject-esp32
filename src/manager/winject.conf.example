@@ -1,0 +1,27 @@
+winject.device        = 192.168.32.1
+winject.console       = 2323
+winject.channel       = 1
+winject.modulation    = OFDM_24M
+winject.power         = 20
+winject.mode          = STANDALONE
+# Optional; omit/0 → 10000 kbps.
+# winject.max_rate_kbps = 10000
+
+upstream.size = 2
+
+upstream-0.mode             = UDP_GENERIC_FORWARDING
+upstream-0.airport          = 00:00:00:AA:BB:CC
+upstream-0.scheduler_budget = 100
+upstream-0.rx               = 0.0.0.0:22081
+upstream-0.tx               = 127.0.0.1:21082
+# Optional. Same k/n on the peer manager.
+# upstream-0.fec.type         = RS_BLOCK_ERASURE
+# upstream-0.fec.k            = 10
+# upstream-0.fec.n            = 15
+
+upstream-1.mode             = TCP_SERVER_FORWARDING
+upstream-1.airport          = 02:02:03:04:05:06
+upstream-1.scheduler_budget = 1024
+upstream-1.rcv_buffer_size  = 16384
+upstream-1.snd_buffer_size  = 16384
+upstream-1.bind_address     = 127.0.0.1:22022

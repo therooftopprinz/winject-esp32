@@ -38,10 +38,12 @@ Commands:
 
 - `set_upstream_rx|sur [airport] <udpport>` - bind this UDP port and inject each datagram as one 802.11 frame. Airport defaults to `0`. In `STANDALONE`, airport is the TX SA (`00:00:00:xx:xx:xx` broadcast or `xx:xx:xx:yy:yy:yy` P2P); repeat the command with another airport to add another endpoint.
 - `set_upstream_tx|sut [airport] <udp_host> <udp_port>` - forward matching WiFi payloads to this host. Airport defaults to `0`. In `STANDALONE`, use the same airport as inject: broadcast matches Addr2 as-is, P2P matches the swapped response `yy:yy:yy:xx:xx:xx`. Repeat to add another dest.
+- `unset_upstream_rx [airport]` - unbind the RX UDP socket for this airport. Empty uses the default airport `0`.
+- `unset_upstream_tx [airport]` - remove the TX forwarding entry for this airport. Empty uses the default airport `0`.
 - `set_allow_failed_crc|saf <allow>` - Forward failed CRC to upstream (`1`/`0`, `true`/`false`, `on`/`off`). Default `0`.
 - `set_mode|sm <mode>` - set operating mode
-	- Available modes
-  	- `BFC_TUNNEL_DEVICE` (default) - Used as bfc-tunnel external multicast device.
+    - Available modes
+    - `BFC_TUNNEL_DEVICE` (default) - Used as bfc-tunnel external multicast device.
     - `STANDALONE` - Used as standalone winject device.
 - `set_channel|sc <channel>` - Set WIFI channel (1–13)
 - `set_modulation|sd <modulation>` - Set WIFI modulation
@@ -134,7 +136,7 @@ Standalone airports are 3-byte halves, written `xx:xx:xx:yy:yy:yy` or `xxxxxxxxx
 - Each `set_upstream_tx <airport> <udp_host> <udp_port>` uses the same airport string as inject. Broadcast forwards frames whose Addr2 equals that airport. P2P forwards the swapped response `yy:yy:yy:xx:xx:xx`. Another airport adds another dest; the same airport replaces the dest.
 - Addr3 is `DE:AD:CA:FE:BA:BE` (not winject’s `DE:AD:BE:EF:CA:FE`). Same-channel PC winject and ESP32 standalone do not match.
 - RX heard: Addr3 is that BSSID **and** Addr2 is a local TX SA or a TX-table filter SA. Other SAs on that BSSID are ignored.
-- RX match: heard + DA broadcast + SA matches a `set_upstream_tx` filter. Drop any SA that is one of our RX-table airports (no self-loop).
+- RX match: heard + DA broadcast + SA matches a `set_upstream_tx` filter. Drop P2P SAs that are local RX-table airports (no self-loop). Broadcast airports share Addr2 on every radio, so they are not classified as self.
 - The STA MAC is not used in the 802.11 header. `status` still prints it for the AP SSID / board identity.
 - Two P2P radios that should hear each other use swapped airports: A is `xx:xx:xx:yy:yy:yy`, B is `yy:yy:yy:xx:xx:xx`. Each radio uses that string on both `set_upstream_rx` and `set_upstream_tx`. Firmware filters the swap for the response.
 

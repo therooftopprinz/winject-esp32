@@ -1,4 +1,5 @@
-manager/build/
+src/manager/build/
+src/test/build/
 compile_commands.json
 sdkconfig
 sdkconfig.old
@@ -15,5 +16,5 @@ managed_components
 *.map
 .DS_Store
 Thumbs.db
-scripts/__pycache__/
+__pycache__/
 scripts/.venv/

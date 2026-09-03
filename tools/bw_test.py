@@ -17,6 +17,7 @@ import argparse
 import atexit
 import select
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -31,6 +32,8 @@ CONSOLE_PORT = 2323
 INJECT_PORT = 9000
 HOST_PORT_A = 9001  # frames heard by radio A
 HOST_PORT_B = 9002  # frames heard by radio B
+TCP_SEND_A = 29000  # manager A TCP_SERVER (host sends A->B)
+TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
 MAX_PAYLOAD = 1476
 FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
 FEC_ENC_A = 19100  # host -> encode -> radio A inject
@@ -328,6 +331,97 @@ class Listener:
                 st.seqs.add(seq)
 
 
+def send_tcp_record(sock: socket.socket, payload: bytes) -> None:
+    sock.sendall(struct.pack("!H", len(payload)) + payload)
+
+
+def tcp_connect(host: str, port: int, timeout: float = 5.0) -> socket.socket:
+    sock = socket.create_connection((host, port), timeout=timeout)
+    sock.settimeout(None)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return sock
+
+
+class TcpListener:
+    """TCP server; records are uint16 BE length + payload (manager TCP path)."""
+
+    def __init__(self, bind_ip: str, port: int) -> None:
+        self.stats = RecvStats()
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((bind_ip, port))
+        self._sock.listen(1)
+        self._sock.settimeout(0.2)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._client: socket.socket | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        if self._client is not None:
+            try:
+                self._client.close()
+            except OSError:
+                pass
+        self._sock.close()
+
+    def _consume(self, buf: bytearray) -> None:
+        while len(buf) >= 2:
+            plen = struct.unpack("!H", buf[:2])[0]
+            if plen > MAX_PAYLOAD or plen == 0:
+                del buf[0]
+                continue
+            if len(buf) < 2 + plen:
+                return
+            data = bytes(buf[2:2 + plen])
+            del buf[:2 + plen]
+            now = time.monotonic()
+            st = self.stats
+            if st.first is None:
+                st.first = now
+            st.last = now
+            st.packets += 1
+            st.nbytes += len(data)
+            seq = parse_seq(data)
+            if seq is not None:
+                st.seqs.add(seq)
+
+    def _read_client(self, conn: socket.socket) -> None:
+        conn.settimeout(0.2)
+        buf = bytearray()
+        while not self._stop.is_set():
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            self._consume(buf)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except OSError:
+                    pass
+            self._client = conn
+            self._read_client(conn)
+
+
 def send_exact(dest: tuple[str, int], tag: bytes, count: int, size: int, gap: float) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -338,6 +432,60 @@ def send_exact(dest: tuple[str, int], tag: bytes, count: int, size: int, gap: fl
     finally:
         sock.close()
     return count
+
+
+def send_exact_tcp(
+    dest: tuple[str, int], tag: bytes, count: int, size: int, gap: float,
+    sock: socket.socket | None = None,
+) -> int:
+    own = sock is None
+    if own:
+        sock = tcp_connect(dest[0], dest[1])
+    try:
+        for seq in range(count):
+            send_tcp_record(sock, make_payload(tag, seq, size))
+            if gap > 0:
+                time.sleep(gap)
+    finally:
+        if own:
+            sock.close()
+    return count
+
+
+def send_window_tcp(
+    dest: tuple[str, int],
+    tag: bytes,
+    size: int,
+    duration: float,
+    kbps: float,
+    start: float,
+    sock: socket.socket | None = None,
+) -> int:
+    own = sock is None
+    if own:
+        sock = tcp_connect(dest[0], dest[1])
+    assert sock is not None
+    sent = 0
+    seq = 0
+    interval = (size * 8.0) / (kbps * 1000.0) if kbps > 0 else 0.0
+    next_t = start
+    try:
+        while time.monotonic() - start < duration:
+            now = time.monotonic()
+            if interval > 0 and now < next_t:
+                time.sleep(min(0.001, next_t - now))
+                continue
+            send_tcp_record(sock, make_payload(tag, seq, size))
+            sent += 1
+            seq += 1
+            if interval > 0:
+                next_t += interval
+                if next_t < time.monotonic() - interval:
+                    next_t = time.monotonic()
+    finally:
+        if own:
+            sock.close()
+    return sent
 
 
 def auto_offer_kbps(modulation: str, size: int) -> float:
@@ -633,6 +781,23 @@ def parse_args() -> argparse.Namespace:
         help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
     )
     p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
+    p.add_argument(
+        "--tcp",
+        action="store_true",
+        help="host path via winject-manager TCP forwarding (implies --skip-config)",
+    )
+    p.add_argument(
+        "--tcp-send-a",
+        type=int,
+        default=TCP_SEND_A,
+        help=f"manager A TCP_SERVER port for A->B send (default {TCP_SEND_A})",
+    )
+    p.add_argument(
+        "--tcp-send-b",
+        type=int,
+        default=TCP_SEND_B,
+        help=f"manager B TCP_SERVER port for B->A send (default {TCP_SEND_B})",
+    )
     p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase")
     p.add_argument("--verbose", action="store_true", help="print full console replies")
     p.add_argument(
@@ -705,6 +870,8 @@ def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.tcp:
+        args.skip_config = True
     if args.fec_intra:
         args.fec = True
     if args.size < 16 or args.size > MAX_PAYLOAD:
@@ -768,6 +935,11 @@ def main() -> int:
     print(f"modulations ({len(mods)}): {' '.join(mods)}{mod_label_suffix}")
     print(f"payload {args.size} B  duration {args.duration}s  drain {args.drain}s")
     print(f"fec {fec_label(args)}")
+    if args.tcp:
+        print(
+            f"tcp managers: send A->B {args.tcp_send_a}  send B->A {args.tcp_send_b}; "
+            f"listen B->A {HOST_PORT_A}  listen A->B {HOST_PORT_B}"
+        )
 
     if not args.skip_config:
         print("\n=== configure upstream ===")
@@ -799,6 +971,11 @@ def main() -> int:
             f"encode {dest_a[1]}/{dest_b[1]} -> radios:{INJECT_PORT}; "
             f"decode {HOST_PORT_A}/{HOST_PORT_B} -> app {FEC_APP_A}/{FEC_APP_B}"
         )
+    elif args.tcp:
+        listen_a = TcpListener("127.0.0.1", HOST_PORT_A)
+        listen_b = TcpListener("127.0.0.1", HOST_PORT_B)
+        dest_a = ("127.0.0.1", args.tcp_send_a)
+        dest_b = ("127.0.0.1", args.tcp_send_b)
     else:
         listen_a = Listener(host, HOST_PORT_A)
         listen_b = Listener(host, HOST_PORT_B)
@@ -809,23 +986,45 @@ def main() -> int:
     listen_b.start()
     time.sleep(0.2)
 
+    tcp_sock_a: socket.socket | None = None
+    tcp_sock_b: socket.socket | None = None
+    if args.tcp:
+        tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
+        time.sleep(0.3)
+        tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
+        time.sleep(0.3)
+        atexit.register(lambda: tcp_sock_a.close() if tcp_sock_a else None)
+        atexit.register(lambda: tcp_sock_b.close() if tcp_sock_b else None)
+
+    def send_exact_fn(dest, tag, count, size, gap):
+        if args.tcp:
+            sock = tcp_sock_a if dest == dest_a else tcp_sock_b
+            return send_exact_tcp(dest, tag, count, size, gap, sock)
+        return send_exact(dest, tag, count, size, gap)
+
+    def send_window_fn(dest, tag, size, duration, kbps, start):
+        if args.tcp:
+            sock = tcp_sock_a if dest == dest_a else tcp_sock_b
+            return send_window_tcp(dest, tag, size, duration, kbps, start, sock)
+        return send_window(dest, tag, size, duration, kbps, start)
+
     def reset() -> None:
         listen_a.stats.clear()
         listen_b.stats.clear()
 
     def run_integrity() -> tuple[int, int]:
         reset()
-        send_exact(dest_a, b"A", args.integrity, 64, 0.03)
+        send_exact_fn(dest_a, b"A", args.integrity, 64, 0.03)
         time.sleep(args.drain)
         ab = listen_b.stats.packets
         reset()
-        send_exact(dest_b, b"B", args.integrity, 64, 0.03)
+        send_exact_fn(dest_b, b"B", args.integrity, 64, 0.03)
         time.sleep(args.drain)
         ba = listen_a.stats.packets
         return ab, ba
 
     def phase(
-        senders: list[tuple[tuple[str, int], bytes, Listener]],
+        senders: list[tuple[tuple[str, int], bytes, Listener | TcpListener]],
         kbps: float,
     ) -> list[PhaseResult]:
         reset()
@@ -834,7 +1033,7 @@ def main() -> int:
         threads: list[threading.Thread] = []
 
         def run_one(idx: int, dest: tuple[str, int], tag: bytes) -> None:
-            results[idx] = send_window(dest, tag, args.size, args.duration, kbps, start)
+            results[idx] = send_window_fn(dest, tag, args.size, args.duration, kbps, start)
 
         for i, (dest, tag, _lis) in enumerate(senders):
             t = threading.Thread(target=run_one, args=(i, dest, tag))
@@ -857,6 +1056,9 @@ def main() -> int:
                 offer = auto_offer_kbps_fec(
                     mod, args.size, args.fec_k, args.fec_n, args.fec_intra, args.fec_nsym
                 )
+            elif args.tcp:
+                # TCP ARQ needs reverse ACK capacity; target ~50% of UDP air estimate.
+                offer = auto_offer_kbps(mod, args.size) * 0.55
             else:
                 offer = auto_offer_kbps(mod, args.size)
         paced = offer > 0
@@ -913,7 +1115,9 @@ def main() -> int:
             f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
             f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
         )
-        result.uni_ok = loss_ok(result.uni_ab, 5.0, paced) and loss_ok(result.uni_ba, 5.0, paced)
+        result.uni_ok = loss_ok(
+            result.uni_ab, 25.0 if args.tcp else 5.0, paced
+        ) and loss_ok(result.uni_ba, 25.0 if args.tcp else 5.0, paced)
 
         if args.bidir:
             bidir_offer = (offer / 2.0) if paced else offer

@@ -1,32 +1,26 @@
 set(winject_srcs
-    "winject/console.cpp"
-    "winject/netmgr/dhcp_client.cpp"
-    "winject/netmgr/dhcp_server.cpp"
-    "winject/netmgr/ethernet_rmii.cpp"
-    "winject/netmgr/manager.cpp"
-    "winject/ota.cpp"
-    "winject/radio/frame.cpp"
-    "winject/radio/wifi.cpp"
-    "winject/radio/wifi_rx.cpp"
-    "winject/radio/wifi_tx.cpp"
-    "winject/settings.cpp"
-    "winject/upstream_rx.cpp"
-    "winject/upstream_tx.cpp"
+    "winject-esp32/console.cpp"
+    "winject-esp32/netmgr/dhcp_client.cpp"
+    "winject-esp32/netmgr/dhcp_server.cpp"
+    "winject-esp32/netmgr/ethernet_rmii.cpp"
+    "winject-esp32/netmgr/manager.cpp"
+    "winject-esp32/ota.cpp"
+    "winject-esp32/radio/frame.cpp"
+    "winject-esp32/radio/wifi.cpp"
+    "winject-esp32/radio/wifi_rx.cpp"
+    "winject-esp32/radio/wifi_tx.cpp"
+    "winject-esp32/settings.cpp"
+    "winject-esp32/upstream_rx.cpp"
+    "winject-esp32/upstream_tx.cpp"
 )
 
-if("${CMAKE_BINARY_DIR}" MATCHES "/test$")
-    set(app_srcs "test/main.cpp")
-else()
-    set(app_srcs "winject/main.cpp")
-endif()
-
 idf_component_register(
-    SRCS ${winject_srcs} ${app_srcs}
+    SRCS ${winject_srcs} "winject-esp32/main.cpp"
     INCLUDE_DIRS
         "."
-        "winject"
-        "winject/netmgr"
-        "winject/radio"
+        "winject-esp32"
+        "winject-esp32/netmgr"
+        "winject-esp32/radio"
     REQUIRES
         app_update
         esp_driver_gpio
