@@ -180,7 +180,7 @@ bool wifi_rx::set_allow_failed_crc(bool allow)
         return false;
     }
     allow_failed_crc_.store(allow, std::memory_order_relaxed);
-    semaphore::lock lock(radio_.lock(), pdMS_TO_TICKS(1000));
+    bfc::semaphore::lock lock(radio_.lock(), pdMS_TO_TICKS(1000));
     if (!lock)
     {
         return false;

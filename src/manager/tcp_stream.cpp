@@ -11,6 +11,9 @@ namespace
 {
 constexpr auto kRexmit = std::chrono::milliseconds(20);
 constexpr auto kConnectTimeout = std::chrono::seconds(30);
+// No cumulative ACK progress with outstanding DATA: stop retx before the
+// radio inject path is wedged by an endless UNACKED window.
+constexpr auto kDataStallTimeout = std::chrono::seconds(5);
 
 uint16_t read_u16(const uint8_t* p)
 {
@@ -43,6 +46,7 @@ void TcpStream::reset()
     peer_close_ = false;
     ack_pending_ = false;
     connect_give_up_ = false;
+    data_stall_give_up_ = false;
     tx_seq_ = 0;
     rx_seq_ = 0;
     tx_acked_ = 0;
@@ -62,8 +66,10 @@ void TcpStream::local_up()
     }
     local_ = true;
     connect_give_up_ = false;
+    data_stall_give_up_ = false;
     connect_started_ = std::chrono::steady_clock::now();
     last_connect_ = connect_started_;
+    last_ack_progress_ = connect_started_;
     queue_ctrl(kTypeConnect);
 }
 
@@ -170,7 +176,13 @@ void TcpStream::queue_data()
         memcpy(p.frame.data() + kHeaderSize, tcp_in_.data() + tcp_in_off_, n);
         tcp_in_off_ += n;
         tx_seq_ = static_cast<uint16_t>(tx_seq_ + 1);
+        const bool first_outstanding = unacked_.empty();
         unacked_.push_back(std::move(p));
+        if (first_outstanding)
+        {
+            // Stall timer runs only while DATA is outstanding.
+            last_ack_progress_ = std::chrono::steady_clock::now();
+        }
     }
     if (tcp_in_off_ > 65536 || tcp_in_off_ == tcp_in_.size())
     {
@@ -210,6 +222,8 @@ void TcpStream::apply_ack(uint16_t ack)
         unacked_.pop_front();
         tx_acked_ = static_cast<uint16_t>(tx_acked_ + 1);
     }
+    last_ack_progress_ = std::chrono::steady_clock::now();
+    data_stall_give_up_ = false;
 }
 
 void TcpStream::apply_sack(const uint8_t* data, size_t len)
@@ -479,6 +493,12 @@ void TcpStream::on_tick()
             last_connect_ = now;
             queue_ctrl(kTypeConnect);
         }
+    }
+    if (established() && !unacked_.empty() &&
+        now - last_ack_progress_ >= kDataStallTimeout)
+    {
+        data_stall_give_up_ = true;
+        return;
     }
     queue_data();
 }

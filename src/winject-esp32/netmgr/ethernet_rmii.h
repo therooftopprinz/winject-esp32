@@ -26,7 +26,7 @@ public:
     void set_using_static(bool using_static) override;
     bool netif_is_dhcp_server() const override;
     esp_netif_t* netif() override;
-    semaphore& mutex() override;
+    bfc::semaphore& mutex() override;
 
     bool has_ipv4() const override;
     bool apply_static_ip(uint32_t ip) override;
@@ -53,7 +53,7 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> using_static_{false};
     std::atomic<bool> ready_{false};
-    semaphore netif_lock_;
+    bfc::semaphore netif_lock_;
     esp_eth_handle_t eth_handle_ = nullptr;
     esp_eth_netif_glue_handle_t eth_glue_ = nullptr;
     esp_netif_t* eth_netif_ = nullptr;

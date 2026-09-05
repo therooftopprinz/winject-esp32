@@ -135,7 +135,7 @@ bool manager::apply_network()
     {
         return true;
     }
-    semaphore::lock lock(eth_.mutex());
+    bfc::semaphore::lock lock(eth_.mutex());
     if (!lock)
     {
         return false;
@@ -162,7 +162,7 @@ void manager::on_static_fallback(uint32_t gen)
         return;
     }
 
-    semaphore::lock lock(eth_.mutex());
+    bfc::semaphore::lock lock(eth_.mutex());
     if (!lock)
     {
         ESP_LOGE(TAG, "static fallback lock failed");
@@ -369,7 +369,7 @@ bool manager::set_ip(uint32_t ip)
     }
     if (eth_.using_static())
     {
-        semaphore::lock lock(eth_.mutex());
+        bfc::semaphore::lock lock(eth_.mutex());
         if (!lock)
         {
             return false;

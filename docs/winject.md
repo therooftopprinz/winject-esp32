@@ -93,6 +93,7 @@ Commands:
 - `set_cca_enabled|sce` `<is_enabled>` - Enable or disable TX CCA / CSMA (`1`/`0`, `true`/`false`, `on`/`off`). Disabling lets inject skip wait-for-idle.
 - `set_tx_power|stp` `<dbm>` - Maximum Wi-Fi TX power in dBm (`2`–`20`). Default `20`. ESP32 maps this to 0.25 dBm units internally.
 - `status|s` - Ethernet, mode, radio, and upstream
+- `reset|r` - software-restart the ESP32 (`esp_restart`)
 
 Also: `help|h`.
 

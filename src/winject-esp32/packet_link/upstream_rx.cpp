@@ -16,6 +16,12 @@
 
 static const char* TAG = "upstream_rx";
 
+upstream_rx& upstream_rx::instance()
+{
+    static upstream_rx inst;
+    return inst;
+}
+
 static bool airport_ok(const uint8_t airport[6])
 {
     if (airport == nullptr)
@@ -151,10 +157,14 @@ void upstream_rx::inject_one(bfc::socket& sock, const uint8_t sa[6])
         {
             continue;
         }
-        wifi::tx_slot_s* slot = radio.take_tx();
+        // Non-blocking: never sleep on the TX pool while holding lock_ (that
+        // deadlocks the console reactor in fill_status / set_upstream_*).
+        wifi::tx_slot_s* slot = radio.take_tx(0);
         if (slot == nullptr)
         {
-            continue;
+            // Datagram already consumed from the UDP socket; drop under
+            // backpressure and stop so we release lock_ promptly.
+            break;
         }
         const size_t framed = frameWrap(buf_, static_cast<size_t>(n), sa,
                                         slot->data, sizeof(slot->data));
@@ -164,7 +174,7 @@ void upstream_rx::inject_one(bfc::socket& sock, const uint8_t sa[6])
             continue;
         }
         slot->len = static_cast<uint16_t>(framed);
-        if (!radio.post_tx(slot))
+        if (!radio.post_tx(slot, 0))
         {
             continue;
         }
@@ -191,7 +201,7 @@ void upstream_rx::run()
         if (eth_ == nullptr || !eth_->connected())
         {
             {
-                semaphore::lock lock(lock_);
+                bfc::semaphore::lock lock(lock_);
                 close_sockets();
             }
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -202,7 +212,7 @@ void upstream_rx::run()
         fd_set rfds;
         bool sockets_ok = false;
         {
-            semaphore::lock lock(lock_);
+            bfc::semaphore::lock lock(lock_);
             sockets_ok = ensure_sockets();
             if (sockets_ok)
             {
@@ -239,8 +249,10 @@ void upstream_rx::run()
             vTaskDelay(pdMS_TO_TICKS(2));
         }
 
+        // Hold lock_ only for the inject pass; take_tx/post_tx are non-blocking
+        // so a full WiFi TX pool cannot pin this lock (and the console) forever.
         {
-            semaphore::lock lock(lock_);
+            bfc::semaphore::lock lock(lock_);
             inject_pending();
         }
     }
@@ -286,7 +298,7 @@ bool upstream_rx::load(const upstream_bind_s* rx, uint8_t rx_count)
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     close_sockets();
     for (size_t i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
@@ -318,7 +330,7 @@ void upstream_rx::fill_status(upstream_bind_s* out, uint8_t* count)
         return;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     for (size_t i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
         if (rx_[i].used)
@@ -339,7 +351,7 @@ bool upstream_rx::set(const uint8_t airport[6], uint16_t port)
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     int idx = find_airport(airport);
     if (idx < 0)
     {
@@ -385,7 +397,7 @@ bool upstream_rx::unset(const uint8_t airport[6])
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     int idx = find_airport(airport);
     if (idx < 0)
     {

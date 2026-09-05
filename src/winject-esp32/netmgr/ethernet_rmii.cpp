@@ -294,7 +294,7 @@ esp_netif_t* ethernet_rmii::netif()
     return eth_netif_;
 }
 
-semaphore& ethernet_rmii::mutex()
+bfc::semaphore& ethernet_rmii::mutex()
 {
     return netif_lock_;
 }
@@ -395,7 +395,7 @@ bool ethernet_rmii::local_ipv4(uint32_t* out)
     {
         return false;
     }
-    semaphore::lock lock(netif_lock_);
+    bfc::semaphore::lock lock(netif_lock_);
     if (!lock)
     {
         return false;
@@ -421,7 +421,7 @@ bool ethernet_rmii::mac(uint8_t mac[6])
         return false;
     }
     {
-        semaphore::lock lock(netif_lock_);
+        bfc::semaphore::lock lock(netif_lock_);
         if (lock)
         {
             const bool ok =
@@ -442,7 +442,7 @@ bool ethernet_rmii::link_speed_mbps(uint32_t* mbps)
     {
         return false;
     }
-    semaphore::lock lock(netif_lock_);
+    bfc::semaphore::lock lock(netif_lock_);
     if (!lock)
     {
         return false;

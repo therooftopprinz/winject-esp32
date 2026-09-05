@@ -17,6 +17,12 @@
 
 static const char* TAG = "upstream_tx";
 
+upstream_tx& upstream_tx::instance()
+{
+    static upstream_tx inst;
+    return inst;
+}
+
 static bool airport_ok(const uint8_t airport[6])
 {
     if (airport == nullptr)
@@ -131,9 +137,9 @@ void upstream_tx::send_payload(const uint8_t* payload, size_t payload_len,
     dest.sin_family = AF_INET;
     dest.sin_port = htons(port);
     dest.sin_addr.s_addr = host;
-    const ssize_t n =
-        send_sock_.send(payload, payload_len, 0,
-                        reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+    const ssize_t n = send_sock_.send(payload, payload_len, 0,
+                                      reinterpret_cast<struct sockaddr*>(&dest),
+                                      sizeof(dest));
     if (n == static_cast<ssize_t>(payload_len))
     {
         wifi::instance().note_udp_fwd_pkt();
@@ -203,7 +209,7 @@ void upstream_tx::run()
         if (eth_ == nullptr || !eth_->connected())
         {
             {
-                semaphore::lock lock(lock_);
+                bfc::semaphore::lock lock(lock_);
                 close_sockets();
             }
             drain_radio();
@@ -213,7 +219,7 @@ void upstream_tx::run()
 
         bool ready = false;
         {
-            semaphore::lock lock(lock_);
+            bfc::semaphore::lock lock(lock_);
             ready = ensure_sockets() && any_tx();
             if (!ready)
             {
@@ -234,7 +240,7 @@ void upstream_tx::run()
         }
 
         {
-            semaphore::lock lock(lock_);
+            bfc::semaphore::lock lock(lock_);
             if (!ensure_sockets() || !any_tx())
             {
                 continue;
@@ -285,7 +291,7 @@ bool upstream_tx::load(const upstream_dest_s* tx, uint8_t tx_count)
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     close_sockets();
     for (size_t i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
@@ -318,7 +324,7 @@ void upstream_tx::fill_status(upstream_dest_s* out, uint8_t* count)
         return;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     for (size_t i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
         if (tx_[i].used)
@@ -340,7 +346,7 @@ bool upstream_tx::set(const uint8_t airport[6], uint32_t host, uint16_t port)
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     int idx = find_airport(airport);
     if (idx < 0)
     {
@@ -378,7 +384,7 @@ bool upstream_tx::unset(const uint8_t airport[6])
         return false;
     }
 
-    semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock_);
     int idx = find_airport(airport);
     if (idx < 0)
     {

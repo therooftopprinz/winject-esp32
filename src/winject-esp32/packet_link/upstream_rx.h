@@ -5,8 +5,8 @@
 
 #include <stdint.h>
 
+#include "bfc-esp32/semaphore.hpp"
 #include "bfc-esp32/socket.hpp"
-#include "winject-esp32/semaphore.h"
 
 class ethernet;
 
@@ -20,7 +20,7 @@ struct upstream_bind_s
 class upstream_rx
 {
 public:
-    upstream_rx() = default;
+    static upstream_rx& instance();
     upstream_rx(const upstream_rx&) = delete;
     upstream_rx& operator=(const upstream_rx&) = delete;
 
@@ -32,6 +32,8 @@ public:
     bool unset(const uint8_t airport[6]);
 
 private:
+    upstream_rx() = default;
+
     struct entry_s
     {
         bool used = false;
@@ -56,7 +58,7 @@ private:
 
     entry_s rx_[WIFI_AIRPORT_MAX];
     uint8_t buf_[WIFI_RADIO_MAX_FRAME]{};
-    semaphore lock_;
+    bfc::semaphore lock_;
     ethernet* eth_ = nullptr;
     bool ready_ = false;
 };

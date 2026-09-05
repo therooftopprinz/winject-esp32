@@ -77,7 +77,20 @@ public:
     void on_tick() override;
     bool should_give_up() const
     {
+        return connect_give_up_ || data_stall_give_up_;
+    }
+    void clear_give_up()
+    {
+        connect_give_up_ = false;
+        data_stall_give_up_ = false;
+    }
+    bool connect_timed_out() const
+    {
         return connect_give_up_;
+    }
+    bool data_stalled() const
+    {
+        return data_stall_give_up_;
     }
 
 private:
@@ -107,12 +120,14 @@ private:
     bool peer_close_ = false;
     bool ack_pending_ = false;
     bool connect_give_up_ = false;
+    bool data_stall_give_up_ = false;
     uint16_t tx_seq_ = 0;
     uint16_t rx_seq_ = 0;
     uint16_t tx_acked_ = 0;
     size_t tcp_in_off_ = 0;
     std::chrono::steady_clock::time_point connect_started_{};
     std::chrono::steady_clock::time_point last_connect_{};
+    std::chrono::steady_clock::time_point last_ack_progress_{};
     std::vector<uint8_t> tcp_in_;
     std::deque<uint8_t> tcp_out_;
     std::deque<Pending> unacked_;

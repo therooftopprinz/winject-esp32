@@ -3,6 +3,7 @@
 #include "config.h"
 #include "frame.h"
 #include "ota.h"
+#include "settings.h"
 #include "upstream_rx.h"
 #include "upstream_tx.h"
 #include "wifi.h"
@@ -24,7 +25,6 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "manager.h"
-#include "settings.h"
 
 static const char* TAG = "console";
 
@@ -435,6 +435,7 @@ void console::print_help(const out_s& out)
     write(out, "save|sv [0-9]\n");
     write(out, "use|u <0-9>\n");
     write(out, "status|s\n");
+    write(out, "reset|r\n");
     write(out, "help\n");
     write(out, "modulations: ");
     write(out, wifi::modulation_list());
@@ -445,11 +446,11 @@ void console::print_help(const out_s& out)
 void console::print_path_metrics(const out_s& out, const wifi_status_s& radio)
 {
     print(out,
-          " udp_rx_pkt=%u udp_fwd_pkt=%u udp_tx_pkt=%u udp_tx_dropped=%u "
+          " udp_rx_pkt=%u udp_fwd_pkt=%u udp_tx_pkt=%u "
           "udp_tx_failed=%u udp_rx_crc_err=%u udp_rx_dropped=%u tx_queue=%u "
           "rx_queue=%u\n",
           (unsigned)radio.udp_rx_pkt, (unsigned)radio.udp_fwd_pkt,
-          (unsigned)radio.udp_tx_pkt, (unsigned)radio.udp_tx_dropped,
+          (unsigned)radio.udp_tx_pkt,
           (unsigned)radio.udp_tx_failed, (unsigned)radio.udp_rx_crc_err,
           (unsigned)radio.udp_rx_dropped, (unsigned)radio.tx_queue,
           (unsigned)radio.rx_queue);
@@ -470,10 +471,12 @@ void console::print_status(const out_s& out)
     const size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     const size_t heap_usage =
         heap_total > heap_free ? heap_total - heap_free : 0;
-    print(out, "uptime=%lus reset_reason=%s heap_usage=%u heap_free=%u\n",
+    print(out,
+          "status uptime=%lus reset_reason=%s heap_usage=%u heap_free=%u "
+          "mode=%s\n",
           (unsigned long)(esp_timer_get_time() / 1000000),
           reset_reason_name(esp_reset_reason()), (unsigned)heap_usage,
-          (unsigned)heap_free);
+          (unsigned)heap_free, frameModeName(frameGetMode()));
 
     uint32_t eth_ip = 0;
     const bool have_ip = netmgr_->local_ipv4(&eth_ip);
@@ -527,21 +530,27 @@ void console::print_status(const out_s& out)
     }
 
     print(out,
-          "wifi mode=%s channel=%u modulation=%s cca=%s tx_power=%d "
+          "wifi channel=%u modulation=%s cca=%s tx_power=%d "
           "allow_failed_crc=%s\n",
-          frameModeName(frameGetMode()), radio.channel,
+          radio.channel,
           radio.modulation != nullptr ? radio.modulation : "-",
           radio.cca_enabled ? "enabled" : "disabled", radio.tx_power_dbm,
           radio.allow_failed_crc ? "true" : "false");
 
-    if (radio.rx_air_valid && radio.rx_modulation != nullptr)
+    char tx_latency[16] = "-";
+    if (radio.tx_latency_valid)
     {
-        print(out, "radio modulation=%s rssi=%d snr=%d\n", radio.rx_modulation,
-              radio.rx_rssi, radio.rx_snr);
+        snprintf(tx_latency, sizeof(tx_latency), "%uus",
+                 (unsigned)radio.tx_latency_us);
+    }
+    if (radio.rx_air_valid)
+    {
+        print(out, "radio rssi=%d snr=%d tx_latency=%s\n", radio.rx_rssi,
+              radio.rx_snr, tx_latency);
     }
     else
     {
-        write(out, "radio modulation=- rssi=- snr=-\n");
+        print(out, "radio rssi=- snr=- tx_latency=%s\n", tx_latency);
     }
 
     bool tx_used[WIFI_AIRPORT_MAX] = {};
@@ -646,8 +655,8 @@ void console::handle_line(const char* line, const out_s& out)
         uint8_t airport[6] = {};
         if (arg1 != nullptr)
         {
-            if (!parse_airport(arg1, airport) || arg2 != nullptr || arg3 != nullptr ||
-                extra != nullptr)
+            if (!parse_airport(arg1, airport) || arg2 != nullptr ||
+                arg3 != nullptr || extra != nullptr)
             {
                 write(out, "error: usage unset_upstream_rx [airport]\n");
                 return;
@@ -678,8 +687,8 @@ void console::handle_line(const char* line, const out_s& out)
         uint8_t airport[6] = {};
         if (arg1 != nullptr)
         {
-            if (!parse_airport(arg1, airport) || arg2 != nullptr || arg3 != nullptr ||
-                extra != nullptr)
+            if (!parse_airport(arg1, airport) || arg2 != nullptr ||
+                arg3 != nullptr || extra != nullptr)
             {
                 write(out, "error: usage unset_upstream_tx [airport]\n");
                 return;
@@ -926,7 +935,7 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "save", "sv"))
     {
-        uint8_t slot = settingsCurrentSlot();
+        uint8_t slot = settings::instance().current_slot();
         if (arg1 != nullptr)
         {
             char* end = nullptr;
@@ -939,7 +948,7 @@ void console::handle_line(const char* line, const out_s& out)
             }
             slot = static_cast<uint8_t>(value);
         }
-        if (!settingsSave(slot, *rx_, *tx_, *netmgr_))
+        if (!settings::instance().save(slot))
         {
             write(out, "error: failed to save slot\n");
             return;
@@ -958,13 +967,26 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage use <0-9>\n");
             return;
         }
-        if (!settingsUse(static_cast<uint8_t>(value), *rx_, *tx_, *netmgr_))
+        if (!settings::instance().use(static_cast<uint8_t>(value)))
         {
             write(out, "error: slot empty\n");
             return;
         }
         write(out, "ok\n");
         return;
+    }
+
+    if (cmd_is(cmd, "reset", "r"))
+    {
+        if (arg1 != nullptr)
+        {
+            write(out, "error: usage reset\n");
+            return;
+        }
+        write(out, "ok\n");
+        ESP_LOGI(TAG, "reset requested");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
     }
 
     write(out, "error: unknown command, type help\n");

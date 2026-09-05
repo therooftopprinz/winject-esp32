@@ -1,8 +1,6 @@
 #ifndef WINJECT_FRAME_H_
 #define WINJECT_FRAME_H_
 
-#include "winject-esp32/semaphore.h"
-
 #include <stddef.h>
 #include <stdint.h>
 

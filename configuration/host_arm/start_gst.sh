@@ -17,7 +17,10 @@ DEVICE="${DEVICE:-/dev/video0}"
 HOST="${HOST:-127.0.0.1}"
 WIDTH="${WIDTH:-1920}"
 HEIGHT="${HEIGHT:-1080}"
-FRAMERATE="${FRAMERATE:-30/1}"
+# CAPTURE_FRAMERATE is the UVC caps. ENCODER_FRAMERATE is after videorate.
+# FRAMERATE / CAPATURE_FRAMERATE remain aliases for older env files.
+CAPTURE_FRAMERATE="${CAPTURE_FRAMERATE:-${CAPATURE_FRAMERATE:-${FRAMERATE:-30/1}}}"
+ENCODER_FRAMERATE="${ENCODER_FRAMERATE:-$CAPTURE_FRAMERATE}"
 BITRATE="${BITRATE:-10000}"
 GOP="${GOP:-30}"
 FORMAT="${FORMAT:-auto}"
@@ -126,17 +129,17 @@ cmd=(gst-launch-1.0 -e v4l2src "device=${DEVICE}" do-timestamp=true)
 case "$FORMAT" in
     mjpeg)
         JPEGDEC="$(pick_jpegdec)"
-        echo "UVC ${DEVICE} ${WIDTH}x${HEIGHT}@${FRAMERATE} FORMAT=mjpeg ${JPEGDEC} -> ${ENCODER} ${BITRATE}kbps ${TRANSPORT}://${HOST}:${PORT}" >&2
-        cmd+=(! "image/jpeg,width=${WIDTH},height=${HEIGHT},framerate=${FRAMERATE}")
+        echo "UVC ${DEVICE} ${WIDTH}x${HEIGHT}@${CAPTURE_FRAMERATE} FORMAT=mjpeg ${JPEGDEC} -> ${ENCODER} ${ENCODER_FRAMERATE} ${BITRATE}kbps ${TRANSPORT}://${HOST}:${PORT}" >&2
+        cmd+=(! "image/jpeg,width=${WIDTH},height=${HEIGHT},framerate=${CAPTURE_FRAMERATE}")
         if gst_has jpegparse; then
             cmd+=(! jpegparse)
         fi
         cmd+=(! "${JPEGDEC}" ! videoconvert ! "video/x-raw,format=NV12")
         ;;
     raw)
-        echo "UVC ${DEVICE} ${WIDTH}x${HEIGHT}@${FRAMERATE} FORMAT=raw -> ${ENCODER} ${BITRATE}kbps ${TRANSPORT}://${HOST}:${PORT}" >&2
+        echo "UVC ${DEVICE} ${WIDTH}x${HEIGHT}@${CAPTURE_FRAMERATE} FORMAT=raw -> ${ENCODER} ${ENCODER_FRAMERATE} ${BITRATE}kbps ${TRANSPORT}://${HOST}:${PORT}" >&2
         cmd+=(
-            ! "video/x-raw,width=${WIDTH},height=${HEIGHT},framerate=${FRAMERATE}"
+            ! "video/x-raw,width=${WIDTH},height=${HEIGHT},framerate=${CAPTURE_FRAMERATE}"
             ! videoconvert
             ! "video/x-raw,format=NV12"
         )
@@ -146,6 +149,14 @@ case "$FORMAT" in
         exit 1
         ;;
 esac
+
+if [[ "$ENCODER_FRAMERATE" != "$CAPTURE_FRAMERATE" ]]; then
+    if ! gst_has videorate; then
+        echo "videorate required when ENCODER_FRAMERATE (${ENCODER_FRAMERATE}) != CAPTURE_FRAMERATE (${CAPTURE_FRAMERATE})" >&2
+        exit 1
+    fi
+    cmd+=(! videorate drop-only=true skip-to-first=true ! "video/x-raw,format=NV12,framerate=${ENCODER_FRAMERATE}")
+fi
 
 cmd+=(! queue max-size-buffers=4 leaky=downstream)
 if ((${#ENCODER_ARGS[@]})); then

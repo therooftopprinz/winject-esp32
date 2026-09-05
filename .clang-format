@@ -15,7 +15,7 @@ AllowShortLoopsOnASingleLine: false
 InsertBraces: true
 IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '^"(config|console|dhcp_client|dhcp_server|ethernet|ethernet_rmii|frame|indicator_led|ota|packet_pool|packet_queue|semaphore|upstream_rx|upstream_tx|wifi|wifi_rx|wifi_tx)\.h"'
+  - Regex: '^"(config|console|dhcp_client|dhcp_server|ethernet|ethernet_rmii|frame|indicator_led|ota|packet_pool|packet_queue|semaphore|settings|upstream_rx|upstream_tx|wifi|wifi_rx|wifi_tx)\.h"'
     Priority: 1
   - Regex: '^<'
     Priority: 2

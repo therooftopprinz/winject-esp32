@@ -1,9 +1,12 @@
-#ifndef WINJECT_SEMAPHORE_H_
-#define WINJECT_SEMAPHORE_H_
+#ifndef BFC_SEMAPHORE_HPP_
+#define BFC_SEMAPHORE_HPP_
 
 #ifdef WINJECT_HOST_TEST
 
 #include <mutex>
+
+namespace bfc
+{
 
 class semaphore
 {
@@ -37,7 +40,9 @@ public:
     class lock
     {
     public:
-        explicit lock(semaphore& sem) : sem_(&sem), owned_(sem.take()) {}
+        explicit lock(semaphore& sem) : sem_(&sem), owned_(sem.take())
+        {
+        }
 
         ~lock()
         {
@@ -72,10 +77,15 @@ private:
     bool ready_ = false;
 };
 
+}  // namespace bfc
+
 #else
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+
+namespace bfc
+{
 
 // FreeRTOS mutex (priority inheritance) with unique_lock-style RAII.
 // Not for ISR use. Binary/counting semaphores are not this type.
@@ -154,6 +164,8 @@ private:
     SemaphoreHandle_t handle_ = nullptr;
 };
 
+}  // namespace bfc
+
 #endif  // WINJECT_HOST_TEST
 
-#endif  // WINJECT_SEMAPHORE_H_
+#endif  // BFC_SEMAPHORE_HPP_

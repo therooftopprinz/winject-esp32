@@ -203,7 +203,6 @@ uint64_t Scheduler::take_air_bytes()
 void Scheduler::log_stats(double interval_sec,
                           const std::vector<Upstream*>& ups)
 {
-    (void)take_air_bytes();
     auto kbps = [interval_sec](uint64_t bytes) -> double
     {
         return interval_sec > 0.0 ? (bytes * 8.0) / interval_sec / 1000.0 : 0.0;
@@ -217,7 +216,7 @@ void Scheduler::log_stats(double interval_sec,
         double rx_kbps = 0.0;
     };
     std::vector<Row> rows;
-    uint64_t total_tx = 0;
+    uint64_t total_tx = take_air_bytes();
     uint64_t total_rx = 0;
     for (size_t i = 0; i < ups.size(); i++)
     {
@@ -230,8 +229,7 @@ void Scheduler::log_stats(double interval_sec,
         {
             continue;
         }
-        total_tx += st.tx_bytes;
-        total_rx += st.rx_bytes;
+        total_rx += st.air_rx_bytes;
         rows.push_back(Row{i, st, kbps(st.tx_bytes), kbps(st.rx_bytes)});
     }
 

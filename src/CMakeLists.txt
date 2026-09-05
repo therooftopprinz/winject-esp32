@@ -5,13 +5,13 @@ set(winject_srcs
     "winject-esp32/netmgr/ethernet_rmii.cpp"
     "winject-esp32/netmgr/manager.cpp"
     "winject-esp32/ota.cpp"
+    "winject-esp32/packet_link/upstream_rx.cpp"
+    "winject-esp32/packet_link/upstream_tx.cpp"
     "winject-esp32/radio/frame.cpp"
     "winject-esp32/radio/wifi.cpp"
     "winject-esp32/radio/wifi_rx.cpp"
     "winject-esp32/radio/wifi_tx.cpp"
     "winject-esp32/settings.cpp"
-    "winject-esp32/upstream_rx.cpp"
-    "winject-esp32/upstream_tx.cpp"
 )
 
 idf_component_register(
@@ -20,6 +20,7 @@ idf_component_register(
         "."
         "winject-esp32"
         "winject-esp32/netmgr"
+        "winject-esp32/packet_link"
         "winject-esp32/radio"
     REQUIRES
         app_update

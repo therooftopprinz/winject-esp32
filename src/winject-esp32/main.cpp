@@ -3,6 +3,7 @@
 #include "ethernet.h"
 #include "frame.h"
 #include "ota.h"
+#include "settings.h"
 #include "upstream_rx.h"
 #include "upstream_tx.h"
 #include "wifi.h"
@@ -15,13 +16,12 @@
 #include "freertos/task.h"
 #include "manager.h"
 #include "nvs_flash.h"
-#include "settings.h"
 
 static const char* TAG = "winject";
 static ethernet& g_ethernet = ethernet::instance();
 static manager& g_netmgr = manager::instance();
-static upstream_rx g_upstream_rx;
-static upstream_tx g_upstream_tx;
+static upstream_rx& g_upstream_rx = upstream_rx::instance();
+static upstream_tx& g_upstream_tx = upstream_tx::instance();
 static console g_console;
 
 extern "C" void app_main(void)
@@ -39,7 +39,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    settingsLoadCurrent(g_netmgr);
+    settings::instance().load_current();
     if (!g_netmgr.start())
     {
         ESP_LOGE(TAG, "network manager start failed");
@@ -60,8 +60,7 @@ extern "C" void app_main(void)
     {
         ESP_LOGE(TAG, "upstream init failed");
     }
-    else if (radio_ok &&
-             !settingsApplyLive(g_upstream_rx, g_upstream_tx, g_netmgr))
+    else if (radio_ok && !settings::instance().apply_live())
     {
         ESP_LOGE(TAG, "settings apply failed");
     }

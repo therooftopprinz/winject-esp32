@@ -10,7 +10,7 @@
 #
 # Usage:
 #   ./scripts/manager_lat_test.sh
-#   ./scripts/manager_lat_test.sh --no-cca --count 800 --interval-ms 1
+#   ./scripts/manager_lat_test.sh --a 192.168.127.181 --b 192.168.128.119 --no-cca --count 800
 #   CASES=raw,fec10-15 ./scripts/manager_lat_test.sh
 #   ./scripts/manager_lat_test.sh 192.168.253.11 192.168.253.12 192.168.253.106
 
@@ -29,19 +29,29 @@ mkdir -p "$LOG_DIR"
 RADIO_A="192.168.253.11"
 RADIO_B="192.168.253.12"
 HOST_IP="192.168.253.106"
+HOST_SET=0
 LAT_ARGS=()
 CASES="${CASES:-raw,fec10-15,fec10-11,tcp}"
 
 if [[ "${1:-}" == "--" ]]; then
-  LAT_ARGS=("${@:2}")
-elif [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  RADIO_A="$1"
-  [[ $# -ge 2 ]] && RADIO_B="$2"
-  [[ $# -ge 3 ]] && HOST_IP="$3"
-  [[ $# -ge 4 ]] && LAT_ARGS=("${@:4}")
-elif [[ $# -ge 1 ]]; then
-  LAT_ARGS=("$@")
+  shift
 fi
+
+if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  RADIO_A="$1"
+  shift
+  if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    RADIO_B="$1"
+    shift
+  fi
+  if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    HOST_IP="$1"
+    HOST_SET=1
+    shift
+  fi
+fi
+
+LAT_ARGS=("$@")
 
 for a in "${LAT_ARGS[@]+"${LAT_ARGS[@]}"}"; do
   if [[ "$a" == "-h" || "$a" == "--help" ]]; then
@@ -56,6 +66,41 @@ i=0
 while [[ $i -lt ${#LAT_ARGS[@]} ]]; do
   a="${LAT_ARGS[$i]}"
   case "$a" in
+    --a)
+      i=$((i + 1))
+      RADIO_A="${LAT_ARGS[$i]:-}"
+      if [[ -z "$RADIO_A" ]]; then
+        echo "--a needs an IP" >&2
+        exit 1
+      fi
+      ;;
+    --a=*)
+      RADIO_A="${a#--a=}"
+      ;;
+    --b)
+      i=$((i + 1))
+      RADIO_B="${LAT_ARGS[$i]:-}"
+      if [[ -z "$RADIO_B" ]]; then
+        echo "--b needs an IP" >&2
+        exit 1
+      fi
+      ;;
+    --b=*)
+      RADIO_B="${a#--b=}"
+      ;;
+    --host)
+      i=$((i + 1))
+      HOST_IP="${LAT_ARGS[$i]:-}"
+      if [[ -z "$HOST_IP" ]]; then
+        echo "--host needs an IP" >&2
+        exit 1
+      fi
+      HOST_SET=1
+      ;;
+    --host=*)
+      HOST_IP="${a#--host=}"
+      HOST_SET=1
+      ;;
     --no-cca)
       PREP_EXTRA+=(--no-cca)
       ;;
@@ -79,6 +124,10 @@ while [[ $i -lt ${#LAT_ARGS[@]} ]]; do
   esac
   i=$((i + 1))
 done
+
+if [[ "$HOST_SET" -eq 0 ]]; then
+  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 2323)); print(s.getsockname()[0]); s.close()")"
+fi
 
 ensure_winject_manager "$ROOT"
 

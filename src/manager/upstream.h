@@ -7,8 +7,12 @@
 struct StreamStats
 {
     const char* proto = nullptr;
+    // STREAM-N: unfecced / decoded payload bytes.
     uint64_t tx_bytes = 0;
     uint64_t rx_bytes = 0;
+    // STREAM TOTAL: on-air datagram bytes (FEC shards, TCP headers).
+    uint64_t air_tx_bytes = 0;
+    uint64_t air_rx_bytes = 0;
     size_t queue = 0;
     size_t unacked = 0;
     bool tcp = false;
@@ -40,7 +44,7 @@ public:
     {
         return 0;
     }
-    // Interval counters for periodic STREAM stats. Zeros TX/RX byte totals.
+    // Interval counters for periodic STREAM stats. Zeros payload and air totals.
     virtual StreamStats take_stats()
     {
         StreamStats s;

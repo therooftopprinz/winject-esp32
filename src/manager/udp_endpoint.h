@@ -42,6 +42,7 @@ private:
     uint64_t radio_rx_pkt_interval_ = 0;
     uint64_t radio_rx_bytes_interval_ = 0;
     uint64_t air_tx_bytes_interval_ = 0;
+    uint64_t air_rx_bytes_interval_ = 0;
     uint64_t app_rx_pkt_interval_ = 0;
     uint64_t app_rx_bytes_interval_ = 0;
     RsBlockErasure fec_;

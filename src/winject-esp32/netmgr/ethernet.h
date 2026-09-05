@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "esp_netif.h"
-#include "winject-esp32/semaphore.h"
+#include "bfc-esp32/semaphore.hpp"
 
 class ethernet
 {
@@ -22,7 +22,7 @@ public:
     virtual void set_using_static(bool using_static) = 0;
     virtual bool netif_is_dhcp_server() const = 0;
     virtual esp_netif_t* netif() = 0;
-    virtual semaphore& mutex() = 0;
+    virtual bfc::semaphore& mutex() = 0;
 
     virtual bool has_ipv4() const = 0;
     virtual bool apply_static_ip(uint32_t ip) = 0;

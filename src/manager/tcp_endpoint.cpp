@@ -525,6 +525,8 @@ StreamStats TcpEndpoint::take_stats()
     StreamStats s;
     s.proto = "TCP";
     s.tcp = true;
+    s.air_tx_bytes = air_tx_bytes_interval_;
+    s.air_rx_bytes = radio_rx_bytes_interval_;
     s.tx_bytes = air_tx_bytes_interval_;
     s.rx_bytes = take_rx_bytes();
     air_tx_bytes_interval_ = 0;
@@ -592,8 +594,17 @@ void TcpEndpoint::on_tick()
     stream_.on_tick();
     if (stream_.should_give_up())
     {
-        LOG_WRN("tcp connect timeout on radio");
-        on_local_fin();
+        if (stream_.data_stalled())
+        {
+            LOG_WRN("tcp data stall on radio (no ACK progress); aborting stream");
+            on_local_abort();
+        }
+        else
+        {
+            LOG_WRN("tcp connect timeout on radio");
+            on_local_fin();
+        }
+        stream_.clear_give_up();
         return;
     }
     if (cfg_.mode == UpstreamMode::TcpClient && stream_.wants_connect() &&

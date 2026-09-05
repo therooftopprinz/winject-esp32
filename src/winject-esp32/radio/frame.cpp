@@ -6,6 +6,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include "bfc-esp32/semaphore.hpp"
+
 #ifdef WINJECT_HOST_TEST
 #include "host_idf_stub.h"
 #else
@@ -38,7 +40,7 @@ static FrameRules g_rules = {
 };
 static std::atomic<uint32_t> g_seqlock{0};
 static std::atomic<uint16_t> g_txSeq{0};
-static semaphore g_writeLock;
+static bfc::semaphore g_writeLock;
 
 class RulesWriter
 {

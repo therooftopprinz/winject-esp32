@@ -12,7 +12,8 @@
 
 #include "esp_err.h"
 #include "esp_wifi_types.h"
-#include "winject-esp32/semaphore.h"
+#include "freertos/FreeRTOS.h"
+#include "bfc-esp32/semaphore.hpp"
 
 struct wifi_status_s
 {
@@ -22,7 +23,6 @@ struct wifi_status_s
     bool allow_failed_crc;
     int8_t tx_power_dbm;
     uint32_t udp_tx_pkt;
-    uint32_t udp_tx_dropped;
     uint32_t udp_tx_failed;
     uint32_t udp_rx_pkt;
     uint32_t udp_rx_crc_err;
@@ -34,6 +34,8 @@ struct wifi_status_s
     const char* rx_modulation;
     int8_t rx_rssi;
     int8_t rx_snr;
+    bool tx_latency_valid;
+    uint32_t tx_latency_us;
 };
 
 class wifi
@@ -59,8 +61,10 @@ public:
 
     void note_udp_tx_pkt();
     void note_udp_fwd_pkt();
-    tx_slot_s* take_tx();
-    bool post_tx(tx_slot_s* slot);
+    // Default wait=0: inject must not block holding upstream locks / starve
+    // the console reactor when the TX pool is empty.
+    tx_slot_s* take_tx(TickType_t wait = 0);
+    bool post_tx(tx_slot_s* slot, TickType_t wait = 0);
     void release_tx(tx_slot_s* slot);
     bool inject(const uint8_t* frame, size_t len);
     bool set_cca_enabled(bool enabled);
@@ -72,7 +76,7 @@ public:
 private:
     wifi();
 
-    semaphore& lock();
+    bfc::semaphore& lock();
     void pulse_tx_led();
     void pulse_rx_led();
     esp_err_t apply_country();
@@ -82,7 +86,7 @@ private:
 
     wifi_tx tx_;
     wifi_rx rx_;
-    semaphore lock_;
+    bfc::semaphore lock_;
     uint8_t channel_ = WIFI_DEFAULT_CHANNEL;
     const char* modulation_name_ = WIFI_DEFAULT_MODULATION;
     wifi_phy_rate_t modulation_rate_ = WIFI_PHY_RATE_1M_L;

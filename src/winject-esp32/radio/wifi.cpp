@@ -11,7 +11,7 @@
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "winject-esp32/semaphore.h"
+#include "bfc-esp32/semaphore.hpp"
 
 static const char* TAG = "wifi";
 
@@ -102,7 +102,7 @@ wifi::wifi()
 {
 }
 
-semaphore& wifi::lock()
+bfc::semaphore& wifi::lock()
 {
     return lock_;
 }
@@ -263,6 +263,10 @@ bool wifi::initialize()
     {
         return false;
     }
+    if (!tx_.apply_tx_done_cb())
+    {
+        ESP_LOGW(TAG, "tx_latency unavailable (tx done callback not registered)");
+    }
 
     if (!tx_.start_task())
     {
@@ -292,7 +296,7 @@ bool wifi::set_channel(uint8_t channel)
         return false;
     }
 
-    semaphore::lock guard(lock_, pdMS_TO_TICKS(1000));
+    bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(1000));
     if (!guard)
     {
         return false;
@@ -322,7 +326,7 @@ bool wifi::set_modulation(const char* name)
         return false;
     }
 
-    semaphore::lock guard(lock_, pdMS_TO_TICKS(2000));
+    bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(2000));
     if (!guard)
     {
         return false;
@@ -353,7 +357,7 @@ void wifi::get_status(wifi_status_s* status)
     }
 
     {
-        semaphore::lock guard(lock_, pdMS_TO_TICKS(50));
+        bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(50));
         status->channel = channel_;
         status->modulation = modulation_name_;
         tx_.fill_status(status);
@@ -412,14 +416,14 @@ void wifi::note_udp_fwd_pkt()
     rx_.note_udp_fwd_pkt();
 }
 
-wifi::tx_slot_s* wifi::take_tx()
+wifi::tx_slot_s* wifi::take_tx(TickType_t wait)
 {
-    return tx_.take();
+    return tx_.take(wait);
 }
 
-bool wifi::post_tx(tx_slot_s* slot)
+bool wifi::post_tx(tx_slot_s* slot, TickType_t wait)
 {
-    return tx_.post(slot);
+    return tx_.post(slot, wait);
 }
 
 void wifi::release_tx(tx_slot_s* slot)

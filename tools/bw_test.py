@@ -34,6 +34,9 @@ HOST_PORT_A = 9001  # frames heard by radio A
 HOST_PORT_B = 9002  # frames heard by radio B
 TCP_SEND_A = 29000  # manager A TCP_SERVER (host sends A->B)
 TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
+# Manager ARQ can stop reading when the window fills and reverse ACKs starve;
+# without a send timeout, sendall blocks forever and phase() never returns.
+TCP_SEND_TIMEOUT_S = 3.0
 MAX_PAYLOAD = 1476
 FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
 FEC_ENC_A = 19100  # host -> encode -> radio A inject
@@ -335,11 +338,29 @@ def send_tcp_record(sock: socket.socket, payload: bytes) -> None:
     sock.sendall(struct.pack("!H", len(payload)) + payload)
 
 
+class TcpSendStall(OSError):
+    """Host TCP send blocked longer than TCP_SEND_TIMEOUT_S (ARQ backpressure)."""
+
+    def __init__(self, message: str, sent: int = 0) -> None:
+        super().__init__(message)
+        self.sent = sent
+
+
 def tcp_connect(host: str, port: int, timeout: float = 5.0) -> socket.socket:
     sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(None)
+    # Bound send so ARQ stalls surface as TcpSendStall instead of a hang.
+    sock.settimeout(TCP_SEND_TIMEOUT_S)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return sock
+
+
+def close_quiet(sock: socket.socket | None) -> None:
+    if sock is None:
+        return
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 class TcpListener:
@@ -441,15 +462,24 @@ def send_exact_tcp(
     own = sock is None
     if own:
         sock = tcp_connect(dest[0], dest[1])
+    assert sock is not None
+    sent = 0
     try:
         for seq in range(count):
-            send_tcp_record(sock, make_payload(tag, seq, size))
+            try:
+                send_tcp_record(sock, make_payload(tag, seq, size))
+            except (TimeoutError, socket.timeout) as err:
+                raise TcpSendStall(
+                    f"tcp send stall to {dest[0]}:{dest[1]} after {sent}/{count}",
+                    sent=sent,
+                ) from err
+            sent += 1
             if gap > 0:
                 time.sleep(gap)
     finally:
         if own:
-            sock.close()
-    return count
+            close_quiet(sock)
+    return sent
 
 
 def send_window_tcp(
@@ -475,7 +505,14 @@ def send_window_tcp(
             if interval > 0 and now < next_t:
                 time.sleep(min(0.001, next_t - now))
                 continue
-            send_tcp_record(sock, make_payload(tag, seq, size))
+            try:
+                send_tcp_record(sock, make_payload(tag, seq, size))
+            except (TimeoutError, socket.timeout) as err:
+                raise TcpSendStall(
+                    f"tcp send stall to {dest[0]}:{dest[1]} after {sent} pkts "
+                    f"(ARQ window full / ACKs starved?)",
+                    sent=sent,
+                ) from err
             sent += 1
             seq += 1
             if interval > 0:
@@ -484,7 +521,7 @@ def send_window_tcp(
                     next_t = time.monotonic()
     finally:
         if own:
-            sock.close()
+            close_quiet(sock)
     return sent
 
 
@@ -993,19 +1030,41 @@ def main() -> int:
         time.sleep(0.3)
         tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
         time.sleep(0.3)
-        atexit.register(lambda: tcp_sock_a.close() if tcp_sock_a else None)
-        atexit.register(lambda: tcp_sock_b.close() if tcp_sock_b else None)
+        atexit.register(lambda: close_quiet(tcp_sock_a))
+        atexit.register(lambda: close_quiet(tcp_sock_b))
+
+    def tcp_sock_for(dest: tuple[str, int]) -> socket.socket | None:
+        return tcp_sock_a if dest == dest_a else tcp_sock_b
+
+    def reconnect_tcp(dest: tuple[str, int]) -> socket.socket:
+        nonlocal tcp_sock_a, tcp_sock_b
+        if dest == dest_a:
+            close_quiet(tcp_sock_a)
+            tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
+            return tcp_sock_a
+        close_quiet(tcp_sock_b)
+        tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
+        return tcp_sock_b
 
     def send_exact_fn(dest, tag, count, size, gap):
         if args.tcp:
-            sock = tcp_sock_a if dest == dest_a else tcp_sock_b
-            return send_exact_tcp(dest, tag, count, size, gap, sock)
+            sock = tcp_sock_for(dest)
+            try:
+                return send_exact_tcp(dest, tag, count, size, gap, sock)
+            except TcpSendStall as err:
+                print(f"warning: {err}; reconnecting")
+                sock = reconnect_tcp(dest)
+                return send_exact_tcp(dest, tag, count, size, gap, sock)
         return send_exact(dest, tag, count, size, gap)
 
     def send_window_fn(dest, tag, size, duration, kbps, start):
         if args.tcp:
-            sock = tcp_sock_a if dest == dest_a else tcp_sock_b
-            return send_window_tcp(dest, tag, size, duration, kbps, start, sock)
+            sock = tcp_sock_for(dest)
+            try:
+                return send_window_tcp(dest, tag, size, duration, kbps, start, sock)
+            except TcpSendStall:
+                reconnect_tcp(dest)
+                raise
         return send_window(dest, tag, size, duration, kbps, start)
 
     def reset() -> None:
@@ -1027,20 +1086,48 @@ def main() -> int:
         senders: list[tuple[tuple[str, int], bytes, Listener | TcpListener]],
         kbps: float,
     ) -> list[PhaseResult]:
+        nonlocal tcp_sock_a, tcp_sock_b
         reset()
         start = time.monotonic()
         results = [0] * len(senders)
+        stalls: list[TcpSendStall | None] = [None] * len(senders)
         threads: list[threading.Thread] = []
+        join_timeout = args.duration + TCP_SEND_TIMEOUT_S + 2.0
 
         def run_one(idx: int, dest: tuple[str, int], tag: bytes) -> None:
-            results[idx] = send_window_fn(dest, tag, args.size, args.duration, kbps, start)
+            try:
+                results[idx] = send_window_fn(
+                    dest, tag, args.size, args.duration, kbps, start
+                )
+            except TcpSendStall as err:
+                results[idx] = err.sent
+                stalls[idx] = err
 
         for i, (dest, tag, _lis) in enumerate(senders):
             t = threading.Thread(target=run_one, args=(i, dest, tag))
             threads.append(t)
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=join_timeout)
+            if t.is_alive():
+                print(
+                    f"warning: sender thread still blocked after {join_timeout:.1f}s; "
+                    "closing TCP sockets"
+                )
+                if args.tcp:
+                    close_quiet(tcp_sock_a)
+                    close_quiet(tcp_sock_b)
+                    tcp_sock_a = None
+                    tcp_sock_b = None
+                t.join(timeout=TCP_SEND_TIMEOUT_S + 1.0)
+        for err in stalls:
+            if err is not None:
+                print(f"warning: {err}")
+        if args.tcp and (tcp_sock_a is None or tcp_sock_b is None):
+            if tcp_sock_a is None:
+                tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
+            if tcp_sock_b is None:
+                tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
         time.sleep(args.drain)
         out: list[PhaseResult] = []
         for i, (_dest, _tag, lis) in enumerate(senders):

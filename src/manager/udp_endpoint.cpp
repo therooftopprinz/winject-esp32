@@ -160,7 +160,12 @@ void UdpEndpoint::on_app()
 
 void UdpEndpoint::on_radio_rx(const uint8_t* data, size_t len)
 {
-    if (sock_.fd() < 0 || data == nullptr || len == 0 || !dest_valid_)
+    if (data == nullptr || len == 0)
+    {
+        return;
+    }
+    air_rx_bytes_interval_ += len;
+    if (sock_.fd() < 0 || !dest_valid_)
     {
         return;
     }
@@ -220,14 +225,17 @@ StreamStats UdpEndpoint::take_stats()
 {
     StreamStats s;
     s.proto = fec_.enabled() ? "UDP+RS" : "UDP";
-    s.tx_bytes = air_tx_bytes_interval_;
+    s.tx_bytes = app_rx_bytes_interval_;
     s.rx_bytes = take_rx_bytes();
+    s.air_tx_bytes = air_tx_bytes_interval_;
+    s.air_rx_bytes = air_rx_bytes_interval_;
     if (fec_.enabled())
     {
         s.fec_recovered = fec_.take_recovered();
         s.fec_fail = fec_.take_decode_fail();
     }
     air_tx_bytes_interval_ = 0;
+    air_rx_bytes_interval_ = 0;
     app_rx_pkt_interval_ = 0;
     app_rx_bytes_interval_ = 0;
     radio_rx_pkt_interval_ = 0;

@@ -6,53 +6,57 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "manager.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
 static const char* TAG = "settings";
-static const char* kNvsNs = "winject";
-static const char* kCurrentKey = "cur";
-static constexpr uint8_t kBlobVersion = 2;
-static constexpr uint8_t kBlobVersionMin = 1;
-static constexpr size_t kBlobMax = 2600;
+static const char* k_nvs_ns = "winject";
+static const char* k_current_key = "cur";
 
-static uint8_t g_currentSlot = 0;
-static bool g_hasLoaded = false;
-static SettingsSnapshot g_loaded = {};
+settings& settings::instance()
+{
+    static settings inst;
+    return inst;
+}
 
-static bool slotOk(uint8_t slot)
+settings::settings()
+    : rx_(upstream_rx::instance()),
+      tx_(upstream_tx::instance()),
+      netmgr_(manager::instance())
+{
+}
+
+bool settings::slot_ok(uint8_t slot)
 {
     return slot < SETTINGS_SLOT_COUNT;
 }
 
-static void slotKey(uint8_t slot, char* out, size_t outLen)
+void settings::slot_key(uint8_t slot, char* out, size_t out_len)
 {
-    snprintf(out, outLen, "s%u", slot);
+    snprintf(out, out_len, "s%u", slot);
 }
 
-static void snapshotDefaults(SettingsSnapshot* snap)
+void settings::snapshot_defaults(snapshot_s* snap)
 {
     memset(snap, 0, sizeof(*snap));
     snap->mode = WINJECT_MODE_BFC_TUNNEL_DEVICE;
     snap->channel = WIFI_DEFAULT_CHANNEL;
     strncpy(snap->modulation, WIFI_DEFAULT_MODULATION,
             sizeof(snap->modulation) - 1);
-    snap->ccaEnabled = true;
-    snap->allowFailedCrc = false;
-    snap->txPowerDbm = WIFI_DEFAULT_TX_POWER_DBM;
-    snap->networkMode = NETMGR_MODE_AUTO;
-    snap->dhcpServerEnabled = false;
+    snap->cca_enabled = true;
+    snap->allow_failed_crc = false;
+    snap->tx_power_dbm = WIFI_DEFAULT_TX_POWER_DBM;
+    snap->network_mode = NETMGR_MODE_AUTO;
+    snap->dhcp_server_enabled = false;
 }
 
-static bool captureLive(SettingsSnapshot* snap, upstream_rx& rx,
-                        upstream_tx& tx, manager& netmgr)
+bool settings::capture_live(snapshot_s* snap)
 {
     if (snap == nullptr)
     {
         return false;
     }
-    snapshotDefaults(snap);
+    snapshot_defaults(snap);
 
     snap->mode = frameGetMode();
 
@@ -67,35 +71,35 @@ static bool captureLive(SettingsSnapshot* snap, upstream_rx& rx,
             strncpy(snap->modulation, radio.modulation,
                     sizeof(snap->modulation) - 1);
         }
-        snap->ccaEnabled = radio.cca_enabled;
-        snap->allowFailedCrc = radio.allow_failed_crc;
-        snap->txPowerDbm = radio.tx_power_dbm;
+        snap->cca_enabled = radio.cca_enabled;
+        snap->allow_failed_crc = radio.allow_failed_crc;
+        snap->tx_power_dbm = radio.tx_power_dbm;
     }
 
     uint32_t fallback = 0;
-    if (netmgr.static_ipv4(&fallback))
+    if (netmgr_.static_ipv4(&fallback))
     {
-        snap->fallbackIp = fallback;
+        snap->fallback_ip = fallback;
     }
-    snap->networkMode = netmgr.network_mode();
-    snap->dhcpServerEnabled = netmgr.dhcp_server_enabled();
+    snap->network_mode = netmgr_.network_mode();
+    snap->dhcp_server_enabled = netmgr_.dhcp_server_enabled();
 
-    rx.fill_status(snap->rx, &snap->rxCount);
-    tx.fill_status(snap->tx, &snap->txCount);
-    for (uint8_t i = 0; i < snap->rxCount; i++)
+    rx_.fill_status(snap->rx, &snap->rx_count);
+    tx_.fill_status(snap->tx, &snap->tx_count);
+    for (uint8_t i = 0; i < snap->rx_count; i++)
     {
         snap->rx[i].socket_open = false;
     }
     return true;
 }
 
-static bool packBlob(const SettingsSnapshot& snap, uint8_t* buf, size_t* len)
+bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
 {
     if (buf == nullptr || len == nullptr)
     {
         return false;
     }
-    if (snap.rxCount > WIFI_AIRPORT_MAX || snap.txCount > WIFI_AIRPORT_MAX)
+    if (snap.rx_count > WIFI_AIRPORT_MAX || snap.tx_count > WIFI_AIRPORT_MAX)
     {
         return false;
     }
@@ -116,26 +120,26 @@ static bool packBlob(const SettingsSnapshot& snap, uint8_t* buf, size_t* len)
         p += sizeof(v);
     };
 
-    put8(kBlobVersion);
+    put8(k_blob_version);
     put8(static_cast<uint8_t>(snap.mode));
     put8(snap.channel);
-    put8(snap.ccaEnabled ? 1 : 0);
-    put8(snap.allowFailedCrc ? 1 : 0);
-    put8(static_cast<uint8_t>(snap.txPowerDbm));
+    put8(snap.cca_enabled ? 1 : 0);
+    put8(snap.allow_failed_crc ? 1 : 0);
+    put8(static_cast<uint8_t>(snap.tx_power_dbm));
     memcpy(p, snap.modulation, SETTINGS_MODULATION_MAX);
     p += SETTINGS_MODULATION_MAX;
-    put32(snap.fallbackIp);
-    put8(static_cast<uint8_t>(snap.networkMode));
-    put8(snap.dhcpServerEnabled ? 1 : 0);
-    put8(snap.rxCount);
-    for (uint8_t i = 0; i < snap.rxCount; i++)
+    put32(snap.fallback_ip);
+    put8(static_cast<uint8_t>(snap.network_mode));
+    put8(snap.dhcp_server_enabled ? 1 : 0);
+    put8(snap.rx_count);
+    for (uint8_t i = 0; i < snap.rx_count; i++)
     {
         memcpy(p, snap.rx[i].airport, 6);
         p += 6;
         put16(snap.rx[i].port);
     }
-    put8(snap.txCount);
-    for (uint8_t i = 0; i < snap.txCount; i++)
+    put8(snap.tx_count);
+    for (uint8_t i = 0; i < snap.tx_count; i++)
     {
         memcpy(p, snap.tx[i].airport, 6);
         p += 6;
@@ -144,16 +148,16 @@ static bool packBlob(const SettingsSnapshot& snap, uint8_t* buf, size_t* len)
     }
 
     *len = static_cast<size_t>(p - buf);
-    return *len <= kBlobMax;
+    return *len <= k_blob_max;
 }
 
-static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
+bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
 {
     if (buf == nullptr || snap == nullptr || len < 11)
     {
         return false;
     }
-    snapshotDefaults(snap);
+    snapshot_defaults(snap);
 
     const uint8_t* p = buf;
     const uint8_t* end = buf + len;
@@ -194,14 +198,15 @@ static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
     uint8_t version = 0;
     uint8_t mode = 0;
     uint8_t cca = 0;
-    uint8_t allowCrc = 0;
-    uint8_t txPower = 0;
-    if (!get8(&version) || version < kBlobVersionMin || version > kBlobVersion)
+    uint8_t allow_crc = 0;
+    uint8_t tx_power = 0;
+    if (!get8(&version) || version < k_blob_version_min ||
+        version > k_blob_version)
     {
         return false;
     }
     if (!get8(&mode) || !get8(&snap->channel) || !get8(&cca) ||
-        !get8(&allowCrc) || !get8(&txPower))
+        !get8(&allow_crc) || !get8(&tx_power))
     {
         return false;
     }
@@ -211,9 +216,9 @@ static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
         return false;
     }
     snap->mode = static_cast<WinjectMode>(mode);
-    snap->ccaEnabled = cca != 0;
-    snap->allowFailedCrc = allowCrc != 0;
-    snap->txPowerDbm = static_cast<int8_t>(txPower);
+    snap->cca_enabled = cca != 0;
+    snap->allow_failed_crc = allow_crc != 0;
+    snap->tx_power_dbm = static_cast<int8_t>(tx_power);
     if (!need(SETTINGS_MODULATION_MAX))
     {
         return false;
@@ -221,40 +226,40 @@ static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
     memcpy(snap->modulation, p, SETTINGS_MODULATION_MAX);
     snap->modulation[SETTINGS_MODULATION_MAX - 1] = '\0';
     p += SETTINGS_MODULATION_MAX;
-    if (!get32(&snap->fallbackIp))
+    if (!get32(&snap->fallback_ip))
     {
         return false;
     }
     if (version >= 2)
     {
-        uint8_t networkMode = 0;
-        uint8_t dhcpServer = 0;
-        if (!get8(&networkMode) || !get8(&dhcpServer))
+        uint8_t network_mode = 0;
+        uint8_t dhcp_server = 0;
+        if (!get8(&network_mode) || !get8(&dhcp_server))
         {
             return false;
         }
-        if (networkMode != NETMGR_MODE_STATIC &&
-            networkMode != NETMGR_MODE_AUTO)
+        if (network_mode != NETMGR_MODE_STATIC &&
+            network_mode != NETMGR_MODE_AUTO)
         {
             return false;
         }
-        snap->networkMode = static_cast<NetmgrMode>(networkMode);
-        snap->dhcpServerEnabled = dhcpServer != 0;
+        snap->network_mode = static_cast<NetmgrMode>(network_mode);
+        snap->dhcp_server_enabled = dhcp_server != 0;
     }
     else
     {
-        snap->networkMode = NETMGR_MODE_AUTO;
-        snap->dhcpServerEnabled = false;
+        snap->network_mode = NETMGR_MODE_AUTO;
+        snap->dhcp_server_enabled = false;
     }
-    if (!get8(&snap->rxCount))
+    if (!get8(&snap->rx_count))
     {
         return false;
     }
-    if (snap->rxCount > WIFI_AIRPORT_MAX)
+    if (snap->rx_count > WIFI_AIRPORT_MAX)
     {
         return false;
     }
-    for (uint8_t i = 0; i < snap->rxCount; i++)
+    for (uint8_t i = 0; i < snap->rx_count; i++)
     {
         if (!need(6))
         {
@@ -268,11 +273,11 @@ static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
         }
         snap->rx[i].socket_open = false;
     }
-    if (!get8(&snap->txCount) || snap->txCount > WIFI_AIRPORT_MAX)
+    if (!get8(&snap->tx_count) || snap->tx_count > WIFI_AIRPORT_MAX)
     {
         return false;
     }
-    for (uint8_t i = 0; i < snap->txCount; i++)
+    for (uint8_t i = 0; i < snap->tx_count; i++)
     {
         if (!need(6))
         {
@@ -288,17 +293,17 @@ static bool unpackBlob(const uint8_t* buf, size_t len, SettingsSnapshot* snap)
     return p == end;
 }
 
-static nvs_handle_t openNvs(bool write)
+static nvs_handle_t open_nvs(bool write)
 {
     nvs_handle_t handle = 0;
     const nvs_open_mode_t mode = write ? NVS_READWRITE : NVS_READONLY;
-    if (nvs_open(kNvsNs, mode, &handle) != ESP_OK)
+    if (nvs_open(k_nvs_ns, mode, &handle) != ESP_OK)
     {
         if (!write)
         {
             return 0;
         }
-        if (nvs_open(kNvsNs, NVS_READWRITE, &handle) != ESP_OK)
+        if (nvs_open(k_nvs_ns, NVS_READWRITE, &handle) != ESP_OK)
         {
             return 0;
         }
@@ -306,46 +311,44 @@ static nvs_handle_t openNvs(bool write)
     return handle;
 }
 
-static bool readBlob(uint8_t slot, SettingsSnapshot* snap)
+bool settings::read_blob(uint8_t slot, snapshot_s* snap)
 {
     char key[8];
-    slotKey(slot, key, sizeof(key));
-    nvs_handle_t handle = openNvs(false);
+    slot_key(slot, key, sizeof(key));
+    nvs_handle_t handle = open_nvs(false);
     if (handle == 0)
     {
         return false;
     }
-    uint8_t buf[kBlobMax];
-    size_t len = sizeof(buf);
-    const esp_err_t err = nvs_get_blob(handle, key, buf, &len);
+    size_t len = sizeof(blob_);
+    const esp_err_t err = nvs_get_blob(handle, key, blob_, &len);
     nvs_close(handle);
     if (err != ESP_OK)
     {
         return false;
     }
-    return unpackBlob(buf, len, snap);
+    return unpack_blob(blob_, len, snap);
 }
 
-static bool writeBlob(uint8_t slot, const SettingsSnapshot& snap)
+bool settings::write_blob(uint8_t slot, const snapshot_s& snap)
 {
-    uint8_t buf[kBlobMax];
     size_t len = 0;
-    if (!packBlob(snap, buf, &len))
+    if (!pack_blob(snap, blob_, &len))
     {
         return false;
     }
     char key[8];
-    slotKey(slot, key, sizeof(key));
-    nvs_handle_t handle = openNvs(true);
+    slot_key(slot, key, sizeof(key));
+    nvs_handle_t handle = open_nvs(true);
     if (handle == 0)
     {
         ESP_LOGE(TAG, "nvs open failed");
         return false;
     }
-    bool ok = nvs_set_blob(handle, key, buf, len) == ESP_OK;
+    bool ok = nvs_set_blob(handle, key, blob_, len) == ESP_OK;
     if (ok)
     {
-        ok = nvs_set_u8(handle, kCurrentKey, slot) == ESP_OK;
+        ok = nvs_set_u8(handle, k_current_key, slot) == ESP_OK;
     }
     if (ok)
     {
@@ -355,8 +358,7 @@ static bool writeBlob(uint8_t slot, const SettingsSnapshot& snap)
     return ok;
 }
 
-static bool applySnapshot(const SettingsSnapshot& snap, upstream_rx& rx,
-                          upstream_tx& tx, manager& netmgr)
+bool settings::apply_snapshot(const snapshot_s& snap)
 {
     if (!frameSetMode(snap.mode))
     {
@@ -367,25 +369,25 @@ static bool applySnapshot(const SettingsSnapshot& snap, upstream_rx& rx,
     {
         if (!radio.set_channel(snap.channel) ||
             !radio.set_modulation(snap.modulation) ||
-            !radio.set_cca_enabled(snap.ccaEnabled) ||
-            !radio.set_allow_failed_crc(snap.allowFailedCrc) ||
-            !radio.set_tx_power(snap.txPowerDbm))
+            !radio.set_cca_enabled(snap.cca_enabled) ||
+            !radio.set_allow_failed_crc(snap.allow_failed_crc) ||
+            !radio.set_tx_power(snap.tx_power_dbm))
         {
             ESP_LOGE(TAG, "radio apply failed");
             return false;
         }
     }
-    if (snap.fallbackIp != 0)
+    if (snap.fallback_ip != 0)
     {
-        netmgr.set_ip(snap.fallbackIp);
+        netmgr_.set_ip(snap.fallback_ip);
     }
-    netmgr.set_dhcp_server_enabled(snap.dhcpServerEnabled);
-    if (!netmgr.set_network_mode(snap.networkMode))
+    netmgr_.set_dhcp_server_enabled(snap.dhcp_server_enabled);
+    if (!netmgr_.set_network_mode(snap.network_mode))
     {
         ESP_LOGE(TAG, "network apply failed");
         return false;
     }
-    if (!rx.load(snap.rx, snap.rxCount) || !tx.load(snap.tx, snap.txCount))
+    if (!rx_.load(snap.rx, snap.rx_count) || !tx_.load(snap.tx, snap.tx_count))
     {
         ESP_LOGE(TAG, "upstream apply failed");
         return false;
@@ -393,105 +395,101 @@ static bool applySnapshot(const SettingsSnapshot& snap, upstream_rx& rx,
     return true;
 }
 
-uint8_t settingsCurrentSlot()
+uint8_t settings::current_slot() const
 {
-    return g_currentSlot;
+    return current_slot_;
 }
 
-bool settingsSave(uint8_t slot, upstream_rx& rx, upstream_tx& tx,
-                  manager& netmgr)
+bool settings::save(uint8_t slot)
 {
-    if (!slotOk(slot))
+    if (!slot_ok(slot))
     {
         return false;
     }
-    SettingsSnapshot snap = {};
-    if (!captureLive(&snap, rx, tx, netmgr))
+    if (!capture_live(&scratch_))
     {
         return false;
     }
-    if (!writeBlob(slot, snap))
+    if (!write_blob(slot, scratch_))
     {
         ESP_LOGE(TAG, "save slot %u failed", slot);
         return false;
     }
-    g_currentSlot = slot;
-    g_loaded = snap;
-    g_hasLoaded = true;
+    current_slot_ = slot;
+    loaded_ = scratch_;
+    has_loaded_ = true;
     ESP_LOGI(TAG, "saved slot %u", slot);
     return true;
 }
 
-bool settingsUse(uint8_t slot, upstream_rx& rx, upstream_tx& tx,
-                 manager& netmgr)
+bool settings::use(uint8_t slot)
 {
-    if (!slotOk(slot))
+    if (!slot_ok(slot))
     {
         return false;
     }
-    SettingsSnapshot snap = {};
-    if (!readBlob(slot, &snap))
+    if (!read_blob(slot, &scratch_))
     {
         return false;
     }
-    nvs_handle_t handle = openNvs(true);
+    nvs_handle_t handle = open_nvs(true);
     if (handle != 0)
     {
-        nvs_set_u8(handle, kCurrentKey, slot);
+        nvs_set_u8(handle, k_current_key, slot);
         nvs_commit(handle);
         nvs_close(handle);
     }
-    if (!applySnapshot(snap, rx, tx, netmgr))
+    if (!apply_snapshot(scratch_))
     {
         return false;
     }
-    g_currentSlot = slot;
-    g_loaded = snap;
-    g_hasLoaded = true;
+    current_slot_ = slot;
+    loaded_ = scratch_;
+    has_loaded_ = true;
     ESP_LOGI(TAG, "using slot %u", slot);
     return true;
 }
 
-bool settingsLoadCurrent(manager& netmgr)
+bool settings::load_current()
 {
-    snapshotDefaults(&g_loaded);
-    g_hasLoaded = false;
-    g_currentSlot = 0;
+    snapshot_defaults(&loaded_);
+    has_loaded_ = false;
+    current_slot_ = 0;
 
-    nvs_handle_t handle = openNvs(false);
+    nvs_handle_t handle = open_nvs(false);
     if (handle != 0)
     {
         uint8_t slot = 0;
-        if (nvs_get_u8(handle, kCurrentKey, &slot) == ESP_OK && slotOk(slot))
+        if (nvs_get_u8(handle, k_current_key, &slot) == ESP_OK && slot_ok(slot))
         {
-            g_currentSlot = slot;
+            current_slot_ = slot;
         }
         nvs_close(handle);
     }
 
-    if (readBlob(g_currentSlot, &g_loaded))
+    if (read_blob(current_slot_, &loaded_))
     {
-        g_hasLoaded = true;
-        if (g_loaded.fallbackIp != 0)
+        has_loaded_ = true;
+        if (loaded_.fallback_ip != 0)
         {
-            netmgr.set_ip(g_loaded.fallbackIp);
+            netmgr_.set_ip(loaded_.fallback_ip);
         }
-        netmgr.set_dhcp_server_enabled(g_loaded.dhcpServerEnabled);
-        netmgr.set_network_mode(g_loaded.networkMode);
-        ESP_LOGI(TAG, "loaded slot %u", g_currentSlot);
+        netmgr_.set_dhcp_server_enabled(loaded_.dhcp_server_enabled);
+        netmgr_.set_network_mode(loaded_.network_mode);
+        ESP_LOGI(TAG, "loaded slot %u", current_slot_);
     }
     else
     {
-        ESP_LOGI(TAG, "slot %u empty, using defaults", g_currentSlot);
+        ESP_LOGI(TAG, "slot %u empty, using defaults", current_slot_);
     }
     return true;
 }
 
-bool settingsApplyLive(upstream_rx& rx, upstream_tx& tx, manager& netmgr)
+bool settings::apply_live()
 {
-    if (!g_hasLoaded)
+    if (!has_loaded_)
     {
         return true;
     }
-    return applySnapshot(g_loaded, rx, tx, netmgr);
+    return apply_snapshot(loaded_);
 }

@@ -6,6 +6,7 @@
 #
 # Usage:
 #   ./scripts/manager_tcp_bw_test.sh
+#   ./scripts/manager_tcp_bw_test.sh --a 192.168.127.181 --b 192.168.128.119 --modulation OFDM_24M
 #   ./scripts/manager_tcp_bw_test.sh 192.168.253.11 192.168.253.12 192.168.253.106
 #   ./scripts/manager_tcp_bw_test.sh -- --modulation OFDM_24M --bidir
 
@@ -21,36 +22,80 @@ mkdir -p "$LOG_DIR"
 RADIO_A="192.168.253.11"
 RADIO_B="192.168.253.12"
 HOST_IP="192.168.253.106"
+HOST_SET=0
 BW_ARGS=()
+PREP_EXTRA=()
 
 if [[ "${1:-}" == "--" ]]; then
-  BW_ARGS=("${@:2}")
-elif [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  RADIO_A="$1"
-  [[ $# -ge 2 ]] && RADIO_B="$2"
-  [[ $# -ge 3 ]] && HOST_IP="$3"
-  [[ $# -ge 4 ]] && BW_ARGS=("${@:4}")
-elif [[ $# -ge 1 ]]; then
-  BW_ARGS=("$@")
+  shift
 fi
 
-# Help passthrough: avoid touching radios/managers for usage-only calls.
-for a in "${BW_ARGS[@]+"${BW_ARGS[@]}"}"; do
-  if [[ "$a" == "-h" || "$a" == "--help" ]]; then
-    exec python3 "$ROOT/tools/bw_test.py" --help
+# Legacy positional IPs: RADIO_A RADIO_B [HOST_IP] [bw args...]
+if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  RADIO_A="$1"
+  shift
+  if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    RADIO_B="$1"
+    shift
   fi
+  if [[ $# -ge 1 && "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    HOST_IP="$1"
+    HOST_SET=1
+    shift
+  fi
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      exec python3 "$ROOT/tools/bw_test.py" --help
+      ;;
+    --a)
+      RADIO_A="${2:?--a needs an IP}"
+      shift 2
+      ;;
+    --a=*)
+      RADIO_A="${1#--a=}"
+      shift
+      ;;
+    --b)
+      RADIO_B="${2:?--b needs an IP}"
+      shift 2
+      ;;
+    --b=*)
+      RADIO_B="${1#--b=}"
+      shift
+      ;;
+    --host)
+      HOST_IP="${2:?--host needs an IP}"
+      HOST_SET=1
+      shift 2
+      ;;
+    --host=*)
+      HOST_IP="${1#--host=}"
+      HOST_SET=1
+      shift
+      ;;
+    --no-cca)
+      PREP_EXTRA+=(--no-cca)
+      BW_ARGS+=("$1")
+      shift
+      ;;
+    *)
+      BW_ARGS+=("$1")
+      shift
+      ;;
+  esac
 done
+
+if [[ "$HOST_SET" -eq 0 ]]; then
+  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 2323)); print(s.getsockname()[0]); s.close()")"
+fi
 
 ensure_winject_manager "$ROOT"
 
 echo "configuring radios (fixed forward ports 9210/9220)..."
-PREP_EXTRA=()
-for a in "${BW_ARGS[@]+"${BW_ARGS[@]}"}"; do
-  if [[ "$a" == "--no-cca" ]]; then
-    PREP_EXTRA+=(--no-cca)
-  fi
-done
-python3 "$ROOT/scripts/prepare_radios_for_manager.py" --a "$RADIO_A" --b "$RADIO_B" --host "$HOST_IP" --verbose "${PREP_EXTRA[@]}" || exit 1
+python3 "$ROOT/scripts/prepare_radios_for_manager.py" --a "$RADIO_A" --b "$RADIO_B" --host "$HOST_IP" --verbose "${PREP_EXTRA[@]+"${PREP_EXTRA[@]}"}" || exit 1
 
 patch_conf() {
   local file="$1" device="$2"
@@ -101,10 +146,16 @@ if ! grep -q "manager running" "$LOG_DIR/manager_b.log"; then
 fi
 
 echo "running bw_test --tcp --a $RADIO_A --b $RADIO_B --host $HOST_IP ${BW_ARGS[*]}"
-exec python3 "$ROOT/tools/bw_test.py" \
+# Do not exec: the EXIT trap must run to kill managers. exec would replace this
+# shell and leave winject-manager orphans retxing CONNECT forever.
+set +e
+python3 "$ROOT/tools/bw_test.py" \
   --tcp \
   --skip-config \
   --a "$RADIO_A" \
   --b "$RADIO_B" \
   --host "$HOST_IP" \
   "${BW_ARGS[@]}"
+status=$?
+set -e
+exit "$status"
