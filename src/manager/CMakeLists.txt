@@ -24,13 +24,13 @@ add_executable(winject-manager
     app.cpp
     config.cpp
     console_client.cpp
-    fec.cpp
+    frames/basic_fec.cpp
     net_util.cpp
-    radio_udp.cpp
-    scheduler.cpp
-    tcp_endpoint.cpp
-    tcp_stream.cpp
-    udp_endpoint.cpp
+    radio/wifi_udp.cpp
+    tx_scheduler.cpp
+    endpoint/tcp_endpoint.cpp
+    endpoint/udp_endpoint.cpp
+    stream/tcp_stream.cpp
 )
 
 target_include_directories(winject-manager PRIVATE

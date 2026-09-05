@@ -1,4 +1,4 @@
-#include "radio_udp.h"
+#include "radio/wifi_udp.h"
 
 #include "log.h"
 
@@ -6,13 +6,13 @@
 #include <string.h>
 #include <sys/socket.h>
 
-RadioUdp::~RadioUdp()
+wifi_udp::~wifi_udp()
 {
     close();
 }
 
-bool RadioUdp::open(Reactor& reactor, const sockaddr_in& inject,
-                    uint16_t forward_port, Rx on_rx, Idle on_idle)
+bool wifi_udp::open(reactor& reactor, const sockaddr_in& inject,
+                    uint16_t forward_port, rx on_rx, idle on_idle)
 {
     close();
     reactor_ = &reactor;
@@ -51,7 +51,7 @@ bool RadioUdp::open(Reactor& reactor, const sockaddr_in& inject,
     return true;
 }
 
-void RadioUdp::close()
+void wifi_udp::close()
 {
     if (sock_.fd() >= 0)
     {
@@ -64,7 +64,7 @@ void RadioUdp::close()
     forward_port_ = 0;
 }
 
-bool RadioUdp::send(const uint8_t* data, size_t len)
+bool wifi_udp::send(const uint8_t* data, size_t len)
 {
     if (sock_.fd() < 0 || data == nullptr || len == 0)
     {
@@ -73,7 +73,7 @@ bool RadioUdp::send(const uint8_t* data, size_t len)
     return udp_send_to(sock_.fd(), inject_, data, len);
 }
 
-void RadioUdp::on_forward()
+void wifi_udp::on_forward()
 {
     bool any = false;
     while (true)

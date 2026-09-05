@@ -1,4 +1,4 @@
-#include "tcp_stream.h"
+#include "stream/tcp_stream.h"
 
 #include <gtest/gtest.h>
 
@@ -11,7 +11,7 @@
 
 namespace
 {
-void exchange(TcpStream* from, TcpStream* to)
+void exchange(tcp_stream* from, tcp_stream* to)
 {
     uint8_t buf[2048];
     while (from->has_tx() || from->has_ack())
@@ -26,7 +26,7 @@ void exchange(TcpStream* from, TcpStream* to)
 void write_data_frame(uint8_t* p, uint16_t seq, const uint8_t* payload,
                       size_t plen)
 {
-    p[0] = TcpStream::kTypeData;
+    p[0] = tcp_stream::k_type_data;
     p[1] = 0;
     const uint16_t ns = htons(seq);
     const uint16_t z = 0;
@@ -39,7 +39,7 @@ void write_data_frame(uint8_t* p, uint16_t seq, const uint8_t* payload,
 
 void write_ack_frame(uint8_t* p, uint16_t ack)
 {
-    p[0] = TcpStream::kTypeAck;
+    p[0] = tcp_stream::k_type_ack;
     p[1] = 0;
     const uint16_t z = 0;
     const uint16_t na = htons(ack);
@@ -55,7 +55,7 @@ uint16_t read_ack(const uint8_t* p)
     return ntohs(v);
 }
 
-void handshake(TcpStream* a, TcpStream* b)
+void handshake(tcp_stream* a, tcp_stream* b)
 {
     a->local_up();
     exchange(a, b);
@@ -73,8 +73,8 @@ void handshake(TcpStream* a, TcpStream* b)
 
 TEST(TcpStreamTest, ConnectAndPayload)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     const uint8_t hello[] = {'h', 'i'};
@@ -91,8 +91,8 @@ TEST(TcpStreamTest, ConnectAndPayload)
 
 TEST(TcpStreamTest, LocalFinEndsPeer)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     a.local_down();
@@ -103,8 +103,8 @@ TEST(TcpStreamTest, LocalFinEndsPeer)
 
 TEST(TcpStreamTest, LocalDownQueuesCloseUntilPulled)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     a.local_down();
@@ -112,15 +112,15 @@ TEST(TcpStreamTest, LocalDownQueuesCloseUntilPulled)
     uint8_t buf[64];
     bool is_ack = false;
     const size_t n = a.pull_tx(buf, sizeof(buf), &is_ack);
-    ASSERT_EQ(n, TcpStream::kHeaderSize);
+    ASSERT_EQ(n, tcp_stream::k_header_size);
     EXPECT_TRUE(is_ack);
-    EXPECT_EQ(buf[0], TcpStream::kTypeClose);
+    EXPECT_EQ(buf[0], tcp_stream::k_type_close);
 }
 
 TEST(TcpStreamTest, SecondSessionAfterPeerReset)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     a.local_down();
@@ -149,8 +149,8 @@ TEST(TcpStreamTest, SecondSessionAfterPeerReset)
 
 TEST(TcpStreamTest, LocalAbortEndsPeer)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     a.local_abort();
@@ -161,8 +161,8 @@ TEST(TcpStreamTest, LocalAbortEndsPeer)
 
 TEST(TcpStreamTest, PiggybackAckAtSendTime)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     const uint8_t from_b[] = {'x'};
@@ -181,16 +181,16 @@ TEST(TcpStreamTest, PiggybackAckAtSendTime)
 
     is_ack = true;
     const size_t n = a.pull_tx(buf, sizeof(buf), &is_ack);
-    ASSERT_GT(n, TcpStream::kHeaderSize);
+    ASSERT_GT(n, tcp_stream::k_header_size);
     EXPECT_FALSE(is_ack);
-    EXPECT_EQ(buf[0], TcpStream::kTypeData);
+    EXPECT_EQ(buf[0], tcp_stream::k_type_data);
     EXPECT_EQ(read_ack(buf), 1);
 }
 
 TEST(TcpStreamTest, StaleAckDoesNotDropWindow)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     for (int i = 0; i < 3; i++)
@@ -201,10 +201,10 @@ TEST(TcpStreamTest, StaleAckDoesNotDropWindow)
         bool is_ack = false;
         ASSERT_GT(a.pull_tx(buf, sizeof(buf), &is_ack), 0u);
         EXPECT_FALSE(is_ack);
-        b.on_radio_rx(buf, TcpStream::kHeaderSize + 1);
+        b.on_radio_rx(buf, tcp_stream::k_header_size + 1);
     }
 
-    uint8_t ack[TcpStream::kHeaderSize];
+    uint8_t ack[tcp_stream::k_header_size];
     write_ack_frame(ack, 2);
     a.on_radio_rx(ack, sizeof(ack));
 
@@ -216,15 +216,15 @@ TEST(TcpStreamTest, StaleAckDoesNotDropWindow)
     uint8_t buf[2048];
     bool is_ack = true;
     const size_t n = a.pull_tx(buf, sizeof(buf), &is_ack);
-    ASSERT_GT(n, TcpStream::kHeaderSize);
+    ASSERT_GT(n, tcp_stream::k_header_size);
     EXPECT_FALSE(is_ack);
-    EXPECT_EQ(buf[0], TcpStream::kTypeData);
+    EXPECT_EQ(buf[0], tcp_stream::k_type_data);
 }
 
 TEST(TcpStreamTest, OutOfOrderBufferedThenDelivered)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     // Queue three 1-byte segments from A.
@@ -239,7 +239,7 @@ TEST(TcpStreamTest, OutOfOrderBufferedThenDelivered)
     {
         bool is_ack = false;
         lens[i] = a.pull_tx(frames[i], sizeof(frames[i]), &is_ack);
-        ASSERT_GT(lens[i], TcpStream::kHeaderSize);
+        ASSERT_GT(lens[i], tcp_stream::k_header_size);
         EXPECT_FALSE(is_ack);
     }
 
@@ -264,8 +264,8 @@ TEST(TcpStreamTest, OutOfOrderBufferedThenDelivered)
 
 TEST(TcpStreamTest, SackSkipsRetransmitOfReceivedSegment)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     for (int i = 0; i < 2; i++)
@@ -278,8 +278,8 @@ TEST(TcpStreamTest, SackSkipsRetransmitOfReceivedSegment)
     bool is_ack = false;
     const size_t n0 = a.pull_tx(f0, sizeof(f0), &is_ack);
     const size_t n1 = a.pull_tx(f1, sizeof(f1), &is_ack);
-    ASSERT_GT(n0, TcpStream::kHeaderSize);
-    ASSERT_GT(n1, TcpStream::kHeaderSize);
+    ASSERT_GT(n0, tcp_stream::k_header_size);
+    ASSERT_GT(n1, tcp_stream::k_header_size);
 
     // B gets only seq 1 (OOO). ACK carries cum=0 and SACK {1,1}.
     b.on_radio_rx(f1, n1);
@@ -287,7 +287,7 @@ TEST(TcpStreamTest, SackSkipsRetransmitOfReceivedSegment)
     uint8_t ackbuf[64];
     const size_t an = b.pull_tx(ackbuf, sizeof(ackbuf), &is_ack);
     ASSERT_TRUE(is_ack);
-    ASSERT_GE(an, TcpStream::kHeaderSize + TcpStream::kSackBlockSize);
+    ASSERT_GE(an, tcp_stream::k_header_size + tcp_stream::k_sack_block_size);
     EXPECT_EQ(read_ack(ackbuf), 0);
     a.on_radio_rx(ackbuf, an);
 
@@ -296,7 +296,7 @@ TEST(TcpStreamTest, SackSkipsRetransmitOfReceivedSegment)
     // Only the hole (seq 0) should be eligible; seq 1 is SACKed.
     uint8_t retx[64];
     const size_t rn = a.pull_tx(retx, sizeof(retx), &is_ack);
-    ASSERT_GT(rn, TcpStream::kHeaderSize);
+    ASSERT_GT(rn, tcp_stream::k_header_size);
     EXPECT_FALSE(is_ack);
     uint16_t seq;
     memcpy(&seq, retx + 2, 2);
@@ -306,10 +306,10 @@ TEST(TcpStreamTest, SackSkipsRetransmitOfReceivedSegment)
 
 TEST(TcpStreamTest, AcceptsTcpStopsAtIngestCap)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
-    std::vector<uint8_t> chunk(TcpStream::kMaxSegment, 0x5a);
+    std::vector<uint8_t> chunk(tcp_stream::k_max_segment, 0x5a);
     while (a.accepts_tcp())
     {
         const size_t n =
@@ -317,20 +317,20 @@ TEST(TcpStreamTest, AcceptsTcpStopsAtIngestCap)
         a.on_tcp_bytes(chunk.data(), n);
     }
     EXPECT_EQ(a.tcp_in_room(), 0u);
-    EXPECT_GE(a.tcp_in_size(), TcpStream::kTcpInMax);
-    EXPECT_EQ(a.unacked_count(), TcpStream::kWindow);
+    EXPECT_GE(a.tcp_in_size(), tcp_stream::k_tcp_in_max);
+    EXPECT_EQ(a.unacked_count(), tcp_stream::k_window);
 }
 
 TEST(TcpStreamTest, SegmentsFitEthernetUdpMtu)
 {
-    EXPECT_LE(TcpStream::kHeaderSize + TcpStream::kMaxSegment,
-              TcpStream::kMaxUdpPayload);
+    EXPECT_LE(tcp_stream::k_header_size + tcp_stream::k_max_segment,
+              tcp_stream::k_max_udp_payload);
 }
 
 TEST(TcpStreamTest, DataBeforeLocalUpIsBuffered)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     a.local_up();
     exchange(&a, &b);
     EXPECT_TRUE(b.wants_connect());
@@ -339,7 +339,7 @@ TEST(TcpStreamTest, DataBeforeLocalUpIsBuffered)
     const uint8_t hello[] = {'h', 'i'};
     uint8_t frame[16];
     write_data_frame(frame, 0, hello, sizeof(hello));
-    b.on_radio_rx(frame, TcpStream::kHeaderSize + sizeof(hello));
+    b.on_radio_rx(frame, tcp_stream::k_header_size + sizeof(hello));
     b.local_up();
 
     uint8_t out[16];
@@ -351,8 +351,8 @@ TEST(TcpStreamTest, DataBeforeLocalUpIsBuffered)
 
 TEST(TcpStreamTest, ShortDataFrameDoesNotAdvanceRx)
 {
-    TcpStream a;
-    TcpStream b;
+    tcp_stream a;
+    tcp_stream b;
     handshake(&a, &b);
 
     const uint8_t hello[20] = {'h', 'i'};
@@ -360,7 +360,7 @@ TEST(TcpStreamTest, ShortDataFrameDoesNotAdvanceRx)
     uint8_t buf[2048];
     bool is_ack = false;
     const size_t n = a.pull_tx(buf, sizeof(buf), &is_ack);
-    ASSERT_GT(n, TcpStream::kHeaderSize + 4);
+    ASSERT_GT(n, tcp_stream::k_header_size + 4);
 
     b.on_radio_rx(buf, n - 4);
     uint8_t out[32];

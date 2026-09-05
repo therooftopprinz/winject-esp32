@@ -1,10 +1,10 @@
-#ifndef WINJECT_MANAGER_UPSTREAM_H_
-#define WINJECT_MANAGER_UPSTREAM_H_
+#ifndef WINJECT_MANAGER_STREAM_H_
+#define WINJECT_MANAGER_STREAM_H_
 
 #include <stddef.h>
 #include <stdint.h>
 
-struct StreamStats
+struct stream_stats_s
 {
     const char* proto = nullptr;
     // STREAM-N: unfecced / decoded payload bytes.
@@ -20,10 +20,10 @@ struct StreamStats
     uint64_t fec_fail = 0;
 };
 
-class Upstream
+class stream
 {
 public:
-    virtual ~Upstream() = default;
+    virtual ~stream() = default;
     virtual void on_radio_rx(const uint8_t* data, size_t len) = 0;
     virtual bool has_tx() const = 0;
     virtual bool has_ack() const
@@ -45,12 +45,12 @@ public:
         return 0;
     }
     // Interval counters for periodic STREAM stats. Zeros payload and air totals.
-    virtual StreamStats take_stats()
+    virtual stream_stats_s take_stats()
     {
-        StreamStats s;
+        stream_stats_s s;
         s.rx_bytes = take_rx_bytes();
         return s;
     }
 };
 
-#endif  // WINJECT_MANAGER_UPSTREAM_H_
+#endif  // WINJECT_MANAGER_STREAM_H_

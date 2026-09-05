@@ -3,17 +3,17 @@
 
 #include "config.h"
 #include "console_client.h"
-#include "radio_udp.h"
+#include "radio/wifi_udp.h"
 #include "reactor.h"
-#include "scheduler.h"
-#include "upstream.h"
+#include "tx_scheduler.h"
+#include "stream/stream.h"
 
 #include <memory>
 #include <chrono>
 #include <string>
 #include <vector>
 
-class App
+class app
 {
 public:
     bool load(const std::string& path);
@@ -32,12 +32,12 @@ private:
     void stats_tick();
     void flush_shutdown();
 
-    Config cfg_;
-    Reactor reactor_;
-    ConsoleClient console_;
-    Scheduler scheduler_;
-    std::vector<std::unique_ptr<RadioUdp>> radios_;
-    std::vector<std::unique_ptr<Upstream>> upstreams_;
+    config cfg_;
+    reactor reactor_;
+    console_client console_;
+    tx_scheduler scheduler_;
+    std::vector<std::unique_ptr<wifi_udp>> radios_;
+    std::vector<std::unique_ptr<stream>> upstreams_;
     in_addr device_ip_{};
     in_addr local_ip_{};
     int reconnect_ticks_ = 0;

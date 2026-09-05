@@ -10,12 +10,12 @@
 #include <string>
 #include <vector>
 
-class ConsoleClient
+class console_client
 {
 public:
-    ~ConsoleClient();
+    ~console_client();
 
-    bool start_connect(const Config& cfg, std::string* error);
+    bool start_connect(const config& cfg, std::string* error);
     bool finish_connect(std::string* error);
     void close();
     int fd() const
@@ -26,11 +26,11 @@ public:
     {
         return local_ip_;
     }
-    bool apply_radio(const Config& cfg, std::string* error);
-    bool apply_upstream(const Config& cfg, const UpstreamConfig& up,
+    bool apply_radio(const config& cfg, std::string* error);
+    bool apply_upstream(const config& cfg, const upstream_config_s& up,
                         uint16_t inject_port, uint16_t forward_port,
                         in_addr local_ip, std::string* error);
-    bool program(const Config& cfg, const std::vector<uint16_t>& inject_ports,
+    bool program(const config& cfg, const std::vector<uint16_t>& inject_ports,
                  const std::vector<uint16_t>& forward_ports, in_addr* local_ip,
                  std::string* error);
 

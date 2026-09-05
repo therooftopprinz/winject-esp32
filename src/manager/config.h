@@ -6,36 +6,36 @@
 #include <string>
 #include <vector>
 
-enum class UpstreamMode
+enum class upstream_mode_e
 {
-    UdpGeneric,
-    UdpClient,
-    UdpServer,
-    TcpClient,
-    TcpServer,
+    udp_generic,
+    udp_client,
+    udp_server,
+    tcp_client,
+    tcp_server,
 };
 
-enum class RadioMode
+enum class radio_mode_e
 {
-    Standalone,
-    BfcTunnelDevice,
+    standalone,
+    bfc_tunnel_device,
 };
 
-enum class FecType
+enum class fec_type_e
 {
-    None,
-    RsBlockErasure,
+    none,
+    rs_block_erasure,
 };
 
-struct UpstreamConfig
+struct upstream_config_s
 {
     size_t index = 0;
-    UpstreamMode mode = UpstreamMode::UdpGeneric;
+    upstream_mode_e mode = upstream_mode_e::udp_generic;
     uint8_t airport[6]{};
     size_t scheduler_budget = 256;
     int rcv_buffer_size = 0;
     int snd_buffer_size = 0;
-    FecType fec_type = FecType::None;
+    fec_type_e fec_type = fec_type_e::none;
     int fec_k = 0;
     int fec_n = 0;
     int fec_timeout_ms = 20;
@@ -45,19 +45,19 @@ struct UpstreamConfig
     std::string connect_address;
 };
 
-struct Config
+struct config
 {
     std::string device;
     uint16_t console_port = 2323;
     uint8_t channel = 1;
     std::string modulation = "DSS_1M_L";
     int8_t power_dbm = 20;
-    RadioMode radio_mode = RadioMode::Standalone;
+    radio_mode_e radio_mode = radio_mode_e::standalone;
     uint32_t max_rate_kbps = 10000;
     std::string local_ip;
     uint16_t forward_base = 9210;
     bool skip_console = false;
-    std::vector<UpstreamConfig> upstreams;
+    std::vector<upstream_config_s> upstreams;
 
     bool load(const std::string& path, std::string* error);
     const char* radio_mode_name() const;

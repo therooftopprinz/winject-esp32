@@ -41,13 +41,13 @@ target_include_directories(winject_esp32_frame PRIVATE
 add_executable(winject-tests
     frame_test.cpp
     config_test.cpp
-    fec_test.cpp
+    basic_fec_test.cpp
     net_util_test.cpp
     tcp_stream_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/config.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/fec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/frames/basic_fec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/net_util.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/tcp_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/stream/tcp_stream.cpp
     $<TARGET_OBJECTS:winject_esp32_frame>
 )
 

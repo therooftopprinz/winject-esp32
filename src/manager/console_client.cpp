@@ -13,18 +13,18 @@
 #include <sys/socket.h>
 #include <vector>
 
-ConsoleClient::~ConsoleClient()
+console_client::~console_client()
 {
     close();
 }
 
-void ConsoleClient::close()
+void console_client::close()
 {
     close_socket(&sock_);
     pending_.clear();
 }
 
-bool ConsoleClient::start_connect(const Config& cfg, std::string* error)
+bool console_client::start_connect(const config& cfg, std::string* error)
 {
     close();
     in_addr ip = {};
@@ -54,7 +54,7 @@ bool ConsoleClient::start_connect(const Config& cfg, std::string* error)
     return true;
 }
 
-bool ConsoleClient::finish_connect(std::string* error)
+bool console_client::finish_connect(std::string* error)
 {
     if (sock_.fd() < 0)
     {
@@ -83,7 +83,7 @@ bool ConsoleClient::finish_connect(std::string* error)
     return true;
 }
 
-bool ConsoleClient::read_line(std::string* line, std::string* error)
+bool console_client::read_line(std::string* line, std::string* error)
 {
     using clock = std::chrono::steady_clock;
     const auto deadline = clock::now() + std::chrono::seconds(3);
@@ -138,7 +138,7 @@ bool ConsoleClient::read_line(std::string* line, std::string* error)
     }
 }
 
-bool ConsoleClient::send_cmd(const std::string& cmd, std::string* error)
+bool console_client::send_cmd(const std::string& cmd, std::string* error)
 {
     std::string wire = cmd;
     if (wire.empty() || wire.back() != '\n')
@@ -185,17 +185,17 @@ bool ConsoleClient::send_cmd(const std::string& cmd, std::string* error)
 static bool parse_upstream_rx(const std::string& line, std::string* airport,
                               uint16_t* rx_port)
 {
-    static const char kPrefix[] = "upstream_";
-    if (line.rfind(kPrefix, 0) != 0 || line.rfind("upstream unset", 0) == 0)
+    static const char k_prefix[] = "upstream_";
+    if (line.rfind(k_prefix, 0) != 0 || line.rfind("upstream unset", 0) == 0)
     {
         return false;
     }
-    const auto sp = line.find(' ', sizeof(kPrefix) - 1);
+    const auto sp = line.find(' ', sizeof(k_prefix) - 1);
     if (sp == std::string::npos)
     {
         return false;
     }
-    *airport = line.substr(sizeof(kPrefix) - 1, sp - (sizeof(kPrefix) - 1));
+    *airport = line.substr(sizeof(k_prefix) - 1, sp - (sizeof(k_prefix) - 1));
     const auto rx = line.find(" rx=");
     if (rx == std::string::npos)
     {
@@ -217,7 +217,7 @@ static bool parse_upstream_rx(const std::string& line, std::string* airport,
     return true;
 }
 
-bool ConsoleClient::query_status(std::vector<std::string>* lines,
+bool console_client::query_status(std::vector<std::string>* lines,
                                  std::string* error)
 {
     lines->clear();
@@ -316,7 +316,7 @@ bool ConsoleClient::query_status(std::vector<std::string>* lines,
     return false;
 }
 
-bool ConsoleClient::release_inject_port(uint16_t port,
+bool console_client::release_inject_port(uint16_t port,
                                         const std::string& keep_airport,
                                         std::string* error)
 {
@@ -349,7 +349,7 @@ bool ConsoleClient::release_inject_port(uint16_t port,
     return true;
 }
 
-bool ConsoleClient::program(const Config& cfg,
+bool console_client::program(const config& cfg,
                             const std::vector<uint16_t>& inject_ports,
                             const std::vector<uint16_t>& forward_ports,
                             in_addr* local_ip_out, std::string* error)
@@ -468,7 +468,7 @@ bool ConsoleClient::program(const Config& cfg,
         }
         std::string sur = "set_upstream_rx ";
         std::string sut = "set_upstream_tx ";
-        if (cfg.radio_mode == RadioMode::Standalone)
+        if (cfg.radio_mode == radio_mode_e::standalone)
         {
             sur += airport + " ";
             sut += airport + " ";
@@ -488,7 +488,7 @@ bool ConsoleClient::program(const Config& cfg,
     return true;
 }
 
-bool ConsoleClient::apply_radio(const Config& cfg, std::string* error)
+bool console_client::apply_radio(const config& cfg, std::string* error)
 {
     if (!send_cmd(std::string("set_mode ") + cfg.radio_mode_name(), error) ||
         !send_cmd("set_channel " + std::to_string(cfg.channel), error) ||
@@ -503,7 +503,7 @@ bool ConsoleClient::apply_radio(const Config& cfg, std::string* error)
     return true;
 }
 
-bool ConsoleClient::apply_upstream(const Config& cfg, const UpstreamConfig& up,
+bool console_client::apply_upstream(const config& cfg, const upstream_config_s& up,
                                   uint16_t inject_port, uint16_t forward_port,
                                   in_addr local_ip, std::string* error)
 {
@@ -514,7 +514,7 @@ bool ConsoleClient::apply_upstream(const Config& cfg, const UpstreamConfig& up,
     }
     std::string sur = "set_upstream_rx ";
     std::string sut = "set_upstream_tx ";
-    if (cfg.radio_mode == RadioMode::Standalone)
+    if (cfg.radio_mode == radio_mode_e::standalone)
     {
         sur += airport + " ";
         sut += airport + " ";

@@ -40,7 +40,7 @@ upstream-0.scheduler_budget = 100
 upstream-0.rx               = 0.0.0.0:22081
 upstream-0.tx               = 127.0.0.1:21082
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     ASSERT_TRUE(cfg.load(path, &err)) << err;
     EXPECT_EQ(cfg.device, "192.168.32.1");
@@ -48,16 +48,16 @@ upstream-0.tx               = 127.0.0.1:21082
     EXPECT_EQ(cfg.channel, 1);
     EXPECT_EQ(cfg.modulation, "OFDM_24M");
     EXPECT_EQ(cfg.power_dbm, 20);
-    EXPECT_EQ(cfg.radio_mode, RadioMode::Standalone);
+    EXPECT_EQ(cfg.radio_mode, radio_mode_e::standalone);
     ASSERT_EQ(cfg.upstreams.size(), 1u);
-    EXPECT_EQ(cfg.upstreams[0].mode, UpstreamMode::UdpGeneric);
-    EXPECT_EQ(cfg.upstreams[0].fec_type, FecType::None);
+    EXPECT_EQ(cfg.upstreams[0].mode, upstream_mode_e::udp_generic);
+    EXPECT_EQ(cfg.upstreams[0].fec_type, fec_type_e::none);
     std::remove(path.c_str());
 }
 
 TEST(ConfigTest, DefaultMaxRateWhenOmitted)
 {
-    EXPECT_EQ(Config::phy_rate_kbps("OFDM_24M"), 24000u);
+    EXPECT_EQ(config::phy_rate_kbps("OFDM_24M"), 24000u);
     // Formula helper still exists; omitted config uses a fixed 10000 default.
 
     const std::string path = write_conf(R"(
@@ -74,7 +74,7 @@ upstream-0.scheduler_budget = 100
 upstream-0.rx               = 0.0.0.0:22081
 upstream-0.tx               = 127.0.0.1:21082
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     ASSERT_TRUE(cfg.load(path, &err)) << err;
     EXPECT_EQ(cfg.max_rate_kbps, 10000u);
@@ -97,7 +97,7 @@ upstream-0.airport          = 00:00:00:AA:BB:CC
 upstream-0.scheduler_budget = 100
 upstream-0.connect_address  = 127.0.0.1:9
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     EXPECT_FALSE(cfg.load(path, &err));
     EXPECT_NE(err.find("airport"), std::string::npos);
@@ -123,11 +123,11 @@ upstream-0.fec.k            = 10
 upstream-0.fec.n            = 15
 upstream-0.fec.timeout_ms   = 25
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     ASSERT_TRUE(cfg.load(path, &err)) << err;
     ASSERT_EQ(cfg.upstreams.size(), 1u);
-    EXPECT_EQ(cfg.upstreams[0].fec_type, FecType::RsBlockErasure);
+    EXPECT_EQ(cfg.upstreams[0].fec_type, fec_type_e::rs_block_erasure);
     EXPECT_EQ(cfg.upstreams[0].fec_k, 10);
     EXPECT_EQ(cfg.upstreams[0].fec_n, 15);
     EXPECT_EQ(cfg.upstreams[0].fec_timeout_ms, 25);
@@ -152,7 +152,7 @@ upstream-0.fec.type         = RS_BLOCK_ERASURE
 upstream-0.fec.k            = 15
 upstream-0.fec.n            = 10
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     EXPECT_FALSE(cfg.load(path, &err));
     EXPECT_NE(err.find("fec.k"), std::string::npos);
@@ -177,7 +177,7 @@ upstream-0.fec.type         = RS_BLOCK_ERASURE
 upstream-0.fec.k            = 10
 upstream-0.fec.n            = 15
 )");
-    Config cfg;
+    config cfg;
     std::string err;
     EXPECT_FALSE(cfg.load(path, &err));
     EXPECT_NE(err.find("UDP"), std::string::npos);

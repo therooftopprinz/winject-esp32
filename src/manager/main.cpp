@@ -4,7 +4,7 @@
 
 #include <signal.h>
 
-static App* g_app = nullptr;
+static app* g_app = nullptr;
 
 static void on_signal(int)
 {
@@ -18,14 +18,14 @@ int main(int argc, char** argv)
 {
     const char* path = argc > 1 ? argv[1] : "winject.conf";
     signal(SIGPIPE, SIG_IGN);
-    App app;
-    g_app = &app;
+    app instance;
+    g_app = &instance;
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    if (!app.load(path))
+    if (!instance.load(path))
     {
         LOG_ERR("usage: winject-manager <config>");
         return 1;
     }
-    return app.run();
+    return instance.run();
 }

@@ -1,5 +1,5 @@
-#ifndef WINJECT_MANAGER_SCHEDULER_H_
-#define WINJECT_MANAGER_SCHEDULER_H_
+#ifndef WINJECT_MANAGER_TX_SCHEDULER_H_
+#define WINJECT_MANAGER_TX_SCHEDULER_H_
 
 #include "config.h"
 
@@ -10,25 +10,25 @@
 #include <string>
 #include <vector>
 
-class RadioUdp;
-class Upstream;
+class wifi_udp;
+class stream;
 
-class Scheduler
+class tx_scheduler
 {
 public:
     void configure(uint32_t max_rate_kbps);
-    void add(Upstream* up, RadioUdp* radio, size_t budget);
+    void add(stream* up, wifi_udp* radio, size_t budget);
     void tick();
-    void log_stats(double interval_sec, const std::vector<Upstream*>& ups);
+    void log_stats(double interval_sec, const std::vector<stream*>& ups);
     uint64_t take_air_bytes();
 
 private:
     void refill();
 
-    struct Slot
+    struct slot_s
     {
-        Upstream* up = nullptr;
-        RadioUdp* radio = nullptr;
+        stream* up = nullptr;
+        wifi_udp* radio = nullptr;
         size_t budget = 0;
     };
 
@@ -39,9 +39,9 @@ private:
     bool ticking_ = false;
     bool tick_again_ = false;
     std::chrono::steady_clock::time_point last_refill_{};
-    std::vector<Slot> slots_;
+    std::vector<slot_s> slots_;
     uint8_t buf_[2048]{};
     uint64_t air_bytes_interval_ = 0;
 };
 
-#endif  // WINJECT_MANAGER_SCHEDULER_H_
+#endif  // WINJECT_MANAGER_TX_SCHEDULER_H_

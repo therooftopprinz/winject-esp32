@@ -1,36 +1,30 @@
 #ifndef WINJECT_MANAGER_TCP_STREAM_H_
 #define WINJECT_MANAGER_TCP_STREAM_H_
 
-#include "upstream.h"
-
 #include <chrono>
 #include <cstdint>
 #include <deque>
 #include <map>
 #include <vector>
 
-class TcpStream : public Upstream
+// Reliable byte pipe over radio UDP for TCP forwarding (ARQ + SACK).
+class tcp_stream
 {
 public:
-    static constexpr uint8_t kTypeData = 1;
-    static constexpr uint8_t kTypeAck = 2;
-    static constexpr uint8_t kTypeConnect = 3;
-    static constexpr uint8_t kTypeClose = 4;
-    static constexpr uint8_t kTypeAbort = 5;
-    static constexpr size_t kHeaderSize = 8;
-    // Ethernet 1500 - IPv4 20 - UDP 8 = 1472. kMaxSegment 1468 made 1476-byte
-    // datagrams that IP-fragment (4-byte second fragment); the sink then sees
-    // a short frame, drops DATA, never advances rx_seq, and the window sticks.
-    // 1400 matches the working bw_test / RTP size.
-    static constexpr size_t kMaxUdpPayload = 1472;
-    static constexpr size_t kMaxSegment = 1400;
-    static_assert(kHeaderSize + kMaxSegment <= kMaxUdpPayload,
+    static constexpr uint8_t k_type_data = 1;
+    static constexpr uint8_t k_type_ack = 2;
+    static constexpr uint8_t k_type_connect = 3;
+    static constexpr uint8_t k_type_close = 4;
+    static constexpr uint8_t k_type_abort = 5;
+    static constexpr size_t k_header_size = 8;
+    static constexpr size_t k_max_udp_payload = 1472;
+    static constexpr size_t k_max_segment = 1400;
+    static_assert(k_header_size + k_max_segment <= k_max_udp_payload,
                   "TCP radio frame must fit in one unfragmented UDP datagram");
-    static constexpr size_t kWindow = 256;
-    static constexpr size_t kSackBlockSize = 4;  // sn + count
-    static constexpr size_t kMaxSackBlocks = 8;
-    // Cap host TCP ingest so we return to the reactor and send/receive ACKs.
-    static constexpr size_t kTcpInMax = kWindow * kMaxSegment * 2;
+    static constexpr size_t k_window = 256;
+    static constexpr size_t k_sack_block_size = 4;  // sn + count
+    static constexpr size_t k_max_sack_blocks = 8;
+    static constexpr size_t k_tcp_in_max = k_window * k_max_segment * 2;
 
     void reset();
     void local_up();
@@ -41,7 +35,7 @@ public:
     {
         return peer_close_;
     }
-    // Peer has sent CONNECT (retransmits keep this true until CLOSE/ABORT).
+
     bool peer_connected() const
     {
         return peer_connect_ && !peer_close_;
@@ -57,7 +51,7 @@ public:
     size_t tcp_in_room() const
     {
         const size_t n = tcp_in_size();
-        return n < kTcpInMax ? kTcpInMax - n : 0;
+        return n < k_tcp_in_max ? k_tcp_in_max - n : 0;
     }
     size_t unacked_count() const
     {
@@ -70,11 +64,11 @@ public:
     void on_tcp_bytes(const uint8_t* data, size_t len);
     bool pull_tcp(uint8_t* out, size_t max, size_t* n);
 
-    void on_radio_rx(const uint8_t* data, size_t len) override;
-    bool has_tx() const override;
-    bool has_ack() const override;
-    size_t pull_tx(uint8_t* out, size_t max, bool* is_ack) override;
-    void on_tick() override;
+    void on_radio_rx(const uint8_t* data, size_t len);
+    bool has_tx() const;
+    bool has_ack() const;
+    size_t pull_tx(uint8_t* out, size_t max, bool* is_ack);
+    void on_tick();
     bool should_give_up() const
     {
         return connect_give_up_ || data_stall_give_up_;
@@ -94,7 +88,7 @@ public:
     }
 
 private:
-    struct Pending
+    struct pending_s
     {
         uint16_t seq = 0;
         std::vector<uint8_t> frame;
@@ -130,7 +124,7 @@ private:
     std::chrono::steady_clock::time_point last_ack_progress_{};
     std::vector<uint8_t> tcp_in_;
     std::deque<uint8_t> tcp_out_;
-    std::deque<Pending> unacked_;
+    std::deque<pending_s> unacked_;
     std::deque<std::vector<uint8_t>> ctrlq_;
     // Out-of-order RX buffer: seq -> payload (selective repeat).
     std::map<uint16_t, std::vector<uint8_t>> reorder_;

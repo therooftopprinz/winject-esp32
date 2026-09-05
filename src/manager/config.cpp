@@ -21,31 +21,31 @@ static std::string trim(const std::string& s)
     return s.substr(start, end - start + 1);
 }
 
-static bool parse_mode(const std::string& text, UpstreamMode* mode)
+static bool parse_mode(const std::string& text, upstream_mode_e* mode)
 {
     if (text == "UDP_GENERIC_FORWARDING")
     {
-        *mode = UpstreamMode::UdpGeneric;
+        *mode = upstream_mode_e::udp_generic;
         return true;
     }
     if (text == "UDP_CLIENT_FORWARDING")
     {
-        *mode = UpstreamMode::UdpClient;
+        *mode = upstream_mode_e::udp_client;
         return true;
     }
     if (text == "UDP_SERVER_FORWARDING")
     {
-        *mode = UpstreamMode::UdpServer;
+        *mode = upstream_mode_e::udp_server;
         return true;
     }
     if (text == "TCP_CLIENT_FORWARDING")
     {
-        *mode = UpstreamMode::TcpClient;
+        *mode = upstream_mode_e::tcp_client;
         return true;
     }
     if (text == "TCP_SERVER_FORWARDING")
     {
-        *mode = UpstreamMode::TcpServer;
+        *mode = upstream_mode_e::tcp_server;
         return true;
     }
     return false;
@@ -72,21 +72,21 @@ static bool require_arg(const bfc::configuration_parser& p,
     return true;
 }
 
-const char* Config::radio_mode_name() const
+const char* config::radio_mode_name() const
 {
-    return radio_mode == RadioMode::BfcTunnelDevice ? "BFC_TUNNEL_DEVICE"
+    return radio_mode == radio_mode_e::bfc_tunnel_device ? "BFC_TUNNEL_DEVICE"
                                                     : "STANDALONE";
 }
 
-uint32_t Config::phy_rate_kbps(const std::string& modulation)
+uint32_t config::phy_rate_kbps(const std::string& modulation)
 {
     // Named rates from docs/winject.md (20 MHz MCS column).
-    struct Entry
+    struct entry_s
     {
         const char* name;
         uint32_t kbps;
     };
-    static constexpr Entry kTable[] = {
+    static constexpr entry_s k_table[] = {
         {"DSS_1M_L", 1000},       {"DSS_2M_S", 2000},
         {"DSS_2M_L", 2000},       {"CCK_5M_L", 5500},
         {"CCK_5M_S", 5500},       {"CCK_11M_L", 11000},
@@ -111,7 +111,7 @@ uint32_t Config::phy_rate_kbps(const std::string& modulation)
         upper.push_back(
             static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
     }
-    for (const auto& e : kTable)
+    for (const auto& e : k_table)
     {
         if (upper == e.name)
         {
@@ -121,7 +121,7 @@ uint32_t Config::phy_rate_kbps(const std::string& modulation)
     return 0;
 }
 
-uint32_t Config::derive_max_rate_kbps(const std::string& modulation)
+uint32_t config::derive_max_rate_kbps(const std::string& modulation)
 {
     const uint32_t phy = phy_rate_kbps(modulation);
     if (phy == 0)
@@ -130,14 +130,14 @@ uint32_t Config::derive_max_rate_kbps(const std::string& modulation)
     }
     // Match tools/bw_test.py auto_offer for a full MPDU. Scheduler/ingest
     // ceiling is ~70% of that UDP estimate (~10 Mbps for OFDM_24M).
-    constexpr size_t kPayload = 1400;
+    constexpr size_t k_payload = 1400;
     const double preamble_us = phy <= 11000 ? 200.0 : 40.0;
     const double mac_us = phy <= 11000 ? 400.0 : 150.0;
-    const double mpdu_bits = (24.0 + static_cast<double>(kPayload)) * 8.0;
+    const double mpdu_bits = (24.0 + static_cast<double>(k_payload)) * 8.0;
     const double air_us =
         preamble_us + (mpdu_bits / static_cast<double>(phy)) * 1000.0 + mac_us;
     const double udp_kbps =
-        (static_cast<double>(kPayload) * 8.0) / (air_us / 1000.0) * 0.85;
+        (static_cast<double>(k_payload) * 8.0) / (air_us / 1000.0) * 0.85;
     const double tcp_kbps = udp_kbps * 0.70;
     uint32_t out = static_cast<uint32_t>(tcp_kbps + 0.5);
     if (out < 64)
@@ -147,7 +147,7 @@ uint32_t Config::derive_max_rate_kbps(const std::string& modulation)
     return out;
 }
 
-bool Config::load(const std::string& path, std::string* error)
+bool config::load(const std::string& path, std::string* error)
 {
     std::ifstream in(path);
     if (!in.is_open())
@@ -207,11 +207,11 @@ bool Config::load(const std::string& path, std::string* error)
     }
     if (mode_s == "STANDALONE")
     {
-        radio_mode = RadioMode::Standalone;
+        radio_mode = radio_mode_e::standalone;
     }
     else if (mode_s == "BFC_TUNNEL_DEVICE")
     {
-        radio_mode = RadioMode::BfcTunnelDevice;
+        radio_mode = radio_mode_e::bfc_tunnel_device;
     }
     else
     {
@@ -255,7 +255,7 @@ bool Config::load(const std::string& path, std::string* error)
         *error = "invalid upstream.size";
         return false;
     }
-    if (radio_mode == RadioMode::BfcTunnelDevice && *size != 1)
+    if (radio_mode == radio_mode_e::bfc_tunnel_device && *size != 1)
     {
         *error = "BFC_TUNNEL_DEVICE allows only one upstream";
         return false;
@@ -264,7 +264,7 @@ bool Config::load(const std::string& path, std::string* error)
     upstreams.clear();
     for (size_t i = 0; i < *size; i++)
     {
-        UpstreamConfig u;
+        upstream_config_s u;
         u.index = i;
         std::string umode;
         if (!require_arg(parser, key_of(i, "mode"), &umode, error))
@@ -286,7 +286,7 @@ bool Config::load(const std::string& path, std::string* error)
             *error = "invalid " + key_of(i, "airport");
             return false;
         }
-        if (radio_mode == RadioMode::BfcTunnelDevice &&
+        if (radio_mode == radio_mode_e::bfc_tunnel_device &&
             !airport_is_zero(u.airport))
         {
             *error = "BFC_TUNNEL_DEVICE airport must be 0";
@@ -318,8 +318,8 @@ bool Config::load(const std::string& path, std::string* error)
                 *error = "invalid " + key_of(i, "fec.type");
                 return false;
             }
-            if (u.mode == UpstreamMode::TcpClient ||
-                u.mode == UpstreamMode::TcpServer)
+            if (u.mode == upstream_mode_e::tcp_client ||
+                u.mode == upstream_mode_e::tcp_server)
             {
                 *error =
                     key_of(i, "fec.type") + " is only valid for UDP upstreams";
@@ -333,7 +333,7 @@ bool Config::load(const std::string& path, std::string* error)
                          key_of(i, "fec.n") + " (need 1 <= k < n <= 255)";
                 return false;
             }
-            u.fec_type = FecType::RsBlockErasure;
+            u.fec_type = fec_type_e::rs_block_erasure;
             u.fec_k = static_cast<int>(*fk);
             u.fec_n = static_cast<int>(*fn);
             auto fto = parser.as<int>(key_of(i, "fec.timeout_ms"));
@@ -348,28 +348,28 @@ bool Config::load(const std::string& path, std::string* error)
             }
         }
 
-        if (u.mode == UpstreamMode::UdpGeneric &&
+        if (u.mode == upstream_mode_e::udp_generic &&
             (u.rx.empty() || u.tx.empty()))
         {
             *error = "UDP_GENERIC_FORWARDING needs rx and tx";
             return false;
         }
-        if (u.mode == UpstreamMode::UdpClient && u.connect_address.empty())
+        if (u.mode == upstream_mode_e::udp_client && u.connect_address.empty())
         {
             *error = "UDP_CLIENT_FORWARDING needs connect_address";
             return false;
         }
-        if (u.mode == UpstreamMode::UdpServer && u.bind_address.empty())
+        if (u.mode == upstream_mode_e::udp_server && u.bind_address.empty())
         {
             *error = "UDP_SERVER_FORWARDING needs bind_address";
             return false;
         }
-        if (u.mode == UpstreamMode::TcpClient && u.connect_address.empty())
+        if (u.mode == upstream_mode_e::tcp_client && u.connect_address.empty())
         {
             *error = "TCP_CLIENT_FORWARDING needs connect_address";
             return false;
         }
-        if (u.mode == UpstreamMode::TcpServer && u.bind_address.empty())
+        if (u.mode == upstream_mode_e::tcp_server && u.bind_address.empty())
         {
             *error = "TCP_SERVER_FORWARDING needs bind_address";
             return false;

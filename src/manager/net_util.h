@@ -8,7 +8,7 @@
 
 #include <string>
 
-constexpr size_t kWifiPayloadMax = 1476;
+constexpr size_t k_wifi_payload_max = 1476;
 
 bool parse_host_port(const std::string& text, sockaddr_in* out);
 bool parse_host(const std::string& text, in_addr* out);

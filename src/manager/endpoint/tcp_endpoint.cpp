@@ -1,4 +1,4 @@
-#include "tcp_endpoint.h"
+#include "endpoint/tcp_endpoint.h"
 
 #include "log.h"
 
@@ -10,17 +10,17 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-TcpEndpoint::~TcpEndpoint()
+tcp_endpoint::~tcp_endpoint()
 {
     close();
 }
 
-void TcpEndpoint::set_tx_kick(std::function<void()> kick)
+void tcp_endpoint::set_tx_kick(std::function<void()> kick)
 {
     tx_kick_ = std::move(kick);
 }
 
-void TcpEndpoint::kick_tx()
+void tcp_endpoint::kick_tx()
 {
     if (tx_kick_)
     {
@@ -28,7 +28,7 @@ void TcpEndpoint::kick_tx()
     }
 }
 
-void TcpEndpoint::apply_buffers(bfc::socket& sock)
+void tcp_endpoint::apply_buffers(bfc::socket& sock)
 {
     if (cfg_.rcv_buffer_size > 0)
     {
@@ -41,11 +41,11 @@ void TcpEndpoint::apply_buffers(bfc::socket& sock)
     sock.set_sock_opt(IPPROTO_TCP, TCP_NODELAY, 1);
 }
 
-bool TcpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
+bool tcp_endpoint::open(reactor& reactor, const upstream_config_s& cfg)
 {
     reactor_ = &reactor;
     cfg_ = cfg;
-    if (cfg.mode == UpstreamMode::TcpServer)
+    if (cfg.mode == upstream_mode_e::tcp_server)
     {
         listen_sock_ = make_tcp4();
         sockaddr_in addr = {};
@@ -65,7 +65,7 @@ bool TcpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
     return true;
 }
 
-void TcpEndpoint::close()
+void tcp_endpoint::close()
 {
     close_client();
     if (listen_sock_.fd() >= 0)
@@ -78,7 +78,7 @@ void TcpEndpoint::close()
     }
 }
 
-void TcpEndpoint::stop_rx_thread()
+void tcp_endpoint::stop_rx_thread()
 {
     rx_stop_ = true;
     if (rx_fd_ >= 0)
@@ -100,7 +100,7 @@ void TcpEndpoint::stop_rx_thread()
     rx_accept_ = true;
 }
 
-bool TcpEndpoint::start_rx_thread()
+bool tcp_endpoint::start_rx_thread()
 {
     stop_rx_thread();
     if (client_sock_.fd() < 0 || reactor_ == nullptr)
@@ -130,7 +130,7 @@ bool TcpEndpoint::start_rx_thread()
     return true;
 }
 
-void TcpEndpoint::sync_rx_accept()
+void tcp_endpoint::sync_rx_accept()
 {
     // Pause when the stream cannot ingest (handshake or tcp_in full). Keep
     // rx_q_ so mpegts PAT/PMT at the start of the gst socket is not dropped.
@@ -154,7 +154,7 @@ void TcpEndpoint::sync_rx_accept()
     }
 }
 
-void TcpEndpoint::rx_loop()
+void tcp_endpoint::rx_loop()
 {
     uint8_t buf[16384];
     while (!rx_stop_)
@@ -167,7 +167,7 @@ void TcpEndpoint::rx_loop()
         // Pause when the reactor says so, or before rx_q_ grows without bound
         // while CONNECT is still in flight.
         if (!rx_accept_.load(std::memory_order_relaxed) ||
-            qn >= TcpStream::kTcpInMax)
+            qn >= tcp_stream::k_tcp_in_max)
         {
             pollfd pfd = {rx_fd_, POLLIN, 0};
             poll(&pfd, 1, 5);
@@ -218,7 +218,7 @@ void TcpEndpoint::rx_loop()
     }
 }
 
-void TcpEndpoint::on_rx_wake()
+void tcp_endpoint::on_rx_wake()
 {
     rx_wake_pending_ = false;
     if (!stream_.accepts_tcp())
@@ -270,7 +270,7 @@ void TcpEndpoint::on_rx_wake()
     }
 }
 
-void TcpEndpoint::close_client()
+void tcp_endpoint::close_client()
 {
     stop_rx_thread();
     if (client_sock_.fd() >= 0)
@@ -282,13 +282,13 @@ void TcpEndpoint::close_client()
         close_socket(&client_sock_);
     }
     connecting_ = false;
-    // Clear any partially-sent TCP payload. Pulling from TcpStream discards
+    // Clear any partially-sent TCP payload. Pulling from tcp_stream discards
     // bytes, so unsent tails must not survive across clients.
     tx_pending_len_ = 0;
     tx_pending_off_ = 0;
 }
 
-void TcpEndpoint::on_local_fin()
+void tcp_endpoint::on_local_fin()
 {
     if (client_sock_.fd() >= 0)
     {
@@ -300,7 +300,7 @@ void TcpEndpoint::on_local_fin()
     sync_rx_accept();
 }
 
-void TcpEndpoint::on_local_abort()
+void tcp_endpoint::on_local_abort()
 {
     if (client_sock_.fd() >= 0)
     {
@@ -311,9 +311,9 @@ void TcpEndpoint::on_local_abort()
     sync_rx_accept();
 }
 
-void TcpEndpoint::on_peer_end()
+void tcp_endpoint::on_peer_end()
 {
-    if (cfg_.mode == UpstreamMode::TcpServer && client_sock_.fd() >= 0 &&
+    if (cfg_.mode == upstream_mode_e::tcp_server && client_sock_.fd() >= 0 &&
         !connecting_)
     {
         // Keep the camera gst socket; peer dropped, probe CONNECT again.
@@ -328,7 +328,7 @@ void TcpEndpoint::on_peer_end()
     stream_.reset();
 }
 
-bool TcpEndpoint::watch_client_write()
+bool tcp_endpoint::watch_client_write()
 {
     const int fd = client_sock_.fd();
     if (reactor_ == nullptr || fd < 0)
@@ -342,7 +342,7 @@ bool TcpEndpoint::watch_client_write()
                                    });
 }
 
-void TcpEndpoint::on_listen()
+void tcp_endpoint::on_listen()
 {
     if (listen_sock_.fd() < 0)
     {
@@ -379,7 +379,7 @@ void TcpEndpoint::on_listen()
     LOG_INF("tcp accepted %s", sockaddr_to_string(addr).c_str());
 }
 
-bool TcpEndpoint::start_connect()
+bool tcp_endpoint::start_connect()
 {
     if (client_sock_.fd() >= 0 || connecting_)
     {
@@ -414,7 +414,7 @@ bool TcpEndpoint::start_connect()
     return reactor_->req_write(client_sock_.fd());
 }
 
-void TcpEndpoint::on_connecting()
+void tcp_endpoint::on_connecting()
 {
     if (client_sock_.fd() < 0)
     {
@@ -442,7 +442,7 @@ void TcpEndpoint::on_connecting()
     on_client_write();
 }
 
-void TcpEndpoint::flush_tcp()
+void tcp_endpoint::flush_tcp()
 {
     if (client_sock_.fd() < 0 || connecting_)
     {
@@ -496,7 +496,7 @@ void TcpEndpoint::flush_tcp()
     }
 }
 
-void TcpEndpoint::on_client_write()
+void tcp_endpoint::on_client_write()
 {
     if (connecting_)
     {
@@ -506,23 +506,23 @@ void TcpEndpoint::on_client_write()
     flush_tcp();
 }
 
-size_t TcpEndpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
+size_t tcp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
 {
     const size_t n = stream_.pull_tx(out, max, is_ack);
     air_tx_bytes_interval_ += n;
     return n;
 }
 
-uint64_t TcpEndpoint::take_rx_bytes()
+uint64_t tcp_endpoint::take_rx_bytes()
 {
     const uint64_t n = radio_rx_bytes_interval_;
     radio_rx_bytes_interval_ = 0;
     return n;
 }
 
-StreamStats TcpEndpoint::take_stats()
+stream_stats_s tcp_endpoint::take_stats()
 {
-    StreamStats s;
+    stream_stats_s s;
     s.proto = "TCP";
     s.tcp = true;
     s.air_tx_bytes = air_tx_bytes_interval_;
@@ -542,25 +542,25 @@ StreamStats TcpEndpoint::take_stats()
     return s;
 }
 
-void TcpEndpoint::on_radio_rx(const uint8_t* data, size_t len)
+void tcp_endpoint::on_radio_rx(const uint8_t* data, size_t len)
 {
     if (data != nullptr && len > 0)
     {
         radio_rx_bytes_interval_ += len;
     }
     const bool connect =
-        len >= TcpStream::kHeaderSize && data[0] == TcpStream::kTypeConnect;
+        len >= tcp_stream::k_header_size && data[0] == tcp_stream::k_type_connect;
     // TCP_CLIENT opens the local app socket when the peer CONNECT arrives.
     // Retransmitted CONNECT must never tear down a connecting/live local TCP
     // session — that EOS's tcpserversrc, which sends CLOSE back and makes the
     // server stop air TX (TX LED goes dark right when the client starts).
-    if (connect && cfg_.mode == UpstreamMode::TcpClient &&
+    if (connect && cfg_.mode == upstream_mode_e::tcp_client &&
         !stream_.peer_connected() && client_sock_.fd() < 0 && !connecting_)
     {
         stream_.reset();
     }
     stream_.on_radio_rx(data, len);
-    if (cfg_.mode == UpstreamMode::TcpClient && stream_.wants_connect())
+    if (cfg_.mode == upstream_mode_e::tcp_client && stream_.wants_connect())
     {
         start_connect();
     }
@@ -573,23 +573,23 @@ void TcpEndpoint::on_radio_rx(const uint8_t* data, size_t len)
     flush_tcp();
 }
 
-bool TcpEndpoint::has_tx() const
+bool tcp_endpoint::has_tx() const
 {
     return stream_.has_tx();
 }
 
-bool TcpEndpoint::has_ack() const
+bool tcp_endpoint::has_ack() const
 {
     return stream_.has_ack();
 }
 
-void TcpEndpoint::announce_down()
+void tcp_endpoint::announce_down()
 {
     stream_.local_down();
     close_client();
 }
 
-void TcpEndpoint::on_tick()
+void tcp_endpoint::on_tick()
 {
     stream_.on_tick();
     if (stream_.should_give_up())
@@ -607,7 +607,7 @@ void TcpEndpoint::on_tick()
         stream_.clear_give_up();
         return;
     }
-    if (cfg_.mode == UpstreamMode::TcpClient && stream_.wants_connect() &&
+    if (cfg_.mode == upstream_mode_e::tcp_client && stream_.wants_connect() &&
         client_sock_.fd() < 0 && !connecting_)
     {
         start_connect();

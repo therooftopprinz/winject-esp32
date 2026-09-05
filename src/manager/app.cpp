@@ -2,14 +2,14 @@
 
 #include "log.h"
 #include "net_util.h"
-#include "tcp_endpoint.h"
-#include "udp_endpoint.h"
+#include "endpoint/tcp_endpoint.h"
+#include "endpoint/udp_endpoint.h"
 
 #include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
 
-bool App::load(const std::string& path)
+bool app::load(const std::string& path)
 {
     std::string err;
     if (!cfg_.load(path, &err))
@@ -30,20 +30,20 @@ bool App::load(const std::string& path)
     return true;
 }
 
-bool App::setup_upstreams()
+bool app::setup_upstreams()
 {
     scheduler_.configure(cfg_.max_rate_kbps);
     for (size_t i = 0; i < cfg_.upstreams.size(); i++)
     {
         const auto& uc = cfg_.upstreams[i];
-        auto radio = std::make_unique<RadioUdp>();
+        auto radio = std::make_unique<wifi_udp>();
         sockaddr_in inject = {};
         inject.sin_family = AF_INET;
         inject.sin_addr = device_ip_;
         inject.sin_port = htons(static_cast<uint16_t>(9000 + i * 10));
         const uint16_t fwd =
             static_cast<uint16_t>(cfg_.forward_base + i);
-        RadioUdp* radio_ptr = radio.get();
+        wifi_udp* radio_ptr = radio.get();
         if (!radio->open(reactor_, inject, fwd,
                          [this, i](const uint8_t* data, size_t len)
                          {
@@ -60,11 +60,11 @@ bool App::setup_upstreams()
             return false;
         }
 
-        std::unique_ptr<Upstream> up;
-        if (uc.mode == UpstreamMode::TcpClient ||
-            uc.mode == UpstreamMode::TcpServer)
+        std::unique_ptr<stream> up;
+        if (uc.mode == upstream_mode_e::tcp_client ||
+            uc.mode == upstream_mode_e::tcp_server)
         {
-            auto tcp = std::make_unique<TcpEndpoint>();
+            auto tcp = std::make_unique<tcp_endpoint>();
             if (!tcp->open(reactor_, uc))
             {
                 return false;
@@ -77,7 +77,7 @@ bool App::setup_upstreams()
         }
         else
         {
-            auto udp = std::make_unique<UdpEndpoint>();
+            auto udp = std::make_unique<udp_endpoint>();
             if (!udp->open(reactor_, uc))
             {
                 return false;
@@ -93,7 +93,7 @@ bool App::setup_upstreams()
     return true;
 }
 
-bool App::apply_console()
+bool app::apply_console()
 {
     std::string err;
     if (cfg_.local_ip.empty())
@@ -124,7 +124,7 @@ bool App::apply_console()
     return true;
 }
 
-void App::drop_console()
+void app::drop_console()
 {
     const int fd = console_.fd();
     if (fd >= 0)
@@ -137,7 +137,7 @@ void App::drop_console()
     console_connecting_ = false;
 }
 
-void App::begin_console()
+void app::begin_console()
 {
     if (console_ok_ || console_connecting_)
     {
@@ -162,7 +162,7 @@ void App::begin_console()
     }
 }
 
-void App::on_console_connecting()
+void app::on_console_connecting()
 {
     if (!console_connecting_)
     {
@@ -195,7 +195,7 @@ void App::on_console_connecting()
     }
 }
 
-void App::on_console()
+void app::on_console()
 {
     if (!console_ok_)
     {
@@ -214,7 +214,7 @@ void App::on_console()
     }
 }
 
-void App::reconnect_tick()
+void app::reconnect_tick()
 {
     if (cfg_.skip_console)
     {
@@ -244,7 +244,7 @@ void App::reconnect_tick()
     begin_console();
 }
 
-void App::arm_tick()
+void app::arm_tick()
 {
     // Match original winject DEFAULT_SLOT_INTERVAL_US (500 us).
     reactor_.get_timer().wait_us(500,
@@ -257,7 +257,7 @@ void App::arm_tick()
                                  });
 }
 
-void App::stats_tick()
+void app::stats_tick()
 {
     if (cfg_.stats_sec == 0)
     {
@@ -277,7 +277,7 @@ void App::stats_tick()
         return;
     }
     last_stats_ = now;
-    std::vector<Upstream*> ups;
+    std::vector<stream*> ups;
     ups.reserve(upstreams_.size());
     for (const auto& up : upstreams_)
     {
@@ -286,12 +286,12 @@ void App::stats_tick()
     scheduler_.log_stats(elapsed_ms / 1000.0, ups);
 }
 
-void App::stop()
+void app::stop()
 {
     reactor_.stop();
 }
 
-void App::flush_shutdown()
+void app::flush_shutdown()
 {
     for (auto& up : upstreams_)
     {
@@ -304,7 +304,7 @@ void App::flush_shutdown()
     scheduler_.tick();
 }
 
-int App::run()
+int app::run()
 {
     if (!setup_upstreams())
     {

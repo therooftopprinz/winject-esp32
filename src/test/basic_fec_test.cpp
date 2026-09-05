@@ -1,4 +1,4 @@
-#include "fec.h"
+#include "frames/basic_fec.h"
 
 #include <gtest/gtest.h>
 #include <string.h>
@@ -37,7 +37,7 @@ std::unordered_map<int, std::vector<uint8_t>> frags_except(
         }
         const auto& p = air[i];
         out[static_cast<int>(i)] = std::vector<uint8_t>(
-            p.begin() + static_cast<long>(RsBlockErasure::kHeaderLen), p.end());
+            p.begin() + static_cast<long>(rs_block_erasure::k_header_len), p.end());
     }
     return out;
 }
@@ -45,7 +45,7 @@ std::unordered_map<int, std::vector<uint8_t>> frags_except(
 
 TEST(FecTest, RoundtripNoLoss)
 {
-    RsBlockErasure fec;
+    rs_block_erasure fec;
     ASSERT_TRUE(fec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig;
     for (int i = 0; i < 10; i++)
@@ -59,8 +59,8 @@ TEST(FecTest, RoundtripNoLoss)
     for (const auto& p : air)
     {
         EXPECT_LE(p.size(), 1476u);
-        EXPECT_EQ(p[0], RsBlockErasure::kMagic);
-        EXPECT_EQ(p[1], RsBlockErasure::kVersion);
+        EXPECT_EQ(p[0], rs_block_erasure::k_magic);
+        EXPECT_EQ(p[1], rs_block_erasure::k_version);
     }
     auto frags = frags_except(air, {});
     std::vector<std::vector<uint8_t>> got;
@@ -72,7 +72,7 @@ TEST(FecTest, RoundtripNoLoss)
 
 TEST(FecTest, RecoversFiveErasures)
 {
-    RsBlockErasure fec;
+    rs_block_erasure fec;
     ASSERT_TRUE(fec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig;
     for (int i = 0; i < 10; i++)
@@ -103,7 +103,7 @@ TEST(FecTest, RecoversFiveErasures)
 
 TEST(FecTest, SixErasuresFail)
 {
-    RsBlockErasure fec;
+    rs_block_erasure fec;
     ASSERT_TRUE(fec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig(10, pkt(32, 1));
     std::vector<std::vector<uint8_t>> air;
@@ -115,7 +115,7 @@ TEST(FecTest, SixErasuresFail)
 
 TEST(FecTest, PartialBlockPads)
 {
-    RsBlockErasure fec;
+    rs_block_erasure fec;
     ASSERT_TRUE(fec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig = {pkt(5, 'a'), pkt(9, 'b'),
                                               pkt(3, 'c')};
@@ -129,8 +129,8 @@ TEST(FecTest, PartialBlockPads)
 
 TEST(FecTest, FeedFullBlock)
 {
-    RsBlockErasure enc;
-    RsBlockErasure dec;
+    rs_block_erasure enc;
+    rs_block_erasure dec;
     ASSERT_TRUE(enc.init(10, 15, 20));
     ASSERT_TRUE(dec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig;
@@ -159,7 +159,7 @@ TEST(FecTest, FeedFullBlock)
 
 TEST(FecTest, PassthroughUnknownMagic)
 {
-    RsBlockErasure dec;
+    rs_block_erasure dec;
     ASSERT_TRUE(dec.init(10, 15, 20));
     const uint8_t raw[] = {0x80, 0x21, 0x00, 0x01, 'R', 'T', 'P'};
     std::vector<std::vector<uint8_t>> payloads;
@@ -170,9 +170,9 @@ TEST(FecTest, PassthroughUnknownMagic)
 
 TEST(FecTest, MaxPayloadFitsWifi)
 {
-    RsBlockErasure fec;
+    rs_block_erasure fec;
     ASSERT_TRUE(fec.init(10, 15, 20));
-    const size_t max_orig = RsBlockErasure::max_original();
+    const size_t max_orig = rs_block_erasure::max_original();
     std::vector<std::vector<uint8_t>> orig = {pkt(max_orig, 0x33)};
     std::vector<std::vector<uint8_t>> air;
     ASSERT_TRUE(fec.encode_block(orig, 4, &air));

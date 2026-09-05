@@ -1,5 +1,5 @@
-#ifndef WINJECT_MANAGER_FEC_H_
-#define WINJECT_MANAGER_FEC_H_
+#ifndef WINJECT_MANAGER_BASIC_FEC_H_
+#define WINJECT_MANAGER_BASIC_FEC_H_
 
 #include <chrono>
 #include <deque>
@@ -13,18 +13,18 @@
 // k original UDP datagrams become n on-air shards; any k of n recover the
 // originals. Wire header is 8 bytes; not compatible with tools/fec.py
 // (reedsolo) parity.
-class RsBlockErasure
+class rs_block_erasure
 {
 public:
-    static constexpr uint8_t kMagic = 0xF1;
-    static constexpr uint8_t kVersion = 2;
-    static constexpr size_t kHeaderLen = 8;
-    static constexpr size_t kLenPrefix = 2;
-    static constexpr uint8_t kFlagParity = 0x01;
-    static constexpr int kDefaultTimeoutMs = 20;
-    static constexpr size_t kMaxN = 255;
-    static constexpr size_t kDoneMax = 128;
-    static constexpr size_t kBlockMax = 64;
+    static constexpr uint8_t k_magic = 0xF1;
+    static constexpr uint8_t k_version = 2;
+    static constexpr size_t k_header_len = 8;
+    static constexpr size_t k_len_prefix = 2;
+    static constexpr uint8_t k_flag_parity = 0x01;
+    static constexpr int k_default_timeout_ms = 20;
+    static constexpr size_t k_max_n = 255;
+    static constexpr size_t k_done_max = 128;
+    static constexpr size_t k_block_max = 64;
 
     bool init(int k, int n, int timeout_ms);
     bool enabled() const
@@ -83,7 +83,7 @@ public:
     static size_t max_original();
 
 private:
-    struct RxBlock
+    struct rx_block_s
     {
         int k = 0;
         int n = 0;
@@ -105,7 +105,7 @@ private:
     int k_ = 0;
     int n_ = 0;
     int p_ = 0;
-    int timeout_ms_ = kDefaultTimeoutMs;
+    int timeout_ms_ = k_default_timeout_ms;
     std::vector<uint8_t> encode_matrix_;
     std::vector<uint8_t> g_tbls_;
 
@@ -114,7 +114,7 @@ private:
     bool deadline_set_ = false;
     uint16_t block_id_ = 0;
 
-    std::unordered_map<uint16_t, RxBlock> rx_blocks_;
+    std::unordered_map<uint16_t, rx_block_s> rx_blocks_;
     std::deque<uint16_t> done_order_;
     std::unordered_set<uint16_t> done_;
 
@@ -124,4 +124,4 @@ private:
     uint64_t oversized_ = 0;
 };
 
-#endif  // WINJECT_MANAGER_FEC_H_
+#endif  // WINJECT_MANAGER_BASIC_FEC_H_

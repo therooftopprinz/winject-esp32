@@ -1,4 +1,4 @@
-#include "fec.h"
+#include "frames/basic_fec.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -23,7 +23,7 @@ extern "C" void winject_ec_encode_data(int len, int k, int rows,
 
 namespace
 {
-constexpr size_t kMinShard = 16;  // ISA-L NEON kernels need >= 16 bytes.
+constexpr size_t k_min_shard = 16;  // ISA-L NEON kernels need >= 16 bytes.
 
 void store_be16(uint8_t* p, uint16_t v)
 {
@@ -40,16 +40,16 @@ uint16_t load_be16(const uint8_t* p)
 
 size_t align_shard(size_t row)
 {
-    return row < kMinShard ? kMinShard : row;
+    return row < k_min_shard ? k_min_shard : row;
 }
 }  // namespace
 
-size_t RsBlockErasure::max_original()
+size_t rs_block_erasure::max_original()
 {
-    return kWifiPayloadMax - kHeaderLen - kLenPrefix;
+    return k_wifi_payload_max - k_header_len - k_len_prefix;
 }
 
-const char* RsBlockErasure::impl_name() const
+const char* rs_block_erasure::impl_name() const
 {
 #ifdef WINJECT_ISAL_NEON
     return "isa-l neon";
@@ -58,10 +58,10 @@ const char* RsBlockErasure::impl_name() const
 #endif
 }
 
-bool RsBlockErasure::init(int k, int n, int timeout_ms)
+bool rs_block_erasure::init(int k, int n, int timeout_ms)
 {
     enabled_ = false;
-    if (k < 1 || n <= k || n > static_cast<int>(kMaxN) || timeout_ms < 0)
+    if (k < 1 || n <= k || n > static_cast<int>(k_max_n) || timeout_ms < 0)
     {
         return false;
     }
@@ -88,15 +88,15 @@ bool RsBlockErasure::init(int k, int n, int timeout_ms)
     return true;
 }
 
-bool RsBlockErasure::pack_header(uint8_t* out, uint16_t block_id, int index,
+bool rs_block_erasure::pack_header(uint8_t* out, uint16_t block_id, int index,
                                  int k, int n, uint8_t flags)
 {
     if (out == nullptr)
     {
         return false;
     }
-    out[0] = kMagic;
-    out[1] = kVersion;
+    out[0] = k_magic;
+    out[1] = k_version;
     store_be16(out + 2, block_id);
     out[4] = static_cast<uint8_t>(index);
     out[5] = static_cast<uint8_t>(k);
@@ -105,19 +105,19 @@ bool RsBlockErasure::pack_header(uint8_t* out, uint16_t block_id, int index,
     return true;
 }
 
-bool RsBlockErasure::unpack_header(const uint8_t* data, size_t len,
+bool rs_block_erasure::unpack_header(const uint8_t* data, size_t len,
                                    uint16_t* block_id, int* index, int* k,
                                    int* n, uint8_t* flags)
 {
-    if (data == nullptr || len < kHeaderLen || data[0] != kMagic ||
-        data[1] != kVersion)
+    if (data == nullptr || len < k_header_len || data[0] != k_magic ||
+        data[1] != k_version)
     {
         return false;
     }
     const int idx = data[4];
     const int kk = data[5];
     const int nn = data[6];
-    if (kk < 1 || nn <= kk || nn > static_cast<int>(kMaxN) || idx >= nn)
+    if (kk < 1 || nn <= kk || nn > static_cast<int>(k_max_n) || idx >= nn)
     {
         return false;
     }
@@ -129,7 +129,7 @@ bool RsBlockErasure::unpack_header(const uint8_t* data, size_t len,
     return true;
 }
 
-bool RsBlockErasure::encode_block(
+bool rs_block_erasure::encode_block(
     const std::vector<std::vector<uint8_t>>& packets, uint16_t block_id,
     std::vector<std::vector<uint8_t>>* out) const
 {
@@ -149,18 +149,18 @@ bool RsBlockErasure::encode_block(
         {
             return false;
         }
-        data_shards[static_cast<size_t>(i)].resize(kLenPrefix + plen);
+        data_shards[static_cast<size_t>(i)].resize(k_len_prefix + plen);
         store_be16(data_shards[static_cast<size_t>(i)].data(),
                    static_cast<uint16_t>(plen));
         if (plen > 0)
         {
-            memcpy(data_shards[static_cast<size_t>(i)].data() + kLenPrefix,
+            memcpy(data_shards[static_cast<size_t>(i)].data() + k_len_prefix,
                    pkt->data(), plen);
         }
         max_row = std::max(max_row, data_shards[static_cast<size_t>(i)].size());
     }
     const size_t shard_len = align_shard(max_row);
-    if (kHeaderLen + shard_len > kWifiPayloadMax)
+    if (k_header_len + shard_len > k_wifi_payload_max)
     {
         return false;
     }
@@ -191,18 +191,18 @@ bool RsBlockErasure::encode_block(
     for (int i = 0; i < n_; i++)
     {
         auto& pkt = (*out)[static_cast<size_t>(i)];
-        pkt.resize(kHeaderLen + shard_len);
-        const uint8_t flags = i >= k_ ? kFlagParity : 0;
+        pkt.resize(k_header_len + shard_len);
+        const uint8_t flags = i >= k_ ? k_flag_parity : 0;
         pack_header(pkt.data(), block_id, i, k_, n_, flags);
         const uint8_t* body = i < k_
                                   ? data_shards[static_cast<size_t>(i)].data()
                                   : parity[static_cast<size_t>(i - k_)].data();
-        memcpy(pkt.data() + kHeaderLen, body, shard_len);
+        memcpy(pkt.data() + k_header_len, body, shard_len);
     }
     return true;
 }
 
-int RsBlockErasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
+int rs_block_erasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
                                       uint8_t* decode_matrix,
                                       uint8_t* decode_index) const
 {
@@ -270,7 +270,7 @@ int RsBlockErasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
     return 0;
 }
 
-bool RsBlockErasure::decode_block(
+bool rs_block_erasure::decode_block(
     const std::unordered_map<int, std::vector<uint8_t>>& frags,
     std::vector<std::vector<uint8_t>>* payloads, int* recovered) const
 {
@@ -295,7 +295,7 @@ bool RsBlockErasure::decode_block(
             return false;
         }
     }
-    if (shard_len < kLenPrefix)
+    if (shard_len < k_len_prefix)
     {
         return false;
     }
@@ -316,7 +316,7 @@ bool RsBlockErasure::decode_block(
     int rec = 0;
     if (!have_all_data)
     {
-        uint8_t err_list[kMaxN];
+        uint8_t err_list[k_max_n];
         int nerrs = 0;
         for (int i = 0; i < n_; i++)
         {
@@ -331,7 +331,7 @@ bool RsBlockErasure::decode_block(
         }
         std::vector<uint8_t> decode_matrix(static_cast<size_t>(nerrs) *
                                            static_cast<size_t>(k_));
-        uint8_t decode_index[kMaxN];
+        uint8_t decode_index[k_max_n];
         if (gen_decode_matrix(err_list, nerrs, decode_matrix.data(),
                               decode_index) != 0)
         {
@@ -378,7 +378,7 @@ bool RsBlockErasure::decode_block(
     for (int i = 0; i < k_; i++)
     {
         const auto& row = data_copy[static_cast<size_t>(i)];
-        if (row.size() < kLenPrefix)
+        if (row.size() < k_len_prefix)
         {
             return false;
         }
@@ -387,12 +387,12 @@ bool RsBlockErasure::decode_block(
         {
             continue;
         }
-        if (kLenPrefix + orig_len > row.size())
+        if (k_len_prefix + orig_len > row.size())
         {
             return false;
         }
-        payloads->emplace_back(row.data() + kLenPrefix,
-                               row.data() + kLenPrefix + orig_len);
+        payloads->emplace_back(row.data() + k_len_prefix,
+                               row.data() + k_len_prefix + orig_len);
     }
     if (recovered != nullptr)
     {
@@ -401,7 +401,7 @@ bool RsBlockErasure::decode_block(
     return true;
 }
 
-void RsBlockErasure::push_app(const uint8_t* data, size_t len,
+void rs_block_erasure::push_app(const uint8_t* data, size_t len,
                               std::vector<std::vector<uint8_t>>* out)
 {
     if (out != nullptr)
@@ -430,7 +430,7 @@ void RsBlockErasure::push_app(const uint8_t* data, size_t len,
     }
 }
 
-void RsBlockErasure::flush(std::vector<std::vector<uint8_t>>* out)
+void rs_block_erasure::flush(std::vector<std::vector<uint8_t>>* out)
 {
     if (out != nullptr)
     {
@@ -454,7 +454,7 @@ void RsBlockErasure::flush(std::vector<std::vector<uint8_t>>* out)
     blocks_++;
 }
 
-void RsBlockErasure::on_tick(std::vector<std::vector<uint8_t>>* out)
+void rs_block_erasure::on_tick(std::vector<std::vector<uint8_t>>* out)
 {
     if (out != nullptr)
     {
@@ -472,7 +472,7 @@ void RsBlockErasure::on_tick(std::vector<std::vector<uint8_t>>* out)
     flush(out);
 }
 
-void RsBlockErasure::expire_rx()
+void rs_block_erasure::expire_rx()
 {
     if (rx_blocks_.empty())
     {
@@ -495,20 +495,20 @@ void RsBlockErasure::expire_rx()
     }
 }
 
-void RsBlockErasure::mark_done(uint16_t block_id)
+void rs_block_erasure::mark_done(uint16_t block_id)
 {
     if (done_.insert(block_id).second)
     {
         done_order_.push_back(block_id);
     }
-    while (done_order_.size() > kDoneMax)
+    while (done_order_.size() > k_done_max)
     {
         done_.erase(done_order_.front());
         done_order_.pop_front();
     }
 }
 
-void RsBlockErasure::push_air(const uint8_t* data, size_t len,
+void rs_block_erasure::push_air(const uint8_t* data, size_t len,
                               std::vector<std::vector<uint8_t>>* out)
 {
     if (out != nullptr)
@@ -519,7 +519,7 @@ void RsBlockErasure::push_air(const uint8_t* data, size_t len,
     {
         return;
     }
-    if (data[0] != kMagic)
+    if (data[0] != k_magic)
     {
         out->emplace_back(data, data + len);
         return;
@@ -543,11 +543,11 @@ void RsBlockErasure::push_air(const uint8_t* data, size_t len,
     {
         return;
     }
-    RxBlock* buf = nullptr;
+    rx_block_s* buf = nullptr;
     auto it = rx_blocks_.find(block_id);
     if (it == rx_blocks_.end())
     {
-        while (rx_blocks_.size() >= kBlockMax)
+        while (rx_blocks_.size() >= k_block_max)
         {
             auto oldest = rx_blocks_.begin();
             for (auto j = rx_blocks_.begin(); j != rx_blocks_.end(); ++j)
@@ -560,7 +560,7 @@ void RsBlockErasure::push_air(const uint8_t* data, size_t len,
             decode_fail_++;
             rx_blocks_.erase(oldest);
         }
-        RxBlock nb;
+        rx_block_s nb;
         nb.k = k;
         nb.n = n;
         nb.first_seen = std::chrono::steady_clock::now();
@@ -572,7 +572,7 @@ void RsBlockErasure::push_air(const uint8_t* data, size_t len,
         return;
     }
     buf->frags.emplace(index,
-                       std::vector<uint8_t>(data + kHeaderLen, data + len));
+                       std::vector<uint8_t>(data + k_header_len, data + len));
     if (buf->frags.size() < static_cast<size_t>(k_))
     {
         return;
@@ -594,14 +594,14 @@ void RsBlockErasure::push_air(const uint8_t* data, size_t len,
     blocks_++;
 }
 
-uint64_t RsBlockErasure::take_recovered()
+uint64_t rs_block_erasure::take_recovered()
 {
     const uint64_t n = recovered_;
     recovered_ = 0;
     return n;
 }
 
-uint64_t RsBlockErasure::take_decode_fail()
+uint64_t rs_block_erasure::take_decode_fail()
 {
     const uint64_t n = decode_fail_;
     decode_fail_ = 0;

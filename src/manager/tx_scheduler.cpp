@@ -1,34 +1,34 @@
-#include "scheduler.h"
+#include "tx_scheduler.h"
 
 #include <algorithm>
 
 #include "log.h"
 #include "net_util.h"
-#include "radio_udp.h"
-#include "upstream.h"
+#include "radio/wifi_udp.h"
+#include "stream/stream.h"
 
 namespace
 {
 // Cap DATA MPDUs per wakeup so reverse ACKs can win CCA between bursts.
-constexpr size_t kMaxDataPerTick = 8;
+constexpr size_t k_max_data_per_tick = 8;
 }  // namespace
 
-void Scheduler::configure(uint32_t max_rate_kbps)
+void tx_scheduler::configure(uint32_t max_rate_kbps)
 {
     rate_kbps_ = max_rate_kbps < 64 ? 64 : max_rate_kbps;
     // ~32 wifi frames, or ~8 ms of rate, whichever is larger.
-    burst_ = std::max<uint64_t>(kWifiPayloadMax * 32,
+    burst_ = std::max<uint64_t>(k_wifi_payload_max * 32,
                                 static_cast<uint64_t>(rate_kbps_) / 8 * 8);
     tokens_ = burst_;
     last_refill_ = std::chrono::steady_clock::now();
 }
 
-void Scheduler::add(Upstream* up, RadioUdp* radio, size_t budget)
+void tx_scheduler::add(stream* up, wifi_udp* radio, size_t budget)
 {
-    slots_.push_back(Slot{up, radio, budget});
+    slots_.push_back(slot_s{up, radio, budget});
 }
 
-void Scheduler::refill()
+void tx_scheduler::refill()
 {
     const auto now = std::chrono::steady_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -47,7 +47,7 @@ void Scheduler::refill()
     }
 }
 
-void Scheduler::tick()
+void tx_scheduler::tick()
 {
     if (slots_.empty())
     {
@@ -98,7 +98,7 @@ void Scheduler::tick()
             else
             {
                 if (remain[i] == 0 || tokens_ == 0 ||
-                    data_sent >= kMaxDataPerTick)
+                    data_sent >= k_max_data_per_tick)
                 {
                     return false;
                 }
@@ -108,14 +108,14 @@ void Scheduler::tick()
                 }
             }
 
-            size_t max = kWifiPayloadMax;
+            size_t max = k_wifi_payload_max;
             if (!acks_only)
             {
                 max = remain[i] < tokens_ ? remain[i]
                                           : static_cast<size_t>(tokens_);
-                if (max > kWifiPayloadMax)
+                if (max > k_wifi_payload_max)
                 {
-                    max = kWifiPayloadMax;
+                    max = k_wifi_payload_max;
                 }
                 if (max == 0)
                 {
@@ -172,11 +172,11 @@ void Scheduler::tick()
         }
 
         bool progress = true;
-        while (progress && tokens_ > 0 && data_sent < kMaxDataPerTick)
+        while (progress && tokens_ > 0 && data_sent < k_max_data_per_tick)
         {
             progress = false;
             for (size_t n = 0; n < slots_.size() && tokens_ > 0 &&
-                               data_sent < kMaxDataPerTick;
+                               data_sent < k_max_data_per_tick;
                  n++)
             {
                 const size_t i = (next_ + n) % slots_.size();
@@ -193,29 +193,29 @@ void Scheduler::tick()
     ticking_ = false;
 }
 
-uint64_t Scheduler::take_air_bytes()
+uint64_t tx_scheduler::take_air_bytes()
 {
     const uint64_t n = air_bytes_interval_;
     air_bytes_interval_ = 0;
     return n;
 }
 
-void Scheduler::log_stats(double interval_sec,
-                          const std::vector<Upstream*>& ups)
+void tx_scheduler::log_stats(double interval_sec,
+                          const std::vector<stream*>& ups)
 {
     auto kbps = [interval_sec](uint64_t bytes) -> double
     {
         return interval_sec > 0.0 ? (bytes * 8.0) / interval_sec / 1000.0 : 0.0;
     };
 
-    struct Row
+    struct row_s
     {
         size_t index = 0;
-        StreamStats st;
+        stream_stats_s st;
         double tx_kbps = 0.0;
         double rx_kbps = 0.0;
     };
-    std::vector<Row> rows;
+    std::vector<row_s> rows;
     uint64_t total_tx = take_air_bytes();
     uint64_t total_rx = 0;
     for (size_t i = 0; i < ups.size(); i++)
@@ -224,17 +224,17 @@ void Scheduler::log_stats(double interval_sec,
         {
             continue;
         }
-        StreamStats st = ups[i]->take_stats();
+        stream_stats_s st = ups[i]->take_stats();
         if (st.proto == nullptr)
         {
             continue;
         }
         total_rx += st.air_rx_bytes;
-        rows.push_back(Row{i, st, kbps(st.tx_bytes), kbps(st.rx_bytes)});
+        rows.push_back(row_s{i, st, kbps(st.tx_bytes), kbps(st.rx_bytes)});
     }
 
     LOG_INF("STREAM TOTAL TX=%6.0f RX=%6.0f", kbps(total_tx), kbps(total_rx));
-    for (const Row& row : rows)
+    for (const row_s& row : rows)
     {
         if (row.st.tcp)
         {

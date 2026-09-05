@@ -2,9 +2,10 @@
 #define WINJECT_MANAGER_TCP_ENDPOINT_H_
 
 #include "config.h"
+#include "stream/stream.h"
 #include "net_util.h"
 #include "reactor.h"
-#include "tcp_stream.h"
+#include "stream/tcp_stream.h"
 
 #include <atomic>
 #include <functional>
@@ -12,12 +13,12 @@
 #include <thread>
 #include <vector>
 
-class TcpEndpoint : public Upstream
+class tcp_endpoint : public stream
 {
 public:
-    TcpEndpoint() = default;
-    ~TcpEndpoint() override;
-    bool open(Reactor& reactor, const UpstreamConfig& cfg);
+    tcp_endpoint() = default;
+    ~tcp_endpoint() override;
+    bool open(reactor& reactor, const upstream_config_s& cfg);
     void close();
     void set_tx_kick(std::function<void()> kick);
 
@@ -28,7 +29,7 @@ public:
     void on_tick() override;
     void announce_down() override;
     uint64_t take_rx_bytes() override;
-    StreamStats take_stats() override;
+    stream_stats_s take_stats() override;
 
 private:
     void kick_tx();
@@ -49,16 +50,16 @@ private:
     void flush_tcp();
     void sync_rx_accept();
 
-    Reactor* reactor_ = nullptr;
-    UpstreamConfig cfg_{};
+    reactor* reactor_ = nullptr;
+    upstream_config_s cfg_{};
     bfc::socket listen_sock_;
     bfc::socket client_sock_;
     bool connecting_ = false;
-    TcpStream stream_;
+    tcp_stream stream_;
     std::function<void()> tx_kick_;
     uint8_t buf_[16384]{};
     // If send() returns EAGAIN mid-write, keep the unsent tail and resume on
-    // the next writable callback. Pulling from TcpStream discards bytes, so
+    // the next writable callback. Pulling from tcp_stream discards bytes, so
     // we must not lose them on backpressure.
     size_t tx_pending_len_ = 0;
     size_t tx_pending_off_ = 0;

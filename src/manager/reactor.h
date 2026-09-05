@@ -5,6 +5,6 @@
 
 #include <functional>
 
-using Reactor = bfc::epoll_reactor<std::function<void()>>;
+using reactor = bfc::epoll_reactor<std::function<void()>>;
 
 #endif  // WINJECT_MANAGER_REACTOR_H_

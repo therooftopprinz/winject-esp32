@@ -7,17 +7,17 @@
 #include <netinet/in.h>
 #include <vector>
 
-#include "fec.h"
+#include "frames/basic_fec.h"
 #include "net_util.h"
 #include "reactor.h"
-#include "upstream.h"
+#include "stream/stream.h"
 
-class UdpEndpoint : public Upstream
+class udp_endpoint : public stream
 {
 public:
-    UdpEndpoint() = default;
-    ~UdpEndpoint() override;
-    bool open(Reactor& reactor, const UpstreamConfig& cfg);
+    udp_endpoint() = default;
+    ~udp_endpoint() override;
+    bool open(reactor& reactor, const upstream_config_s& cfg);
     void close();
 
     void on_radio_rx(const uint8_t* data, size_t len) override;
@@ -26,15 +26,15 @@ public:
     void on_tick() override;
     void announce_down() override;
     uint64_t take_rx_bytes() override;
-    StreamStats take_stats() override;
+    stream_stats_s take_stats() override;
 
 private:
     void on_app();
     void enqueue_air(std::vector<uint8_t> pkt);
 
-    Reactor* reactor_ = nullptr;
+    reactor* reactor_ = nullptr;
     bfc::socket sock_;
-    UpstreamMode mode_ = UpstreamMode::UdpGeneric;
+    upstream_mode_e mode_ = upstream_mode_e::udp_generic;
     sockaddr_in dest_{};
     bool dest_valid_ = false;
     std::deque<std::vector<uint8_t>> txq_;
@@ -45,7 +45,7 @@ private:
     uint64_t air_rx_bytes_interval_ = 0;
     uint64_t app_rx_pkt_interval_ = 0;
     uint64_t app_rx_bytes_interval_ = 0;
-    RsBlockErasure fec_;
+    rs_block_erasure fec_;
 };
 
 #endif  // WINJECT_MANAGER_UDP_ENDPOINT_H_

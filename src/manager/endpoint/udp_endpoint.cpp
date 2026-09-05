@@ -1,4 +1,4 @@
-#include "udp_endpoint.h"
+#include "endpoint/udp_endpoint.h"
 
 #include <errno.h>
 #include <string.h>
@@ -7,15 +7,15 @@
 
 namespace
 {
-constexpr size_t kMaxUdpQueue = 256;
+constexpr size_t k_max_udp_queue = 256;
 }
 
-UdpEndpoint::~UdpEndpoint()
+udp_endpoint::~udp_endpoint()
 {
     close();
 }
 
-bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
+bool udp_endpoint::open(reactor& reactor, const upstream_config_s& cfg)
 {
     reactor_ = &reactor;
     mode_ = cfg.mode;
@@ -26,7 +26,7 @@ bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
         return false;
     }
 
-    if (mode_ == UpstreamMode::UdpGeneric)
+    if (mode_ == upstream_mode_e::udp_generic)
     {
         sockaddr_in bind_addr = {};
         if (!parse_host_port(cfg.rx, &bind_addr) || sock_.bind(bind_addr) < 0)
@@ -41,7 +41,7 @@ bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
             return false;
         }
     }
-    else if (mode_ == UpstreamMode::UdpServer)
+    else if (mode_ == upstream_mode_e::udp_server)
     {
         sockaddr_in bind_addr = {};
         if (!parse_host_port(cfg.bind_address, &bind_addr) ||
@@ -52,7 +52,7 @@ bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
             return false;
         }
     }
-    else if (mode_ == UpstreamMode::UdpClient)
+    else if (mode_ == upstream_mode_e::udp_client)
     {
         if (!parse_host_port(cfg.connect_address, &dest_))
         {
@@ -69,7 +69,7 @@ bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
         }
     }
 
-    if (cfg.fec_type == FecType::RsBlockErasure)
+    if (cfg.fec_type == fec_type_e::rs_block_erasure)
     {
         if (!fec_.init(cfg.fec_k, cfg.fec_n, cfg.fec_timeout_ms))
         {
@@ -87,7 +87,7 @@ bool UdpEndpoint::open(Reactor& reactor, const UpstreamConfig& cfg)
                                 });
 }
 
-void UdpEndpoint::close()
+void udp_endpoint::close()
 {
     if (sock_.fd() >= 0)
     {
@@ -99,20 +99,20 @@ void UdpEndpoint::close()
     }
 }
 
-void UdpEndpoint::enqueue_air(std::vector<uint8_t> pkt)
+void udp_endpoint::enqueue_air(std::vector<uint8_t> pkt)
 {
     if (pkt.empty())
     {
         return;
     }
-    if (txq_.size() >= kMaxUdpQueue)
+    if (txq_.size() >= k_max_udp_queue)
     {
         txq_.pop_front();
     }
     txq_.push_back(std::move(pkt));
 }
 
-void UdpEndpoint::on_app()
+void udp_endpoint::on_app()
 {
     while (true)
     {
@@ -132,7 +132,7 @@ void UdpEndpoint::on_app()
         {
             return;
         }
-        if (mode_ == UpstreamMode::UdpServer)
+        if (mode_ == upstream_mode_e::udp_server)
         {
             dest_ = from;
             dest_valid_ = true;
@@ -149,7 +149,7 @@ void UdpEndpoint::on_app()
             }
             continue;
         }
-        if (static_cast<size_t>(n) > kWifiPayloadMax)
+        if (static_cast<size_t>(n) > k_wifi_payload_max)
         {
             LOG_WRN("drop oversized udp %zd", n);
             continue;
@@ -158,7 +158,7 @@ void UdpEndpoint::on_app()
     }
 }
 
-void UdpEndpoint::on_radio_rx(const uint8_t* data, size_t len)
+void udp_endpoint::on_radio_rx(const uint8_t* data, size_t len)
 {
     if (data == nullptr || len == 0)
     {
@@ -186,7 +186,7 @@ void UdpEndpoint::on_radio_rx(const uint8_t* data, size_t len)
     udp_send_to(sock_.fd(), dest_, data, len);
 }
 
-void UdpEndpoint::on_tick()
+void udp_endpoint::on_tick()
 {
     if (!fec_.enabled())
     {
@@ -200,7 +200,7 @@ void UdpEndpoint::on_tick()
     }
 }
 
-void UdpEndpoint::announce_down()
+void udp_endpoint::announce_down()
 {
     if (!fec_.enabled())
     {
@@ -214,16 +214,16 @@ void UdpEndpoint::announce_down()
     }
 }
 
-uint64_t UdpEndpoint::take_rx_bytes()
+uint64_t udp_endpoint::take_rx_bytes()
 {
     const uint64_t n = radio_rx_bytes_interval_;
     radio_rx_bytes_interval_ = 0;
     return n;
 }
 
-StreamStats UdpEndpoint::take_stats()
+stream_stats_s udp_endpoint::take_stats()
 {
-    StreamStats s;
+    stream_stats_s s;
     s.proto = fec_.enabled() ? "UDP+RS" : "UDP";
     s.tx_bytes = app_rx_bytes_interval_;
     s.rx_bytes = take_rx_bytes();
@@ -242,12 +242,12 @@ StreamStats UdpEndpoint::take_stats()
     return s;
 }
 
-bool UdpEndpoint::has_tx() const
+bool udp_endpoint::has_tx() const
 {
     return !txq_.empty();
 }
 
-size_t UdpEndpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
+size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
 {
     if (is_ack != nullptr)
     {
