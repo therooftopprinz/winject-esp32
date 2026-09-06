@@ -1,29 +1,34 @@
 # WT32-ETH01 tests
 
-Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [winject.md](winject.md).
+Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [refactor.md](refactor.md) (current) and [winject.md](winject.md) (pre-refactor).
 
 The runner **sets CCA on both radios** over TCP `2323` (`set_cca_enabled`) before each rate. Channel and modulation are left as already configured unless `--channel`, `--modulation`, or `--all` is given. `--all` sweeps every firmware modulation.
 
 # Topology
 
 ```
-host  --UDP 9000-->  radio A  --802.11 TX-->  air  --802.11 RX-->  radio B  --UDP 9002-->  host
-host  <--UDP 9001--  radio A  <--802.11 RX--  air  <--802.11 TX--  radio B  <--UDP 9000--  host
+host  --UDP 9000 sut bus=b2-->  radio A  --802.11 TX-->  air  --802.11 RX-->  radio B  --UDP 9002 sur bus=b2-->  host
+host  <--UDP 9001 sur bus=a1--  radio A  <--802.11 RX--  air  <--802.11 TX--  radio B  <--UDP 9000 sut bus=a1--  host
 ```
 
 | Role | Default | Notes |
 |------|---------|--------|
-| Radio A | `192.168.253.11` | `set_upstream_rx 9000`, `set_upstream_tx <host> 9001` |
-| Radio B | `192.168.253.12` | `set_upstream_rx 9000`, `set_upstream_tx <host> 9002` |
+| Radio A | `192.168.253.11` | `set_mode BFC_TUNNEL_DEVICE`, `set_domain 1234`, `set_upstream_tx bus=b2 9000`, `set_upstream_rx bus=a1 <host> 9001` |
+| Radio B | `192.168.253.12` | `set_mode BFC_TUNNEL_DEVICE`, `set_domain 1234`, `set_upstream_tx bus=a1 9000`, `set_upstream_rx bus=b2 <host> 9002` |
 | Host | this machine | TCP console `2323`; UDP listen `9001` / `9002` |
+| Domain | `1234` | Shared Addr3 domain (`--domain`); tunnel Addr3 prefix is `BA:DD:CA:FE` |
+| Bus A→B | `b2` | A stamps, B filters (`--bus-ab`) |
+| Bus B→A | `a1` | B stamps, A filters (`--bus-ba`) |
 | Channel | existing | omit `--channel` to keep; `--channel N` sends `set_channel` on both radios before each modulation |
 | Modulation | existing | omit `--modulation` to keep; `--modulation NAME` sets both radios; `--all` sweeps every rate |
 | CCA | enabled | `set_cca_enabled`; `--no-cca` skips wait-for-idle |
 | Payload | 1400 bytes | UDP body only; firmware max 1476 |
 
-The host must be on the same IPv4 subnet as both Ethernet ports. Default mode is `BFC_TUNNEL_DEVICE` (the runner does not send `set_mode`). STA MACs are chip-unique; BSSID is `BA:DD:CA:FE:BA:BE` on both. Radios drop their own TX SA so it is not forwarded to `upstream_tx`.
+The host must be on the same IPv4 subnet as both Ethernet ports. The runner sends `set_mode BFC_TUNNEL_DEVICE` so leftover `STANDALONE` does not change Addr3. Isolation is the bus filter: A does not bind `sur` for its own TX bus, so it does not forward its own air frames.
 
-`STANDALONE` uses a different BSSID and you|peer airport addresses; see [winject.md](winject.md). For that mode use `python3 scripts/stand_alone_test.py` (same flags as this runner, plus `--airport-a` / `--airport-b` / `--dual`). `--airport-b` must be the 3-byte swap of `--airport-a`.
+`STANDALONE` uses Addr3 prefix `CA:FE:BA:BE` plus the same domain octets. For that mode use `python3 scripts/stand_alone_test.py` (same flags as this runner, plus `--dual` / `--inject-port` / `--restore-tunnel`). `--dual` binds a second bus pair (`c3`/`d4` by default) on inject `9010` and host `9011`/`9012` and checks that pair-1 and pair-2 do not leak.
+
+`tools/bw_test.py --tcp` is the manager TCP path and is unchanged here; see [manager.md](manager.md).
 
 # Runner
 
@@ -39,7 +44,10 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--a` / `--b` | `.11` / `.12` | Radio Ethernet addresses |
-| `--host` | auto | Address the radios send `upstream_tx` back to |
+| `--host` | auto | Address the radios send `set_upstream_rx` (air→UDP) back to |
+| `--domain` | `1234` | Shared air domain (hex, 1–ffff) |
+| `--bus-ab` | `b2` | Bus A injects / B filters |
+| `--bus-ba` | `a1` | Bus B injects / A filters |
 | `--channel` | omit | `set_channel` on **both** radios (1–13). Omit to keep the radios’ current channel |
 | `--modulation` | omit | One name or comma-separated list. Omit to keep the radios’ current modulation |
 | `--all` | off | Sweep every firmware modulation (`set_modulation` on both radios). Not with `--modulation` |
@@ -55,7 +63,7 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 
 Each rate step sends `set_cca_enabled <0|1>` on both radios. If `--modulation` or `--all` is given, `set_modulation <modulation>` is sent first. If `--channel` is given, `set_channel <channel>` is sent first.
 
-Upstream ports are configured once at the start. After a channel or modulation change the runner waits 1.2 s so `esp_wifi` can reapply rate/channel/monitor.
+Mode, domain, and upstream buses are configured once at the start (`sut` = UDP→air, `sur` = air→UDP). After a channel or modulation change the runner waits 1.2 s so `esp_wifi` can reapply rate/channel/monitor.
 
 Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP before inject, goodput collapses, and the boards can reboot.
 
@@ -94,7 +102,7 @@ Same names as `set_modulation` / `help`:
 
 # Example
 
-Bench, 2026-08-30, channel 1, 1400-byte payload, 5 s phases, auto offer. `set_channel 1` and `set_modulation` applied on both radios before each row.
+Historical bench (pre-refactor airport addressing), 2026-08-30, channel 1, 1400-byte payload, 5 s phases, auto offer. `set_channel 1` and `set_modulation` applied on both radios before each row.
 
 ```bash
 python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --all --bidir

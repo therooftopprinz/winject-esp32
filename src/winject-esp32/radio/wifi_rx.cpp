@@ -1,17 +1,21 @@
 #include "wifi_rx.h"
 
+#include "channel_info_endpoint.h"
 #include "config.h"
 #include "frame.h"
+#include "lc_rx.h"
+#include "packet.h"
 #include "wifi.h"
 
 #include <atomic>
 #include <string.h>
+#include <utility>
 
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "bfc-esp32/semaphore.hpp"
 
 static const char* TAG = "wifi_rx";
 
@@ -30,16 +34,35 @@ int8_t wifi_rx::clamp_i8(int value)
     return static_cast<int8_t>(value);
 }
 
+bool wifi_rx::set_domain(uint16_t domain)
+{
+    domain_.store(domain, std::memory_order_release);
+    return true;
+}
+
+uint16_t wifi_rx::domain() const
+{
+    return domain_.load(std::memory_order_acquire);
+}
+
+bool wifi_rx::accept_mpdu(const uint8_t* mpdu, size_t len) const
+{
+    return frameAddr3Accept(mpdu, len,
+                            domain_.load(std::memory_order_acquire));
+}
+
 void wifi_rx::note_air(const wifi_pkt_rx_ctrl_t& ctrl)
 {
     const char* name = wifi::format_phy(
         static_cast<uint8_t>(ctrl.sig_mode), static_cast<uint8_t>(ctrl.rate),
         static_cast<uint8_t>(ctrl.mcs), ctrl.sgi != 0);
     modulation_.store(name, std::memory_order_relaxed);
-    rssi_.store(clamp_i8(ctrl.rssi), std::memory_order_relaxed);
-    snr_.store(clamp_i8(ctrl.rssi - ctrl.noise_floor),
-               std::memory_order_relaxed);
+    const int8_t rssi = clamp_i8(ctrl.rssi);
+    const int8_t snr = clamp_i8(ctrl.rssi - ctrl.noise_floor);
+    rssi_.store(rssi, std::memory_order_relaxed);
+    snr_.store(snr, std::memory_order_relaxed);
     air_valid_.store(true, std::memory_order_relaxed);
+    channel_info_endpoint::instance().on_rx_air_info(rssi, snr);
 }
 
 void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
@@ -50,8 +73,6 @@ void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
     }
 
     const auto* pkt = static_cast<wifi_promiscuous_pkt_t*>(buf);
-    // True A-MPDUs can advertise a sig_len larger than this DMA fragment.
-    // HT MCS frames often set aggregation=1 even for a single MPDU.
     if (pkt->rx_ctrl.ampdu_cnt > 1)
     {
         return;
@@ -63,44 +84,42 @@ void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
         return;
     }
     len -= 4;
-    if (len > WIFI_RADIO_MAX_FRAME)
-    {
-        len = WIFI_RADIO_MAX_FRAME;
-    }
-
-    const bool failed = type == WIFI_PKT_MISC || pkt->rx_ctrl.rx_state != 0;
-    if (!frameHeard(pkt->payload, static_cast<size_t>(len)))
+    if (len > static_cast<int>(WIFI_TX_PACKET_CAP))
     {
         return;
     }
-    if (frameClassify(pkt->payload, static_cast<size_t>(len)) != FRAME_RX_MATCH)
+
+    if (!accept_mpdu(pkt->payload, static_cast<size_t>(len)))
     {
         return;
     }
 
     udp_rx_pkt_.fetch_add(1, std::memory_order_relaxed);
     note_air(pkt->rx_ctrl);
+    radio_.pulse_rx_led();
+
+    const bool failed = type == WIFI_PKT_MISC || pkt->rx_ctrl.rx_state != 0;
     if (failed)
     {
-        udp_rx_crc_err_.fetch_add(1, std::memory_order_relaxed);
+        drop_crc_error_.fetch_add(1, std::memory_order_relaxed);
         if (!allow_failed_crc_.load(std::memory_order_relaxed))
         {
             return;
         }
     }
 
-    slot_s* slot = pool_.take(0);
-    if (slot == nullptr)
+    packet p = packet_allocator::rx().allocate();
+    if (!p.is_valid())
     {
-        udp_rx_dropped_.fetch_add(1, std::memory_order_relaxed);
+        drop_rx_no_pkt_pool_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    slot->len = static_cast<uint16_t>(len);
-    memcpy(slot->data, pkt->payload, static_cast<size_t>(len));
-    if (!queue_.post(slot, 0))
+    p.set_packet_offset(0);
+    memcpy(p.data(), pkt->payload, static_cast<size_t>(len));
+    p.set_packet_size(static_cast<size_t>(len));
+    if (rx_ == nullptr || !rx_->rx(std::move(p)))
     {
-        pool_.release(slot);
-        udp_rx_dropped_.fetch_add(1, std::memory_order_relaxed);
+        drop_rx_queue_full_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -109,17 +128,15 @@ void wifi_rx::promiscuous_cb(void* buf, wifi_promiscuous_pkt_type_t type)
     wifi::instance().rx_.on_promiscuous(buf, type);
 }
 
-bool wifi_rx::init()
+bool wifi_rx::init(lc_rx& rx)
 {
-    return pool_.init() && queue_.init();
+    rx_ = &rx;
+    return true;
 }
 
 bool wifi_rx::apply_monitor()
 {
     wifi_promiscuous_filter_t filter = {};
-    // FCSFAIL/MISC are required or CRC-failed MPDUs never reach the callback.
-    // Count matched CRC errors even when forwarding is off; drop them after
-    // classify so a busy channel does not fill the RX queue.
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA |
                          WIFI_PROMIS_FILTER_MASK_MISC |
                          WIFI_PROMIS_FILTER_MASK_FCSFAIL;
@@ -144,33 +161,18 @@ void wifi_rx::fill_status(wifi_status_s* status)
     status->allow_failed_crc =
         allow_failed_crc_.load(std::memory_order_relaxed);
     status->udp_rx_pkt = udp_rx_pkt_.load(std::memory_order_relaxed);
-    status->udp_rx_crc_err = udp_rx_crc_err_.load(std::memory_order_relaxed);
-    status->udp_rx_dropped = udp_rx_dropped_.load(std::memory_order_relaxed);
+    status->drop_crc_error = drop_crc_error_.load(std::memory_order_relaxed);
+    status->drop_rx_no_pkt_pool =
+        drop_rx_no_pkt_pool_.load(std::memory_order_relaxed);
+    status->drop_rx_queue_full =
+        drop_rx_queue_full_.load(std::memory_order_relaxed);
     status->udp_fwd_pkt = udp_fwd_pkt_.load(std::memory_order_relaxed);
-    status->rx_queue = static_cast<uint16_t>(queue_.size());
+    status->rx_queue =
+        rx_ != nullptr ? static_cast<uint16_t>(rx_->queue_size()) : 0;
     status->rx_air_valid = air_valid_.load(std::memory_order_relaxed);
     status->rx_modulation = modulation_.load(std::memory_order_relaxed);
     status->rx_rssi = rssi_.load(std::memory_order_relaxed);
     status->rx_snr = snr_.load(std::memory_order_relaxed);
-}
-
-bool wifi_rx::pop(uint8_t* out, size_t* len, size_t max_len, TickType_t wait)
-{
-    if (out == nullptr || len == nullptr)
-    {
-        return false;
-    }
-    slot_s* slot = queue_.take(wait);
-    if (slot == nullptr)
-    {
-        return false;
-    }
-    const size_t copy = slot->len < max_len ? slot->len : max_len;
-    memcpy(out, slot->data, copy);
-    *len = copy;
-    pool_.release(slot);
-    radio_.pulse_rx_led();
-    return true;
 }
 
 bool wifi_rx::set_allow_failed_crc(bool allow)

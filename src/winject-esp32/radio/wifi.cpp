@@ -213,6 +213,8 @@ bool wifi::apply_modulation()
     }
 
     tx_.apply_power();
+    tx_.apply_cca();
+    tx_.apply_tx_done_cb();
     return true;
 }
 
@@ -227,9 +229,9 @@ bool wifi::initialize()
 
     init_activity_leds();
 
-    if (!lock_.init() || !tx_.init() || !rx_.init())
+    if (!lock_.init())
     {
-        ESP_LOGE(TAG, "radio queue alloc failed");
+        ESP_LOGE(TAG, "radio lock alloc failed");
         return false;
     }
 
@@ -266,11 +268,6 @@ bool wifi::initialize()
     if (!tx_.apply_tx_done_cb())
     {
         ESP_LOGW(TAG, "tx_latency unavailable (tx done callback not registered)");
-    }
-
-    if (!tx_.start_task())
-    {
-        return false;
     }
 
     ready_.store(true, std::memory_order_release);
@@ -416,24 +413,24 @@ void wifi::note_udp_fwd_pkt()
     rx_.note_udp_fwd_pkt();
 }
 
-wifi::tx_slot_s* wifi::take_tx(TickType_t wait)
+bool wifi::set_domain(uint16_t domain)
 {
-    return tx_.take(wait);
+    return tx_.set_domain(domain) && rx_.set_domain(domain);
 }
 
-bool wifi::post_tx(tx_slot_s* slot, TickType_t wait)
+uint16_t wifi::domain() const
 {
-    return tx_.post(slot, wait);
+    return tx_.domain();
 }
 
-void wifi::release_tx(tx_slot_s* slot)
+wifi_tx& wifi::tx()
 {
-    tx_.release(slot);
+    return tx_;
 }
 
-bool wifi::inject(const uint8_t* frame, size_t len)
+wifi_rx& wifi::rx()
 {
-    return tx_.inject(frame, len);
+    return rx_;
 }
 
 bool wifi::set_cca_enabled(bool enabled)
@@ -444,11 +441,6 @@ bool wifi::set_cca_enabled(bool enabled)
 bool wifi::set_tx_power(int8_t dbm)
 {
     return tx_.set_tx_power(dbm);
-}
-
-bool wifi::pop_rx(uint8_t* out, size_t* len, size_t max_len, TickType_t wait)
-{
-    return rx_.pop(out, len, max_len, wait);
 }
 
 bool wifi::set_allow_failed_crc(bool allow)

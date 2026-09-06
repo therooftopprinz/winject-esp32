@@ -2,14 +2,12 @@
 """WT32-ETH01 STANDALONE two-radio test.
 
 Same UDP-air-UDP path as tools/bw_test.py, but both radios use STANDALONE
-mode and operator-assigned airport MACs (Addr2) instead of chip STA
-addresses. BSSID is DE:AD:CA:FE:BA:BE.
+mode. Addressing is a shared domain plus two buses (A→B and B→A). Addr3
+is CA:FE:BA:BE plus the domain octets. Isolation is the bus filter: A
+stamps bus-ab, B filters bus-ab; A does not filter its own TX bus.
 
-P2P airports are you|peer. A injects as xx:xx:xx:yy:yy:yy and firmware
-on B filters that SA; B injects as yy:yy:yy:xx:xx:xx and A filters the swap.
-
-    host --UDP inject--> A (SA airport-a) --802.11--> B (filter swap(airport-b)=airport-a) --UDP--> host
-    host <--UDP--------- A (filter swap(airport-a)=airport-b) <--802.11-- B (SA airport-b) <--UDP-- host
+    host --UDP sut bus-ab--> A --802.11--> B --UDP sur bus-ab--> host
+    host <--UDP sur bus-ba-- A <--802.11-- B <--UDP sut bus-ba-- host
 
     python3 scripts/stand_alone_test.py
     python3 scripts/stand_alone_test.py --modulation OFDM_24M
@@ -34,31 +32,43 @@ import bw_test as bw
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-DEFAULT_AIRPORT_A = "AA:BB:CC:22:22:33"
-DEFAULT_AIRPORT_B = "22:22:33:AA:BB:CC"
-DEFAULT_AIRPORT_A2 = "AA:BB:CC:44:55:66"
-DEFAULT_AIRPORT_B2 = "44:55:66:AA:BB:CC"
 INJECT_FALLBACK = 9100
 INJECT_PORT2 = 9010
 HOST_PORT_A2 = 9011
 HOST_PORT_B2 = 9012
-STANDALONE_BSSID = "DE:AD:CA:FE:BA:BE"
+BUS_AB2 = "c3"  # dual A injects, B filters
+BUS_BA2 = "d4"  # dual B injects, A filters
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="WT32-ETH01 STANDALONE bandwidth test")
     p.add_argument("--a", default="192.168.253.11", help="radio A Ethernet IP")
     p.add_argument("--b", default="192.168.253.12", help="radio B Ethernet IP")
-    p.add_argument("--host", default="", help="host IP that both radios send back to")
+    p.add_argument("--host", default="", help="host IP that both radios send air→UDP back to")
     p.add_argument(
-        "--airport-a",
-        default=DEFAULT_AIRPORT_A,
-        help=f"radio A P2P airport you|peer (default {DEFAULT_AIRPORT_A})",
+        "--domain",
+        default=bw.DEFAULT_DOMAIN,
+        help=f"shared air domain, hex 1..ffff (default {bw.DEFAULT_DOMAIN})",
     )
     p.add_argument(
-        "--airport-b",
-        default=DEFAULT_AIRPORT_B,
-        help=f"radio B P2P airport; must be the swap of --airport-a (default {DEFAULT_AIRPORT_B})",
+        "--bus-ab",
+        default=bw.BUS_AB,
+        help=f"bus A injects / B filters (default {bw.BUS_AB})",
+    )
+    p.add_argument(
+        "--bus-ba",
+        default=bw.BUS_BA,
+        help=f"bus B injects / A filters (default {bw.BUS_BA})",
+    )
+    p.add_argument(
+        "--bus-ab2",
+        default=BUS_AB2,
+        help=f"dual pair: bus A injects / B filters (default {BUS_AB2})",
+    )
+    p.add_argument(
+        "--bus-ba2",
+        default=BUS_BA2,
+        help=f"dual pair: bus B injects / A filters (default {BUS_BA2})",
     )
     p.add_argument(
         "--inject-port",
@@ -69,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dual",
         action="store_true",
-        help="also bind a second airport pair and check mux isolation",
+        help="also bind a second bus pair and check mux isolation",
     )
     p.add_argument(
         "--channel",
@@ -111,58 +121,39 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def parse_status_mode(text: str) -> str | None:
-    raw = bw.parse_status_field(text, "mode")
-    return raw.upper() if raw else None
-
-
-def parse_status_bssid(text: str) -> str | None:
-    raw = bw.parse_status_field(text, "bssid")
-    return raw.upper() if raw else None
-
-
-def parse_airport_mac(text: str) -> bytes:
-    raw = text.replace(":", "").replace("-", "")
-    try:
-        mac = bytes.fromhex(raw)
-    except ValueError as err:
-        raise SystemExit(f"invalid airport MAC {text!r}: {err}") from err
-    if len(mac) != 6:
-        raise SystemExit(f"airport must be 6 bytes: {text}")
-    return mac
-
-
-def format_airport_mac(mac: bytes) -> str:
-    return ":".join(f"{b:02X}" for b in mac)
-
-
-def swap_airport_mac(mac: bytes) -> bytes:
-    return mac[3:] + mac[:3]
-
-
 def configure_standalone(
     ip: str,
     host: str,
-    airport: str,
+    *,
     inject_port: int,
-    tx_port: int,
+    host_port: int,
+    bus_tx: str,
+    bus_rx: str,
+    domain: str,
     extras: list[str],
     quiet: bool,
 ) -> tuple[bool, str]:
-    cmds = [
-        "set_mode STANDALONE",
-        f"unset_upstream_rx {airport}",
-        f"unset_upstream_tx {airport}",
-        f"set_upstream_rx {airport} {inject_port}",
-        f"set_upstream_tx {airport} {host} {tx_port}",
-        *extras,
-    ]
+    cmds = bw.upstream_config_cmds(
+        host,
+        inject_port,
+        host_port,
+        bus_tx,
+        bus_rx,
+        domain,
+        mode="STANDALONE",
+        extra_cmds=extras or None,
+    )
     try:
         replies = bw.console(ip, cmds, quiet=quiet)
     except OSError as err:
         return False, str(err)
     if not bw.replies_ok(replies):
-        detail = " ".join(text.strip().splitlines()[-1] for text in replies if text.strip())
+        detail = " ".join(
+            line.strip()
+            for text in replies
+            for line in text.splitlines()
+            if "error:" in line
+        )
         return False, detail or "console error"
     return True, ""
 
@@ -183,23 +174,33 @@ def configure_pair(
     extras_a: list[str] = []
     extras_b: list[str] = []
     if args.dual:
-        extras_a = [
-            f"unset_upstream_rx {DEFAULT_AIRPORT_A2}",
-            f"unset_upstream_tx {DEFAULT_AIRPORT_A2}",
-            f"set_upstream_rx {DEFAULT_AIRPORT_A2} {INJECT_PORT2}",
-            f"set_upstream_tx {DEFAULT_AIRPORT_A2} {host} {HOST_PORT_A2}",
-        ]
-        extras_b = [
-            f"unset_upstream_rx {DEFAULT_AIRPORT_B2}",
-            f"unset_upstream_tx {DEFAULT_AIRPORT_B2}",
-            f"set_upstream_rx {DEFAULT_AIRPORT_B2} {INJECT_PORT2}",
-            f"set_upstream_tx {DEFAULT_AIRPORT_B2} {host} {HOST_PORT_B2}",
-        ]
+        extras_a = bw.upstream_bind_cmds(
+            host, INJECT_PORT2, HOST_PORT_A2, args.bus_ab2, args.bus_ba2
+        )
+        extras_b = bw.upstream_bind_cmds(
+            host, INJECT_PORT2, HOST_PORT_B2, args.bus_ba2, args.bus_ab2
+        )
     ok_a, err_a = configure_standalone(
-        args.a, host, args.airport_a, inject_port, bw.HOST_PORT_A, extras_a, quiet
+        args.a,
+        host,
+        inject_port=inject_port,
+        host_port=bw.HOST_PORT_A,
+        bus_tx=args.bus_ab,
+        bus_rx=args.bus_ba,
+        domain=args.domain,
+        extras=extras_a,
+        quiet=quiet,
     )
     ok_b, err_b = configure_standalone(
-        args.b, host, args.airport_b, inject_port, bw.HOST_PORT_B, extras_b, quiet
+        args.b,
+        host,
+        inject_port=inject_port,
+        host_port=bw.HOST_PORT_B,
+        bus_tx=args.bus_ba,
+        bus_rx=args.bus_ab,
+        domain=args.domain,
+        extras=extras_b,
+        quiet=quiet,
     )
     if ok_a and ok_b:
         return True
@@ -306,15 +307,20 @@ def main() -> int:
         raise SystemExit("--channel must be 1-13")
     if args.all and args.modulation is not None:
         raise SystemExit("use --all or --modulation, not both")
-    mac_a = parse_airport_mac(args.airport_a)
-    mac_b = parse_airport_mac(args.airport_b)
-    if mac_a == mac_b:
-        raise SystemExit("--airport-a and --airport-b must differ")
-    if swap_airport_mac(mac_a) != mac_b:
-        raise SystemExit(
-            "--airport-b must be the 3-byte swap of --airport-a "
-            f"(want {format_airport_mac(swap_airport_mac(mac_a))})"
-        )
+    args.domain = bw.fmt_domain(args.domain)
+    args.bus_ab = bw.fmt_bus(args.bus_ab)
+    args.bus_ba = bw.fmt_bus(args.bus_ba)
+    args.bus_ab2 = bw.fmt_bus(args.bus_ab2)
+    args.bus_ba2 = bw.fmt_bus(args.bus_ba2)
+    buses = [args.bus_ab, args.bus_ba]
+    if args.bus_ab == args.bus_ba:
+        raise SystemExit("--bus-ab and --bus-ba must differ")
+    if args.dual:
+        buses.extend([args.bus_ab2, args.bus_ba2])
+        if args.bus_ab2 == args.bus_ba2:
+            raise SystemExit("--bus-ab2 and --bus-ba2 must differ")
+        if len(set(buses)) != 4:
+            raise SystemExit("dual bus ids must all be unique")
 
     apply_modulation = args.all or args.modulation is not None
     if args.all:
@@ -329,7 +335,10 @@ def main() -> int:
     cca_label = "enabled" if args.cca else "disabled"
     inject_port = args.inject_port
     print(f"host {host}")
-    print(f"mode STANDALONE  airport A {args.airport_a}  airport B {args.airport_b}")
+    print(
+        f"mode STANDALONE  domain {args.domain}  "
+        f"bus A→B {args.bus_ab}  bus B→A {args.bus_ba}"
+    )
 
     status_a = bw.log_status(args.a, "A")
     status_b = bw.log_status(args.b, "B")
@@ -360,7 +369,7 @@ def main() -> int:
     print(f"payload {args.size} B  duration {args.duration}s  drain {args.drain}s")
     if args.dual:
         print(
-            f"dual {DEFAULT_AIRPORT_A2}/{DEFAULT_AIRPORT_B2}  "
+            f"dual bus A→B {args.bus_ab2}  bus B→A {args.bus_ba2}  "
             f"inject {INJECT_PORT2}  host {HOST_PORT_A2}/{HOST_PORT_B2}"
         )
 
@@ -379,12 +388,14 @@ def main() -> int:
         after_a = bw.log_status(args.a, "A")
         after_b = bw.log_status(args.b, "B")
         for label, text in (("A", after_a), ("B", after_b)):
-            mode = parse_status_mode(text)
-            bssid = parse_status_bssid(text)
+            mode = bw.parse_status_mode(text)
+            domain = bw.parse_status_domain(text)
             if mode != "STANDALONE":
                 print(f"warning: {label} mode is {mode or '?'} (want STANDALONE)")
-            if bssid and bssid != STANDALONE_BSSID:
-                print(f"warning: {label} bssid is {bssid} (want {STANDALONE_BSSID})")
+            if not domain or domain == "UNSET":
+                print(f"warning: {label} domain unset (want {args.domain})")
+            elif domain != args.domain.upper():
+                print(f"warning: {label} domain is {domain} (want {args.domain})")
 
     listen_a = bw.Listener(host, bw.HOST_PORT_A)
     listen_b = bw.Listener(host, bw.HOST_PORT_B)
@@ -574,9 +585,8 @@ def main() -> int:
                 print(f"restore failed: {err}")
         else:
             print(
-                "\nradios left in STANDALONE; "
-                "set_mode BFC_TUNNEL_DEVICE before tools/bw_test.py "
-                "(or pass --restore-tunnel)"
+                "\nradios left in STANDALONE; pass --restore-tunnel, "
+                "or tools/bw_test.py will set_mode BFC_TUNNEL_DEVICE itself"
             )
 
     if not mux_ok:

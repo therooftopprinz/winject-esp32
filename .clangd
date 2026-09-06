@@ -1,0 +1,45 @@
+# Host clangd has no Xtensa backend. Parse as a 32-bit triple clang knows,
+# and reuse PlatformIO's compile database plus picolibc / libstdc++ headers.
+# tools/clangd_pio.py snapshots compile_commands.json into .pio/clangd/ so
+# CMake reconfigure does not yank the database out from under the editor.
+# -I/-isystem paths below are relative to each compile command's directory
+# (.pio/build/<env>), not to this file.
+CompileFlags:
+  CompilationDatabase: .pio/clangd
+  Compiler: clang++
+  Add:
+    - --target=arm-none-eabi
+    - -D__XTENSA__=1
+    - -nostdlibinc
+    - -isystem
+    - ../../clangd-toolchain/picolibc/include
+    - -isystem
+    - ../../clangd-toolchain/xtensa-esp-elf/include
+    - -isystem
+    - ../../clangd-cxx
+    - -isystem
+    - ../../clangd-cxx/xtensa-esp-elf
+    - -I
+    - ../../clangd-idf/components/spi_flash/include
+    - -I
+    - ../../clangd-idf/components/esp_hal_mspi/include
+  Remove:
+    - --target=*
+    - -m*
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+    - -fno-jump-tables
+    - -fno-builtin-*
+    - -specs=*
+    - -fuse-cxa-atexit
+    - -fmacro-prefix-map=*
+    - -Werror
+    - -Werror=*
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  Suppress:
+    - drv_unknown_argument
+    - unknown_warning_option
+    - attribute_not_type_attr

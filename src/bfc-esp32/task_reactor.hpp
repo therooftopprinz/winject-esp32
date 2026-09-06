@@ -90,6 +90,27 @@ public:
         return task != nullptr && xTaskGetCurrentTaskHandle() == task;
     }
 
+    bool start_pinned(const char* name, BaseType_t core, UBaseType_t prio,
+                      uint32_t stack_bytes = 6144)
+    {
+        bool expected = false;
+        if (!pinned_.compare_exchange_strong(expected, true,
+                                             std::memory_order_acq_rel))
+        {
+            return true;
+        }
+        const char* task_name = (name != nullptr && name[0] != '\0')
+                                    ? name
+                                    : "task_reactor";
+        if (xTaskCreatePinnedToCore(pinned_task, task_name, stack_bytes, this,
+                                    prio, nullptr, core) != pdPASS)
+        {
+            pinned_.store(false, std::memory_order_release);
+            return false;
+        }
+        return true;
+    }
+
     void run()
     {
         task_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
@@ -199,6 +220,12 @@ public:
     }
 
 private:
+    static void pinned_task(void* arg)
+    {
+        static_cast<task_reactor*>(arg)->run();
+        vTaskDelete(nullptr);
+    }
+
     uint64_t timeout_ms_ = 100;
     timer_t timer_;
     SemaphoreHandle_t ctx_lock_ = nullptr;
@@ -207,6 +234,7 @@ private:
     std::vector<cb_t> wake_cbs_;
     std::atomic<bool> running_{false};
     std::atomic<bool> pending_wake_{false};
+    std::atomic<bool> pinned_{false};
     std::atomic<TaskHandle_t> task_{nullptr};
 };
 

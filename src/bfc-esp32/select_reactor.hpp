@@ -75,6 +75,19 @@ public:
         return true;
     }
 
+    // Enable or disable an existing read watch without dropping the callback.
+    // Must run on the reactor thread (from a read/wake callback).
+    bool set_read_enabled(fd_t fd, bool enabled)
+    {
+        fd_entry_s* entry = find(fd);
+        if (entry == nullptr || !entry->read_cb)
+        {
+            return false;
+        }
+        entry->read_active = enabled;
+        return true;
+    }
+
     bool add_write_rdy(fd_t fd, cb_t cb)
     {
         if (fd < 0)
@@ -141,6 +154,27 @@ public:
     {
         const TaskHandle_t task = task_.load(std::memory_order_acquire);
         return task != nullptr && xTaskGetCurrentTaskHandle() == task;
+    }
+
+    bool start_pinned(const char* name, BaseType_t core, UBaseType_t prio,
+                      uint32_t stack_bytes = 6144)
+    {
+        bool expected = false;
+        if (!pinned_.compare_exchange_strong(expected, true,
+                                             std::memory_order_acq_rel))
+        {
+            return true;
+        }
+        const char* task_name = (name != nullptr && name[0] != '\0')
+                                    ? name
+                                    : "sel_reactor";
+        if (xTaskCreatePinnedToCore(pinned_task, task_name, stack_bytes, this,
+                                    prio, nullptr, core) != pdPASS)
+        {
+            pinned_.store(false, std::memory_order_release);
+            return false;
+        }
+        return true;
     }
 
     void run()
@@ -389,6 +423,12 @@ private:
         }
     }
 
+    static void pinned_task(void* arg)
+    {
+        static_cast<select_reactor*>(arg)->run();
+        vTaskDelete(nullptr);
+    }
+
     bool ensure_wake()
     {
         if (wake_sock_.valid())
@@ -418,6 +458,7 @@ private:
     std::vector<pending_rem_s> pending_rem_;
     std::atomic<bool> running_{false};
     std::atomic<bool> pending_wake_{false};
+    std::atomic<bool> pinned_{false};
     std::atomic<TaskHandle_t> task_{nullptr};
 };
 

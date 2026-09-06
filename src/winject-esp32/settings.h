@@ -1,10 +1,12 @@
 #ifndef WINJECT_SETTINGS_H_
 #define WINJECT_SETTINGS_H_
 
+#include "channel_info_endpoint.h"
 #include "config.h"
 #include "frame.h"
-#include "upstream_rx.h"
-#include "upstream_tx.h"
+#include "lc_rx_endpoint.h"
+#include "lc_tx_endpoint.h"
+#include "packet.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -19,6 +21,9 @@ public:
     settings& operator=(const settings&) = delete;
 
     uint8_t current_slot() const;
+    WinjectMode configured_mode() const;
+    // Update loaded mode and rewrite the current NVS slot (rest unchanged).
+    bool persist_mode(WinjectMode mode);
     bool save(uint8_t slot);
     bool use(uint8_t slot);
     bool load_current();
@@ -36,14 +41,17 @@ private:
         uint32_t fallback_ip;
         NetmgrMode network_mode;
         bool dhcp_server_enabled;
-        uint8_t rx_count;
-        upstream_bind_s rx[WIFI_AIRPORT_MAX];
-        uint8_t tx_count;
-        upstream_dest_s tx[WIFI_AIRPORT_MAX];
+        uint16_t domain;
+        uint8_t sut_count;
+        lc_tx_bind_s sut[WIFI_AIRPORT_MAX];
+        uint8_t sur_count;
+        lc_rx_bind_s sur[WIFI_AIRPORT_MAX];
+        uint8_t ci_count;
+        ip_port_t ci[WIFI_AIRPORT_MAX];
     };
 
-    static constexpr uint8_t k_blob_version = 2;
-    static constexpr uint8_t k_blob_version_min = 1;
+    static constexpr uint8_t k_blob_version = 3;
+    static constexpr uint8_t k_blob_version_min = 3;
     static constexpr size_t k_blob_max = 2600;
 
     settings();
@@ -59,12 +67,12 @@ private:
     bool read_blob(uint8_t slot, snapshot_s* snap);
     bool write_blob(uint8_t slot, const snapshot_s& snap);
 
-    upstream_rx& rx_;
-    upstream_tx& tx_;
+    lc_tx_endpoint& sut_;
+    lc_rx_endpoint& sur_;
+    channel_info_endpoint& ci_;
     manager& netmgr_;
     uint8_t current_slot_ = 0;
     bool has_loaded_ = false;
-    // Too large for the reactor task stack (6144). Console save/use run there.
     snapshot_s loaded_{};
     snapshot_s scratch_{};
     uint8_t blob_[k_blob_max]{};

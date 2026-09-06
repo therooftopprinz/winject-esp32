@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """WT32-ETH01 WInject bandwidth test.
 
-UDP into one radio's upstream_rx, 802.11 in the air, UDP out the other
-radio's upstream_tx to this host. Measures integrity and payload goodput.
+UDP into one radio's set_upstream_tx (inject), 802.11 in the air, UDP out
+the other radio's set_upstream_rx to this host. Addressing is a shared
+domain plus two buses (A→B and B→A). Measures integrity and payload goodput.
 Sets CCA on both radios over the TCP console. Sets channel and modulation
 only when --channel, --modulation, or --all is given; omitted leaves the
 radios as they are.
@@ -30,8 +31,11 @@ sys.stderr.reconfigure(line_buffering=True)
 
 CONSOLE_PORT = 2323
 INJECT_PORT = 9000
-HOST_PORT_A = 9001  # frames heard by radio A
-HOST_PORT_B = 9002  # frames heard by radio B
+HOST_PORT_A = 9001  # frames heard by radio A (B→A bus)
+HOST_PORT_B = 9002  # frames heard by radio B (A→B bus)
+DEFAULT_DOMAIN = "1234"
+BUS_AB = "b2"  # A injects, B filters
+BUS_BA = "a1"  # B injects, A filters
 TCP_SEND_A = 29000  # manager A TCP_SERVER (host sends A->B)
 TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
 # Manager ARQ can stop reading when the window fills and reverse ACKs starve;
@@ -41,8 +45,8 @@ MAX_PAYLOAD = 1476
 FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
 FEC_ENC_A = 19100  # host -> encode -> radio A inject
 FEC_ENC_B = 19110  # host -> encode -> radio B inject
-FEC_APP_A = 19101  # decode of radio A upstream_tx (B -> A)
-FEC_APP_B = 19102  # decode of radio B upstream_tx (A -> B)
+FEC_APP_A = 19101  # decode of radio A air→UDP (B -> A)
+FEC_APP_B = 19102  # decode of radio B air→UDP (A -> B)
 FEC_BLOCK_HDR = 8
 FEC_LEN_PREFIX = 2
 FEC_INTRA_HDR = 2
@@ -220,27 +224,115 @@ def replies_ok(replies: list[str]) -> bool:
     return all("error:" not in text for text in replies)
 
 
-def configure_upstream(ip: str, host: str, tx_port: int, quiet: bool) -> bool:
+def fmt_bus(bus: str) -> str:
+    text = bus.strip().lower()
+    if text.startswith("bus="):
+        text = text[4:]
+    if text.startswith("0x"):
+        text = text[2:]
+    if not 1 <= len(text) <= 2:
+        raise SystemExit(f"invalid bus {bus!r}; want 1-2 hex digits")
+    try:
+        value = int(text, 16)
+    except ValueError as err:
+        raise SystemExit(f"invalid bus {bus!r}") from err
+    if not 1 <= value <= 255:
+        raise SystemExit(f"bus must be 1..ff (not broadcast 0): {bus}")
+    return f"{value:x}"
+
+
+def fmt_domain(value: int | str) -> str:
+    if isinstance(value, int):
+        n = value
+    else:
+        text = value.strip().lower()
+        if text.startswith("0x"):
+            text = text[2:]
+        try:
+            n = int(text, 16)
+        except ValueError as err:
+            raise SystemExit(f"invalid domain {value!r}") from err
+    if not 1 <= n <= 65535:
+        raise SystemExit(f"domain must be 1..ffff, got {value}")
+    return f"{n:04x}"
+
+
+def upstream_bind_cmds(
+    host: str,
+    inject_port: int,
+    host_port: int,
+    bus_tx: str,
+    bus_rx: str,
+) -> list[str]:
+    return [
+        f"unset_upstream_tx bus={bus_tx}",
+        f"unset_upstream_rx bus={bus_rx}",
+        f"unset_upstream_tx bus={bus_rx}",
+        f"unset_upstream_rx bus={bus_tx}",
+        f"set_upstream_tx bus={bus_tx} {inject_port}",
+        f"set_upstream_rx bus={bus_rx} {host} {host_port}",
+    ]
+
+
+def upstream_config_cmds(
+    host: str,
+    inject_port: int,
+    host_port: int,
+    bus_tx: str,
+    bus_rx: str,
+    domain: str,
+    mode: str | None = None,
+    extra_cmds: list[str] | None = None,
+) -> list[str]:
+    cmds: list[str] = []
+    if mode:
+        cmds.append(f"set_mode {mode}")
+    cmds.append(f"set_domain {domain}")
+    cmds.extend(upstream_bind_cmds(host, inject_port, host_port, bus_tx, bus_rx))
+    if extra_cmds:
+        cmds.extend(extra_cmds)
+    return cmds
+
+
+def configure_upstream(
+    ip: str,
+    host: str,
+    *,
+    inject_port: int,
+    host_port: int,
+    bus_tx: str,
+    bus_rx: str,
+    domain: str,
+    quiet: bool,
+    mode: str | None = None,
+    extra_cmds: list[str] | None = None,
+) -> bool:
     replies = console(
         ip,
-        [
-            f"set_upstream_rx {INJECT_PORT}",
-            f"set_upstream_tx {host} {tx_port}",
-        ],
+        upstream_config_cmds(
+            host,
+            inject_port,
+            host_port,
+            bus_tx,
+            bus_rx,
+            domain,
+            mode=mode,
+            extra_cmds=extra_cmds,
+        ),
         quiet=quiet,
     )
     return replies_ok(replies)
 
 
 def parse_status_field(text: str, key: str) -> str | None:
+    prefix = f"{key}="
     for line in text.splitlines():
         parts = line.split()
-        try:
-            i = parts.index(key)
-        except ValueError:
-            continue
-        if i + 1 < len(parts):
-            return parts[i + 1]
+        for i, part in enumerate(parts):
+            if part.lower().startswith(prefix.lower()):
+                return part.split("=", 1)[1] or None
+            if part.lower() == key.lower() and i + 1 < len(parts):
+                return parts[i + 1]
     return None
 
 
@@ -254,6 +346,31 @@ def parse_status_channel(text: str) -> int | None:
 def parse_status_modulation(text: str) -> str | None:
     raw = parse_status_field(text, "modulation")
     return raw.upper() if raw else None
+
+
+def parse_status_domain(text: str) -> str | None:
+    raw = parse_status_field(text, "domain")
+    if raw:
+        return None if raw.lower() == "unset" else raw.upper()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].lower() == "domain":
+            return None if parts[1].lower() == "unset" else parts[1].upper()
+    return None
+
+
+def parse_status_mode(text: str) -> str | None:
+    for line in text.splitlines():
+        if not (line.startswith("device ") or line.startswith("status ")):
+            continue
+        for part in line.split():
+            if part.lower().startswith("mode="):
+                return part.split("=", 1)[1].upper() or None
+        return None
+    for part in text.split():
+        if part.lower().startswith("mode="):
+            return part.split("=", 1)[1].upper() or None
+    return None
 
 
 def log_status(ip: str, label: str) -> str:
@@ -784,7 +901,22 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="WT32-ETH01 WInject bandwidth test")
     p.add_argument("--a", default="192.168.253.11", help="radio A Ethernet IP")
     p.add_argument("--b", default="192.168.253.12", help="radio B Ethernet IP")
-    p.add_argument("--host", default="", help="host IP that both radios send back to")
+    p.add_argument("--host", default="", help="host IP that both radios send air→UDP back to")
+    p.add_argument(
+        "--domain",
+        default=DEFAULT_DOMAIN,
+        help=f"shared air domain, hex 1..ffff (default {DEFAULT_DOMAIN})",
+    )
+    p.add_argument(
+        "--bus-ab",
+        default=BUS_AB,
+        help=f"bus A injects / B filters (default {BUS_AB})",
+    )
+    p.add_argument(
+        "--bus-ba",
+        default=BUS_BA,
+        help=f"bus B injects / A filters (default {BUS_BA})",
+    )
     p.add_argument(
         "--channel",
         type=int,
@@ -942,7 +1074,13 @@ def main() -> int:
     host = args.host or detect_host(args.a)
     quiet = not args.verbose
     cca_label = "enabled" if args.cca else "disabled"
+    domain = fmt_domain(args.domain)
+    bus_ab = fmt_bus(args.bus_ab)
+    bus_ba = fmt_bus(args.bus_ba)
+    if bus_ab == bus_ba:
+        raise SystemExit("--bus-ab and --bus-ba must differ")
     print(f"host {host}")
+    print(f"domain {domain}  bus A→B {bus_ab}  bus B→A {bus_ba}")
 
     status_a = log_status(args.a, "A")
     status_b = log_status(args.b, "B")
@@ -964,6 +1102,20 @@ def main() -> int:
             raise SystemExit("could not read existing modulation; pass --modulation or --all")
         mods = [current]
 
+    if args.skip_config and not args.tcp:
+        for label, text in (("A", status_a), ("B", status_b)):
+            mode = parse_status_mode(text)
+            if mode and mode != "BFC_TUNNEL_DEVICE":
+                print(f"warning: {label} mode is {mode} (want BFC_TUNNEL_DEVICE)")
+        dom_a = parse_status_domain(status_a)
+        dom_b = parse_status_domain(status_b)
+        if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
+            print("warning: domain unset on one or both radios")
+        elif dom_a != dom_b:
+            print(f"warning: A domain {dom_a}, B domain {dom_b}")
+        elif dom_a != domain.upper():
+            print(f"warning: radios domain {dom_a}, test --domain {domain}")
+
     channel_label = str(display_channel) if display_channel is not None else "existing"
     if args.channel is None:
         channel_label += " (unchanged)"
@@ -980,9 +1132,29 @@ def main() -> int:
 
     if not args.skip_config:
         print("\n=== configure upstream ===")
-        if not configure_upstream(args.a, host, HOST_PORT_A, quiet):
+        if not configure_upstream(
+            args.a,
+            host,
+            inject_port=INJECT_PORT,
+            host_port=HOST_PORT_A,
+            bus_tx=bus_ab,
+            bus_rx=bus_ba,
+            domain=domain,
+            quiet=quiet,
+            mode="BFC_TUNNEL_DEVICE",
+        ):
             raise SystemExit("failed to configure upstream on A")
-        if not configure_upstream(args.b, host, HOST_PORT_B, quiet):
+        if not configure_upstream(
+            args.b,
+            host,
+            inject_port=INJECT_PORT,
+            host_port=HOST_PORT_B,
+            bus_tx=bus_ba,
+            bus_rx=bus_ab,
+            domain=domain,
+            quiet=quiet,
+            mode="BFC_TUNNEL_DEVICE",
+        ):
             raise SystemExit("failed to configure upstream on B")
 
     fec: FecProxies | None = None

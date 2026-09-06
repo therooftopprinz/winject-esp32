@@ -22,11 +22,21 @@ struct wifi_status_s
     bool cca_enabled;
     bool allow_failed_crc;
     int8_t tx_power_dbm;
+    uint16_t domain;
     uint32_t udp_tx_pkt;
-    uint32_t udp_tx_failed;
+    uint32_t drop_tx_nomem;
+    uint32_t tx_retry_count;
+    uint32_t tx_retry_nomem;
+    uint32_t tx_retry_other;
+    uint32_t inject_ok;
+    uint32_t inject_fail;
+    uint16_t tx_in_flight;
+    bool inject_wait_valid;
+    uint32_t inject_wait_us;
     uint32_t udp_rx_pkt;
-    uint32_t udp_rx_crc_err;
-    uint32_t udp_rx_dropped;
+    uint32_t drop_crc_error;
+    uint32_t drop_rx_no_pkt_pool;
+    uint32_t drop_rx_queue_full;
     uint32_t udp_fwd_pkt;
     uint16_t tx_queue;
     uint16_t rx_queue;
@@ -44,8 +54,6 @@ class wifi
     friend class wifi_rx;
 
 public:
-    using tx_slot_s = wifi_tx::slot_s;
-
     static wifi& instance();
     wifi(const wifi&) = delete;
     wifi& operator=(const wifi&) = delete;
@@ -59,19 +67,17 @@ public:
     static const char* format_phy(uint8_t sig_mode, uint8_t rate, uint8_t mcs,
                                   bool sgi);
 
+    bool set_domain(uint16_t domain);
+    uint16_t domain() const;
+
     void note_udp_tx_pkt();
     void note_udp_fwd_pkt();
-    // Default wait=0: inject must not block holding upstream locks / starve
-    // the console reactor when the TX pool is empty.
-    tx_slot_s* take_tx(TickType_t wait = 0);
-    bool post_tx(tx_slot_s* slot, TickType_t wait = 0);
-    void release_tx(tx_slot_s* slot);
-    bool inject(const uint8_t* frame, size_t len);
     bool set_cca_enabled(bool enabled);
     bool set_tx_power(int8_t dbm);
-
-    bool pop_rx(uint8_t* out, size_t* len, size_t max_len, TickType_t wait = 0);
     bool set_allow_failed_crc(bool allow);
+
+    wifi_tx& tx();
+    wifi_rx& rx();
 
 private:
     wifi();

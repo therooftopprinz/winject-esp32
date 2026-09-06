@@ -20,8 +20,9 @@ settings& settings::instance()
 }
 
 settings::settings()
-    : rx_(upstream_rx::instance()),
-      tx_(upstream_tx::instance()),
+    : sut_(lc_tx_endpoint::instance()),
+      sur_(lc_rx_endpoint::instance()),
+      ci_(channel_info_endpoint::instance()),
       netmgr_(manager::instance())
 {
 }
@@ -48,6 +49,7 @@ void settings::snapshot_defaults(snapshot_s* snap)
     snap->tx_power_dbm = WIFI_DEFAULT_TX_POWER_DBM;
     snap->network_mode = NETMGR_MODE_AUTO;
     snap->dhcp_server_enabled = false;
+    snap->domain = 0;
 }
 
 bool settings::capture_live(snapshot_s* snap)
@@ -74,6 +76,11 @@ bool settings::capture_live(snapshot_s* snap)
         snap->cca_enabled = radio.cca_enabled;
         snap->allow_failed_crc = radio.allow_failed_crc;
         snap->tx_power_dbm = radio.tx_power_dbm;
+        snap->domain = radio.domain;
+    }
+    else
+    {
+        snap->domain = w.domain();
     }
 
     uint32_t fallback = 0;
@@ -84,11 +91,17 @@ bool settings::capture_live(snapshot_s* snap)
     snap->network_mode = netmgr_.network_mode();
     snap->dhcp_server_enabled = netmgr_.dhcp_server_enabled();
 
-    rx_.fill_status(snap->rx, &snap->rx_count);
-    tx_.fill_status(snap->tx, &snap->tx_count);
-    for (uint8_t i = 0; i < snap->rx_count; i++)
+    snap->sut_count = WIFI_AIRPORT_MAX;
+    sut_.get_status(snap->sut, &snap->sut_count);
+    sur_.fill_status(snap->sur, &snap->sur_count);
+    ci_.fill_status(snap->ci, &snap->ci_count);
+    for (uint8_t i = 0; i < snap->sut_count; i++)
     {
-        snap->rx[i].socket_open = false;
+        snap->sut[i].socket_open = false;
+    }
+    for (uint8_t i = 0; i < snap->sur_count; i++)
+    {
+        snap->sur[i].active = false;
     }
     return true;
 }
@@ -99,7 +112,8 @@ bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
     {
         return false;
     }
-    if (snap.rx_count > WIFI_AIRPORT_MAX || snap.tx_count > WIFI_AIRPORT_MAX)
+    if (snap.sut_count > WIFI_AIRPORT_MAX || snap.sur_count > WIFI_AIRPORT_MAX ||
+        snap.ci_count > WIFI_AIRPORT_MAX)
     {
         return false;
     }
@@ -131,20 +145,25 @@ bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
     put32(snap.fallback_ip);
     put8(static_cast<uint8_t>(snap.network_mode));
     put8(snap.dhcp_server_enabled ? 1 : 0);
-    put8(snap.rx_count);
-    for (uint8_t i = 0; i < snap.rx_count; i++)
+    put16(snap.domain);
+    put8(snap.sut_count);
+    for (uint8_t i = 0; i < snap.sut_count; i++)
     {
-        memcpy(p, snap.rx[i].airport, 6);
-        p += 6;
-        put16(snap.rx[i].port);
+        put8(snap.sut[i].bus);
+        put16(snap.sut[i].udp_port);
     }
-    put8(snap.tx_count);
-    for (uint8_t i = 0; i < snap.tx_count; i++)
+    put8(snap.sur_count);
+    for (uint8_t i = 0; i < snap.sur_count; i++)
     {
-        memcpy(p, snap.tx[i].airport, 6);
-        p += 6;
-        put32(snap.tx[i].host);
-        put16(snap.tx[i].port);
+        put8(snap.sur[i].bus);
+        put32(snap.sur[i].dest.host);
+        put16(snap.sur[i].dest.port);
+    }
+    put8(snap.ci_count);
+    for (uint8_t i = 0; i < snap.ci_count; i++)
+    {
+        put32(snap.ci[i].host);
+        put16(snap.ci[i].port);
     }
 
     *len = static_cast<size_t>(p - buf);
@@ -211,7 +230,7 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
         return false;
     }
     if (mode != WINJECT_MODE_BFC_TUNNEL_DEVICE &&
-        mode != WINJECT_MODE_STANDALONE)
+        mode != WINJECT_MODE_STANDALONE && mode != WINJECT_MODE_OTA)
     {
         return false;
     }
@@ -230,62 +249,54 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
     {
         return false;
     }
-    if (version >= 2)
-    {
-        uint8_t network_mode = 0;
-        uint8_t dhcp_server = 0;
-        if (!get8(&network_mode) || !get8(&dhcp_server))
-        {
-            return false;
-        }
-        if (network_mode != NETMGR_MODE_STATIC &&
-            network_mode != NETMGR_MODE_AUTO)
-        {
-            return false;
-        }
-        snap->network_mode = static_cast<NetmgrMode>(network_mode);
-        snap->dhcp_server_enabled = dhcp_server != 0;
-    }
-    else
-    {
-        snap->network_mode = NETMGR_MODE_AUTO;
-        snap->dhcp_server_enabled = false;
-    }
-    if (!get8(&snap->rx_count))
+    uint8_t network_mode = 0;
+    uint8_t dhcp_server = 0;
+    if (!get8(&network_mode) || !get8(&dhcp_server))
     {
         return false;
     }
-    if (snap->rx_count > WIFI_AIRPORT_MAX)
+    if (network_mode != NETMGR_MODE_STATIC && network_mode != NETMGR_MODE_AUTO)
     {
         return false;
     }
-    for (uint8_t i = 0; i < snap->rx_count; i++)
-    {
-        if (!need(6))
-        {
-            return false;
-        }
-        memcpy(snap->rx[i].airport, p, 6);
-        p += 6;
-        if (!get16(&snap->rx[i].port))
-        {
-            return false;
-        }
-        snap->rx[i].socket_open = false;
-    }
-    if (!get8(&snap->tx_count) || snap->tx_count > WIFI_AIRPORT_MAX)
+    snap->network_mode = static_cast<NetmgrMode>(network_mode);
+    snap->dhcp_server_enabled = dhcp_server != 0;
+    if (!get16(&snap->domain))
     {
         return false;
     }
-    for (uint8_t i = 0; i < snap->tx_count; i++)
+    if (!get8(&snap->sut_count) || snap->sut_count > WIFI_AIRPORT_MAX)
     {
-        if (!need(6))
+        return false;
+    }
+    for (uint8_t i = 0; i < snap->sut_count; i++)
+    {
+        if (!get8(&snap->sut[i].bus) || !get16(&snap->sut[i].udp_port))
         {
             return false;
         }
-        memcpy(snap->tx[i].airport, p, 6);
-        p += 6;
-        if (!get32(&snap->tx[i].host) || !get16(&snap->tx[i].port))
+        snap->sut[i].socket_open = false;
+    }
+    if (!get8(&snap->sur_count) || snap->sur_count > WIFI_AIRPORT_MAX)
+    {
+        return false;
+    }
+    for (uint8_t i = 0; i < snap->sur_count; i++)
+    {
+        if (!get8(&snap->sur[i].bus) || !get32(&snap->sur[i].dest.host) ||
+            !get16(&snap->sur[i].dest.port))
+        {
+            return false;
+        }
+        snap->sur[i].active = false;
+    }
+    if (!get8(&snap->ci_count) || snap->ci_count > WIFI_AIRPORT_MAX)
+    {
+        return false;
+    }
+    for (uint8_t i = 0; i < snap->ci_count; i++)
+    {
+        if (!get32(&snap->ci[i].host) || !get16(&snap->ci[i].port))
         {
             return false;
         }
@@ -364,7 +375,23 @@ bool settings::apply_snapshot(const snapshot_s& snap)
     {
         return false;
     }
+    if (snap.fallback_ip != 0)
+    {
+        netmgr_.set_ip(snap.fallback_ip);
+    }
+    netmgr_.set_dhcp_server_enabled(snap.dhcp_server_enabled);
+    if (!netmgr_.set_network_mode(snap.network_mode))
+    {
+        ESP_LOGE(TAG, "network apply failed");
+        return false;
+    }
+    if (snap.mode == WINJECT_MODE_OTA)
+    {
+        return true;
+    }
+
     wifi& radio = wifi::instance();
+    radio.set_domain(snap.domain);
     if (radio.ready())
     {
         if (!radio.set_channel(snap.channel) ||
@@ -377,19 +404,23 @@ bool settings::apply_snapshot(const snapshot_s& snap)
             return false;
         }
     }
-    if (snap.fallback_ip != 0)
+    if (!sut_.clear())
     {
-        netmgr_.set_ip(snap.fallback_ip);
-    }
-    netmgr_.set_dhcp_server_enabled(snap.dhcp_server_enabled);
-    if (!netmgr_.set_network_mode(snap.network_mode))
-    {
-        ESP_LOGE(TAG, "network apply failed");
+        ESP_LOGE(TAG, "endpoint apply failed");
         return false;
     }
-    if (!rx_.load(snap.rx, snap.rx_count) || !tx_.load(snap.tx, snap.tx_count))
+    for (uint8_t i = 0; i < snap.sut_count; i++)
     {
-        ESP_LOGE(TAG, "upstream apply failed");
+        if (!sut_.add_endpoint(snap.sut[i].bus, snap.sut[i].udp_port))
+        {
+            ESP_LOGE(TAG, "endpoint apply failed");
+            return false;
+        }
+    }
+    if (!sur_.load(snap.sur, snap.sur_count) ||
+        !ci_.load(snap.ci, snap.ci_count))
+    {
+        ESP_LOGE(TAG, "endpoint apply failed");
         return false;
     }
     return true;
@@ -400,13 +431,63 @@ uint8_t settings::current_slot() const
     return current_slot_;
 }
 
+WinjectMode settings::configured_mode() const
+{
+    return loaded_.mode;
+}
+
+bool settings::persist_mode(WinjectMode mode)
+{
+    if (mode != WINJECT_MODE_BFC_TUNNEL_DEVICE &&
+        mode != WINJECT_MODE_STANDALONE && mode != WINJECT_MODE_OTA)
+    {
+        return false;
+    }
+    if (configured_mode() != WINJECT_MODE_OTA && wifi::instance().ready())
+    {
+        // Snapshot live radio/endpoints before flipping into OTA.
+        if (!capture_live(&scratch_))
+        {
+            return false;
+        }
+        loaded_ = scratch_;
+    }
+    if (!frameSetMode(mode))
+    {
+        return false;
+    }
+    loaded_.mode = mode;
+    if (!write_blob(current_slot_, loaded_))
+    {
+        ESP_LOGE(TAG, "persist mode failed");
+        return false;
+    }
+    has_loaded_ = true;
+    ESP_LOGI(TAG, "persisted mode %s slot %u", frameModeName(mode),
+             current_slot_);
+    return true;
+}
+
 bool settings::save(uint8_t slot)
 {
     if (!slot_ok(slot))
     {
         return false;
     }
-    if (!capture_live(&scratch_))
+    if (configured_mode() == WINJECT_MODE_OTA)
+    {
+        // Keep radio/endpoint tables from the last full-mode snapshot.
+        scratch_ = loaded_;
+        scratch_.mode = WINJECT_MODE_OTA;
+        uint32_t fallback = 0;
+        if (netmgr_.static_ipv4(&fallback))
+        {
+            scratch_.fallback_ip = fallback;
+        }
+        scratch_.network_mode = netmgr_.network_mode();
+        scratch_.dhcp_server_enabled = netmgr_.dhcp_server_enabled();
+    }
+    else if (!capture_live(&scratch_))
     {
         return false;
     }
@@ -432,6 +513,8 @@ bool settings::use(uint8_t slot)
     {
         return false;
     }
+    const WinjectMode from = configured_mode();
+    const WinjectMode to = scratch_.mode;
     nvs_handle_t handle = open_nvs(true);
     if (handle != 0)
     {
@@ -439,13 +522,20 @@ bool settings::use(uint8_t slot)
         nvs_commit(handle);
         nvs_close(handle);
     }
+    current_slot_ = slot;
+    loaded_ = scratch_;
+    has_loaded_ = true;
+    if (from == WINJECT_MODE_OTA || to == WINJECT_MODE_OTA)
+    {
+        // Entering/leaving OTA needs a reboot to (un)load WiFi and LCs.
+        ESP_LOGI(TAG, "using slot %u mode %s (reboot)", slot,
+                 frameModeName(to));
+        return true;
+    }
     if (!apply_snapshot(scratch_))
     {
         return false;
     }
-    current_slot_ = slot;
-    loaded_ = scratch_;
-    has_loaded_ = true;
     ESP_LOGI(TAG, "using slot %u", slot);
     return true;
 }

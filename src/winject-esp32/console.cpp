@@ -1,11 +1,14 @@
 #include "console.h"
 
+#include "channel_info_endpoint.h"
 #include "config.h"
 #include "frame.h"
+#include "lc_rx_endpoint.h"
+#include "lc_tx_endpoint.h"
 #include "ota.h"
+#include "packet.h"
 #include "settings.h"
-#include "upstream_rx.h"
-#include "upstream_tx.h"
+#include "udp_logger.h"
 #include "wifi.h"
 
 #include <errno.h>
@@ -176,114 +179,145 @@ static bool parse_host(const char* text, uint32_t* ip)
     return *ip != 0;
 }
 
-static int hex_nibble(char c)
+static bool parse_packed_hex8(const char* text, uint8_t* value)
 {
-    if (c >= '0' && c <= '9')
-    {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f')
-    {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F')
-    {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-static bool parse_packed_mac(const char* text, uint8_t mac[6])
-{
-    if (text == nullptr || mac == nullptr || strlen(text) != 12)
+    if (text == nullptr || value == nullptr || *text == '\0')
     {
         return false;
     }
-    for (int i = 0; i < 6; i++)
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
     {
-        const int hi = hex_nibble(text[i * 2]);
-        const int lo = hex_nibble(text[i * 2 + 1]);
-        if (hi < 0 || lo < 0)
-        {
-            return false;
-        }
-        mac[i] = static_cast<uint8_t>((hi << 4) | lo);
+        text += 2;
     }
+    const size_t n = strlen(text);
+    if (n < 1 || n > 2)
+    {
+        return false;
+    }
+    char* end = nullptr;
+    const long v = strtol(text, &end, 16);
+    if (end != text + n || v < 0 || v > 255)
+    {
+        return false;
+    }
+    *value = static_cast<uint8_t>(v);
     return true;
 }
 
-static bool parse_colon_mac(const char* text, uint8_t mac[6])
+static bool parse_bus_arg(const char* text, bus_t* bus)
 {
-    if (text == nullptr || mac == nullptr)
+    if (text == nullptr || bus == nullptr)
     {
         return false;
     }
-    const char* p = text;
-    for (int i = 0; i < 6; i++)
+    if (strncasecmp(text, "bus=", 4) != 0)
     {
-        char* end = nullptr;
-        const long value = strtol(p, &end, 16);
-        if (end == p || value < 0 || value > 255)
-        {
-            return false;
-        }
-        const size_t digits = static_cast<size_t>(end - p);
-        if (digits == 0 || digits > 2)
-        {
-            return false;
-        }
-        mac[i] = static_cast<uint8_t>(value);
-        if (i < 5)
-        {
-            if (*end != ':')
-            {
-                return false;
-            }
-            p = end + 1;
-        }
-        else if (*end != '\0')
-        {
-            return false;
-        }
+        return false;
     }
+    return parse_packed_hex8(text + 4, bus);
+}
+
+static bool parse_domain(const char* text, uint16_t* domain)
+{
+    if (text == nullptr || domain == nullptr || *text == '\0')
+    {
+        return false;
+    }
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+    {
+        text += 2;
+    }
+    char* end = nullptr;
+    const unsigned long value = strtoul(text, &end, 16);
+    if (end == text || *end != '\0' || value < 1 || value > 65535)
+    {
+        return false;
+    }
+    *domain = static_cast<uint16_t>(value);
     return true;
 }
 
-static bool parse_airport(const char* text, uint8_t mac[6])
+static bool parse_to_arg(const char* text, ip_port_t* dest)
 {
-    if (text == nullptr || mac == nullptr || *text == '\0')
+    if (text == nullptr || dest == nullptr)
     {
         return false;
     }
-    if (strcmp(text, "0") == 0)
+    if (strncasecmp(text, "to=", 3) != 0)
     {
-        memset(mac, 0, 6);
-        return true;
+        return false;
     }
-    if (strchr(text, ':') != nullptr)
+    const char* p = text + 3;
+    const char* colon = strrchr(p, ':');
+    if (colon == nullptr || colon == p)
     {
-        return parse_colon_mac(text, mac);
+        return false;
     }
-    return parse_packed_mac(text, mac);
+    char host[64];
+    const size_t host_len = static_cast<size_t>(colon - p);
+    if (host_len == 0 || host_len >= sizeof(host))
+    {
+        return false;
+    }
+    memcpy(host, p, host_len);
+    host[host_len] = '\0';
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    if (!parse_host(host, &ip) || !parse_port(colon + 1, &port))
+    {
+        return false;
+    }
+    dest->host = ip;
+    dest->port = port;
+    return true;
 }
 
-static bool airport_allowed(const uint8_t mac[6])
+static bool parse_address_arg(const char* text, ip_port_t* dest)
 {
-    if (frameGetMode() == WINJECT_MODE_STANDALONE)
+    if (text == nullptr || dest == nullptr)
     {
-        return frameAirportValidStandalone(mac);
+        return false;
     }
-    return frameAirportIsZero(mac);
+    if (strncasecmp(text, "address=", 8) != 0)
+    {
+        return false;
+    }
+    const char* p = text + 8;
+    const char* colon = strrchr(p, ':');
+    if (colon == nullptr || colon == p)
+    {
+        return false;
+    }
+    char host[64];
+    const size_t host_len = static_cast<size_t>(colon - p);
+    if (host_len == 0 || host_len >= sizeof(host))
+    {
+        return false;
+    }
+    memcpy(host, p, host_len);
+    host[host_len] = '\0';
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    if (!parse_host(host, &ip) || !parse_port(colon + 1, &port))
+    {
+        return false;
+    }
+    dest->host = ip;
+    dest->port = port;
+    return true;
 }
 
-static const char* airport_mode_error()
+static bool parse_level_arg(const char* text, log_level_e* level)
 {
-    if (frameGetMode() == WINJECT_MODE_STANDALONE)
+    if (text == nullptr || level == nullptr)
     {
-        return "error: airport must be 00:00:00:xx:xx:xx (broadcast) or "
-               "xx:xx:xx:yy:yy:yy (P2P) in STANDALONE\n";
+        return false;
     }
-    return "error: airport must be 0 in BFC_TUNNEL_DEVICE\n";
+    if (strncasecmp(text, "level=", 6) != 0)
+    {
+        return false;
+    }
+    return udp_logger::parse_level(text + 6, level);
 }
 
 static bool cmd_is(const char* cmd, const char* name, const char* alias)
@@ -370,8 +404,13 @@ void console::write(const out_s& out, const char* text)
 
     size_t len = strlen(text);
     size_t off = 0;
+    const int64_t deadline_us = esp_timer_get_time() + 2000000;
     while (off < len)
     {
+        if (client_by_fd(out.fd) == nullptr)
+        {
+            return;
+        }
         const int n = send(out.fd, text + off, len - off, 0);
         if (n < 0)
         {
@@ -381,7 +420,13 @@ void console::write(const out_s& out, const char* text)
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                return;
+                if (esp_timer_get_time() >= deadline_us)
+                {
+                    close_client(out.fd);
+                    return;
+                }
+                vTaskDelay(1);
+                continue;
             }
             close_client(out.fd);
             return;
@@ -405,25 +450,26 @@ void console::print(const out_s& out, const char* fmt, ...)
     write(out, buf);
 }
 
-void console::print_mac(const out_s& out, const uint8_t mac[6])
-{
-    print(out, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3],
-          mac[4], mac[5]);
-}
-
 void console::print_banner(const out_s& out)
 {
-    write(out, "WInject-ESP32  bfc-tunnel external multicast radio\n");
+    write(out, "WInject-ESP32  bus/domain radio\n");
     write(out, "type help\n");
 }
 
 void console::print_help(const out_s& out)
 {
-    write(out, "set_mode|sm <BFC_TUNNEL_DEVICE|STANDALONE>\n");
-    write(out, "set_upstream_rx|sur [airport] <port>\n");
-    write(out, "set_upstream_tx|sut [airport] <host> <port>\n");
-    write(out, "unset_upstream_rx|uur [airport]\n");
-    write(out, "unset_upstream_tx|uut [airport]\n");
+    write(out, "set_mode|sm <BFC_TUNNEL_DEVICE|STANDALONE|OTA>\n");
+    write(out, "  OTA reboots into network+console+HTTP update only\n");
+    write(out, "set_domain|sdom <domain>\n");
+    write(out, "unset_domain|udom\n");
+    write(out, "set_upstream_rx|sur bus=<lcid> <host> <udp_port>\n");
+    write(out, "unset_upstream_rx|uur bus=<lcid>\n");
+    write(out, "set_upstream_tx|sut bus=<lcid> <udp_port>\n");
+    write(out, "unset_upstream_tx|uut bus=<lcid>\n");
+    write(out, "set_upstream_ci|suc to=<host>:<port>\n");
+    write(out, "unset_upstream_ci|usuc to=<host>:<port>\n");
+    write(out, "set_logger|sl address=<host>:<port> level=<error|warn|info|debug>\n");
+    write(out, "unset_logger|ul\n");
     write(out, "set_allow_failed_crc|saf <0|1>\n");
     write(out, "set_channel|sc <channel>\n");
     write(out, "set_modulation|sd <modulation>\n");
@@ -443,41 +489,134 @@ void console::print_help(const out_s& out)
     write(out, "ota: HTTP POST /update\n");
 }
 
-void console::print_path_metrics(const out_s& out, const wifi_status_s& radio)
+void console::print_upstreams(const out_s& out, const lc_tx_bind_s* sut,
+                              uint8_t sut_count, const lc_rx_bind_s* sur,
+                              uint8_t sur_count)
 {
+    for (uint8_t i = 0; i < sut_count; i++)
+    {
+        print(out, "upstream_tx bus=%02X address=%u\n", sut[i].bus,
+              sut[i].udp_port);
+    }
+    for (uint8_t i = 0; i < sur_count; i++)
+    {
+        char host_str[16];
+        ipv4_to_string(sur[i].dest.host, host_str, sizeof(host_str));
+        print(out, "upstream_rx bus=%02X address=%s:%u\n", sur[i].bus,
+              host_str, sur[i].dest.port);
+    }
+    if (sut_count == 0 && sur_count == 0)
+    {
+        write(out, "upstream unset\n");
+    }
+}
+
+void console::print_channel_metrics(const out_s& out,
+                                    const wifi_status_s& radio,
+                                    const lc_tx_bind_s* sut, uint8_t sut_count,
+                                    const lc_rx_bind_s* sur, uint8_t sur_count)
+{
+    char tx_latency[16] = "-";
+    if (radio.tx_latency_valid)
+    {
+        snprintf(tx_latency, sizeof(tx_latency), "%uus",
+                 (unsigned)radio.tx_latency_us);
+    }
+    char inject_wait[16] = "-";
+    if (radio.inject_wait_valid)
+    {
+        snprintf(inject_wait, sizeof(inject_wait), "%uus",
+                 (unsigned)radio.inject_wait_us);
+    }
     print(out,
-          " udp_rx_pkt=%u udp_fwd_pkt=%u udp_tx_pkt=%u "
-          "udp_tx_failed=%u udp_rx_crc_err=%u udp_rx_dropped=%u tx_queue=%u "
-          "rx_queue=%u\n",
-          (unsigned)radio.udp_rx_pkt, (unsigned)radio.udp_fwd_pkt,
-          (unsigned)radio.udp_tx_pkt,
-          (unsigned)radio.udp_tx_failed, (unsigned)radio.udp_rx_crc_err,
-          (unsigned)radio.udp_rx_dropped, (unsigned)radio.tx_queue,
-          (unsigned)radio.rx_queue);
+          "channel_tx queue=%u drop_nomem=%u retry_count=%u "
+          "retry_nomem=%u retry_other=%u inject_ok=%u inject_fail=%u "
+          "in_flight=%u tx_latency=%s inject_wait=%s\n",
+          (unsigned)radio.tx_queue, (unsigned)radio.drop_tx_nomem,
+          (unsigned)radio.tx_retry_count, (unsigned)radio.tx_retry_nomem,
+          (unsigned)radio.tx_retry_other, (unsigned)radio.inject_ok,
+          (unsigned)radio.inject_fail, (unsigned)radio.tx_in_flight,
+          tx_latency, inject_wait);
+    print(out,
+          "channel_rx queue=%u drop_no_pkt_pool=%u drop_queue_full=%u "
+          "drop_crc_error=%u\n",
+          (unsigned)radio.rx_queue, (unsigned)radio.drop_rx_no_pkt_pool,
+          (unsigned)radio.drop_rx_queue_full, (unsigned)radio.drop_crc_error);
+
+    for (uint8_t i = 0; i < sut_count; i++)
+    {
+        print(out,
+              "channels_tx bus=%02X drop_no_pkt_pool=%u drop_queue_full=%u\n",
+              sut[i].bus, (unsigned)sut[i].drop_no_pkt_pool,
+              (unsigned)sut[i].drop_queue_full);
+    }
+    for (uint8_t i = 0; i < sur_count; i++)
+    {
+        print(out, "channels_rx bus=%02X drop_send_fail=%u\n", sur[i].bus,
+              (unsigned)sur[i].drop_send_fail);
+    }
+}
+
+bool console::radio_ready() const
+{
+    return tx_ep_ != nullptr && rx_ep_ != nullptr && ci_ != nullptr;
+}
+
+bool console::require_radio(const out_s& out)
+{
+    if (radio_ready())
+    {
+        return true;
+    }
+    write(out, "error: unavailable in OTA mode\n");
+    return false;
+}
+
+void console::reboot_after_ok(const out_s& out)
+{
+    write(out, "ok\n");
+    ESP_LOGI(TAG, "mode change reboot");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
 }
 
 void console::print_status(const out_s& out)
 {
     wifi_status_s radio = {};
-    static upstream_bind_s rx[WIFI_AIRPORT_MAX];
-    static upstream_dest_s tx[WIFI_AIRPORT_MAX];
-    uint8_t rx_count = 0;
-    uint8_t tx_count = 0;
-    wifi::instance().get_status(&radio);
-    rx_->fill_status(rx, &rx_count);
-    tx_->fill_status(tx, &tx_count);
+    static lc_tx_bind_s sut[WIFI_AIRPORT_MAX];
+    static lc_rx_bind_s sur[WIFI_AIRPORT_MAX];
+    static ip_port_t ci[WIFI_AIRPORT_MAX];
+    uint8_t sut_count = 0;
+    uint8_t sur_count = 0;
+    uint8_t ci_count = 0;
+    const bool have_radio = radio_ready();
+    if (have_radio)
+    {
+        sut_count = WIFI_AIRPORT_MAX;
+        wifi::instance().get_status(&radio);
+        tx_ep_->get_status(sut, &sut_count);
+        rx_ep_->fill_status(sur, &sur_count);
+        ci_->fill_status(ci, &ci_count);
+    }
 
+    write(out, "# device\n");
     const size_t heap_total = heap_caps_get_total_size(MALLOC_CAP_8BIT);
     const size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     const size_t heap_usage =
         heap_total > heap_free ? heap_total - heap_free : 0;
+    char domain_str[8] = "unset";
+    if (have_radio && radio.domain != 0)
+    {
+        snprintf(domain_str, sizeof(domain_str), "%04X", radio.domain);
+    }
     print(out,
-          "status uptime=%lus reset_reason=%s heap_usage=%u heap_free=%u "
-          "mode=%s\n",
+          "device uptime=%lus reset_reason=%s heap_usage=%u heap_free=%u "
+          "mode=%s domain=%s\n",
           (unsigned long)(esp_timer_get_time() / 1000000),
           reset_reason_name(esp_reset_reason()), (unsigned)heap_usage,
-          (unsigned)heap_free, frameModeName(frameGetMode()));
+          (unsigned)heap_free, frameModeName(frameGetMode()), domain_str);
 
+    write(out, "# network\n");
     uint32_t eth_ip = 0;
     const bool have_ip = netmgr_->local_ipv4(&eth_ip);
     char ip_str[16] = "-";
@@ -529,6 +668,14 @@ void console::print_status(const out_s& out)
         write(out, "ota waiting\n");
     }
 
+    if (!have_radio)
+    {
+        write(out, "# radio\n");
+        write(out, "radio disabled (OTA mode)\n");
+        return;
+    }
+
+    write(out, "# wifi\n");
     print(out,
           "wifi channel=%u modulation=%s cca=%s tx_power=%d "
           "allow_failed_crc=%s\n",
@@ -537,69 +684,69 @@ void console::print_status(const out_s& out)
           radio.cca_enabled ? "enabled" : "disabled", radio.tx_power_dbm,
           radio.allow_failed_crc ? "true" : "false");
 
-    char tx_latency[16] = "-";
-    if (radio.tx_latency_valid)
-    {
-        snprintf(tx_latency, sizeof(tx_latency), "%uus",
-                 (unsigned)radio.tx_latency_us);
-    }
+    write(out, "# radio\n");
     if (radio.rx_air_valid)
     {
-        print(out, "radio rssi=%d snr=%d tx_latency=%s\n", radio.rx_rssi,
-              radio.rx_snr, tx_latency);
+        print(out, "radio rssi=%d snr=%d\n", radio.rx_rssi, radio.rx_snr);
     }
     else
     {
-        print(out, "radio rssi=- snr=- tx_latency=%s\n", tx_latency);
+        write(out, "radio rssi=- snr=-\n");
     }
 
-    bool tx_used[WIFI_AIRPORT_MAX] = {};
-    uint8_t printed = 0;
-    for (uint8_t i = 0; i < rx_count; i++)
+    write(out, "# upstreams\n");
+    print_upstreams(out, sut, sut_count, sur, sur_count);
+
+    write(out, "# channel\n");
+    print_channel_metrics(out, radio, sut, sut_count, sur, sur_count);
+
+    write(out, "# logger\n");
     {
-        const upstream_dest_s* match = nullptr;
-        for (uint8_t j = 0; j < tx_count; j++)
+        udp_logger_status_s log = {};
+        udp_logger::instance().fill_status(&log);
+        if (!log.set)
         {
-            if (memcmp(rx[i].airport, tx[j].airport, 6) == 0)
-            {
-                match = &tx[j];
-                tx_used[j] = true;
-                break;
-            }
-        }
-        write(out, "upstream_");
-        print_mac(out, rx[i].airport);
-        if (match != nullptr)
-        {
-            char host_str[16];
-            ipv4_to_string(match->host, host_str, sizeof(host_str));
-            print(out, " tx=%s:%u rx=%u", host_str, match->port, rx[i].port);
+            write(out, "logger unset\n");
         }
         else
         {
-            print(out, " tx=- rx=%u", rx[i].port);
+            char host_str[16];
+            ipv4_to_string(log.dest.host, host_str, sizeof(host_str));
+            print(out,
+                  "logger address=%s:%u level=%s emitted=%u dropped=%u\n",
+                  host_str, log.dest.port, udp_logger::level_name(log.level),
+                  (unsigned)log.emitted, (unsigned)log.dropped);
         }
-        print_path_metrics(out, radio);
-        printed++;
     }
-    for (uint8_t j = 0; j < tx_count; j++)
+
+    write(out, "# channel_info\n");
+    if (ci_count == 0)
     {
-        if (tx_used[j])
+        write(out, "channel_info subscribers=-\n");
+    }
+    else
+    {
+        char line[256];
+        size_t used = 0;
+        int n = snprintf(line, sizeof(line), "channel_info subscribers=");
+        if (n > 0)
         {
-            continue;
+            used = static_cast<size_t>(n);
         }
-        char host_str[16];
-        ipv4_to_string(tx[j].host, host_str, sizeof(host_str));
-        write(out, "upstream_");
-        print_mac(out, tx[j].airport);
-        print(out, " tx=%s:%u rx=-", host_str, tx[j].port);
-        print_path_metrics(out, radio);
-        printed++;
-    }
-    if (printed == 0)
-    {
-        write(out, "upstream unset");
-        print_path_metrics(out, radio);
+        for (uint8_t i = 0; i < ci_count; i++)
+        {
+            char host_str[16];
+            ipv4_to_string(ci[i].host, host_str, sizeof(host_str));
+            n = snprintf(line + used, sizeof(line) - used, "%s%s:%u",
+                         i == 0 ? "" : ",", host_str, ci[i].port);
+            if (n < 0 || static_cast<size_t>(n) >= sizeof(line) - used)
+            {
+                break;
+            }
+            used += static_cast<size_t>(n);
+        }
+        snprintf(line + used, sizeof(line) - used, "\n");
+        write(out, line);
     }
 }
 
@@ -638,7 +785,18 @@ void console::handle_line(const char* line, const out_s& out)
         if (!frameParseMode(arg1, &mode) || arg2 != nullptr)
         {
             write(out,
-                  "error: usage set_mode <BFC_TUNNEL_DEVICE|STANDALONE>\n");
+                  "error: usage set_mode <BFC_TUNNEL_DEVICE|STANDALONE|OTA>\n");
+            return;
+        }
+        const WinjectMode prev = settings::instance().configured_mode();
+        if (prev == WINJECT_MODE_OTA || mode == WINJECT_MODE_OTA)
+        {
+            if (!settings::instance().persist_mode(mode))
+            {
+                write(out, "error: failed to set mode\n");
+                return;
+            }
+            reboot_after_ok(out);
             return;
         }
         if (!frameSetMode(mode))
@@ -650,30 +808,60 @@ void console::handle_line(const char* line, const out_s& out)
         return;
     }
 
-    if (cmd_is(cmd, "unset_upstream_rx", "uur"))
+    if (cmd_is(cmd, "set_domain", "sdom"))
     {
-        uint8_t airport[6] = {};
+        if (!require_radio(out))
+        {
+            return;
+        }
+        uint16_t domain = 0;
+        if (!parse_domain(arg1, &domain) || arg2 != nullptr)
+        {
+            write(out, "error: usage set_domain <domain>\n");
+            return;
+        }
+        if (!wifi::instance().set_domain(domain))
+        {
+            write(out, "error: failed to set domain\n");
+            return;
+        }
+        write(out, "ok\n");
+        return;
+    }
+
+    if (cmd_is(cmd, "unset_domain", "udom"))
+    {
+        if (!require_radio(out))
+        {
+            return;
+        }
         if (arg1 != nullptr)
         {
-            if (!parse_airport(arg1, airport) || arg2 != nullptr ||
-                arg3 != nullptr || extra != nullptr)
-            {
-                write(out, "error: usage unset_upstream_rx [airport]\n");
-                return;
-            }
-        }
-        else if (arg2 != nullptr || arg3 != nullptr || extra != nullptr)
-        {
-            write(out, "error: usage unset_upstream_rx [airport]\n");
+            write(out, "error: usage unset_domain\n");
             return;
         }
+        if (!wifi::instance().set_domain(0))
+        {
+            write(out, "error: failed to unset domain\n");
+            return;
+        }
+        write(out, "ok\n");
+        return;
+    }
 
-        if (!airport_allowed(airport))
+    if (cmd_is(cmd, "unset_upstream_rx", "uur"))
+    {
+        if (!require_radio(out))
         {
-            write(out, airport_mode_error());
             return;
         }
-        if (!rx_->unset(airport))
+        bus_t bus = 0;
+        if (!parse_bus_arg(arg1, &bus) || arg2 != nullptr)
+        {
+            write(out, "error: usage unset_upstream_rx bus=<lcid>\n");
+            return;
+        }
+        if (!rx_ep_->rem_endpoint(bus))
         {
             write(out, "error: failed to unset upstream rx\n");
             return;
@@ -684,28 +872,17 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "unset_upstream_tx", "uut"))
     {
-        uint8_t airport[6] = {};
-        if (arg1 != nullptr)
+        if (!require_radio(out))
         {
-            if (!parse_airport(arg1, airport) || arg2 != nullptr ||
-                arg3 != nullptr || extra != nullptr)
-            {
-                write(out, "error: usage unset_upstream_tx [airport]\n");
-                return;
-            }
-        }
-        else if (arg2 != nullptr || arg3 != nullptr || extra != nullptr)
-        {
-            write(out, "error: usage unset_upstream_tx [airport]\n");
             return;
         }
-
-        if (!airport_allowed(airport))
+        bus_t bus = 0;
+        if (!parse_bus_arg(arg1, &bus) || arg2 != nullptr)
         {
-            write(out, airport_mode_error());
+            write(out, "error: usage unset_upstream_tx bus=<lcid>\n");
             return;
         }
-        if (!tx_->unset(airport))
+        if (!tx_ep_->rem_endpoint(bus))
         {
             write(out, "error: failed to unset upstream tx\n");
             return;
@@ -716,35 +893,24 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_upstream_rx", "sur"))
     {
-        uint8_t airport[6] = {};
+        if (!require_radio(out))
+        {
+            return;
+        }
+        bus_t bus = 0;
+        uint32_t host = 0;
         uint16_t port = 0;
-        if (arg2 == nullptr)
+        if (!parse_bus_arg(arg1, &bus) || !parse_host(arg2, &host) ||
+            !parse_port(arg3, &port) || extra != nullptr)
         {
-            if (!parse_port(arg1, &port) || extra != nullptr)
-            {
-                write(out, "error: usage set_upstream_rx [airport] <port>\n");
-                return;
-            }
-        }
-        else if (!parse_airport(arg1, airport) || !parse_port(arg2, &port) ||
-                 arg3 != nullptr)
-        {
-            write(out, "error: usage set_upstream_rx [airport] <port>\n");
+            write(out,
+                  "error: usage set_upstream_rx bus=<lcid> <host> <udp_port>\n");
             return;
         }
-        if (!airport_allowed(airport))
+        ip_port_t dest = {host, port};
+        if (!rx_ep_->add_endpoint(bus, dest))
         {
-            write(out, airport_mode_error());
-            return;
-        }
-        if (!netmgr_->connected())
-        {
-            write(out, "error: ethernet is down\n");
-            return;
-        }
-        if (!rx_->set(airport, port))
-        {
-            write(out, "error: failed to bind udp port\n");
+            write(out, "error: failed to set upstream rx\n");
             return;
         }
         write(out, "ok\n");
@@ -753,39 +919,123 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_upstream_tx", "sut"))
     {
-        uint8_t airport[6] = {};
-        uint32_t host = 0;
-        uint16_t port = 0;
-        if (arg3 == nullptr)
+        if (!require_radio(out))
         {
-            if (!parse_host(arg1, &host) || !parse_port(arg2, &port) ||
-                extra != nullptr)
-            {
-                write(out,
-                      "error: usage set_upstream_tx [airport] <host> <port>\n");
-                return;
-            }
+            return;
         }
-        else if (!parse_airport(arg1, airport) || !parse_host(arg2, &host) ||
-                 !parse_port(arg3, &port) || extra != nullptr)
+        bus_t bus = 0;
+        uint16_t port = 0;
+        if (!parse_bus_arg(arg1, &bus) || !parse_port(arg2, &port) ||
+            arg3 != nullptr)
+        {
+            write(out, "error: usage set_upstream_tx bus=<lcid> <udp_port>\n");
+            return;
+        }
+        if (!tx_ep_->add_endpoint(bus, port))
+        {
+            write(out, "error: failed to bind udp port\n");
+            return;
+        }
+        write(out, "ok\n");
+        return;
+    }
+
+    if (cmd_is(cmd, "set_upstream_ci", "suc"))
+    {
+        if (!require_radio(out))
+        {
+            return;
+        }
+        ip_port_t dest = {};
+        if (!parse_to_arg(arg1, &dest) || arg2 != nullptr)
+        {
+            write(out, "error: usage set_upstream_ci to=<host>:<port>\n");
+            return;
+        }
+        if (!ci_->add_subscriber(dest))
+        {
+            write(out, "error: failed to add ci subscriber\n");
+            return;
+        }
+        write(out, "ok\n");
+        return;
+    }
+
+    if (cmd_is(cmd, "unset_upstream_ci", "usuc"))
+    {
+        if (!require_radio(out))
+        {
+            return;
+        }
+        ip_port_t dest = {};
+        if (!parse_to_arg(arg1, &dest) || arg2 != nullptr)
+        {
+            write(out, "error: usage unset_upstream_ci to=<host>:<port>\n");
+            return;
+        }
+        if (!ci_->rem_subscriber(dest))
+        {
+            write(out, "error: ci subscriber not found\n");
+            return;
+        }
+        write(out, "ok\n");
+        return;
+    }
+
+    if (cmd_is(cmd, "set_logger", "sl"))
+    {
+        ip_port_t dest = {};
+        log_level_e level = log_level_e::warn;
+        bool have_addr = false;
+        bool have_level = false;
+        const char* args[3] = {arg1, arg2, arg3};
+        for (const char* a : args)
+        {
+            if (a == nullptr)
+            {
+                continue;
+            }
+            if (parse_address_arg(a, &dest))
+            {
+                have_addr = true;
+                continue;
+            }
+            if (parse_level_arg(a, &level))
+            {
+                have_level = true;
+                continue;
+            }
+            write(out,
+                  "error: usage set_logger address=<host>:<port> "
+                  "level=<error|warn|info|debug>\n");
+            return;
+        }
+        if (!have_addr || !have_level || extra != nullptr)
         {
             write(out,
-                  "error: usage set_upstream_tx [airport] <host> <port>\n");
+                  "error: usage set_logger address=<host>:<port> "
+                  "level=<error|warn|info|debug>\n");
             return;
         }
-        if (!airport_allowed(airport))
+        if (!udp_logger::instance().set(dest, level))
         {
-            write(out, airport_mode_error());
+            write(out, "error: set_logger failed\n");
             return;
         }
-        if (!netmgr_->connected())
+        write(out, "ok\n");
+        return;
+    }
+
+    if (cmd_is(cmd, "unset_logger", "ul"))
+    {
+        if (arg1 != nullptr)
         {
-            write(out, "error: ethernet is down\n");
+            write(out, "error: usage unset_logger\n");
             return;
         }
-        if (!tx_->set(airport, host, port))
+        if (!udp_logger::instance().unset())
         {
-            write(out, "error: failed to set tx destination\n");
+            write(out, "error: unset_logger failed\n");
             return;
         }
         write(out, "ok\n");
@@ -794,6 +1044,10 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_allow_failed_crc", "saf"))
     {
+        if (!require_radio(out))
+        {
+            return;
+        }
         bool allow = false;
         if (!parse_bool(arg1, &allow) || arg2 != nullptr)
         {
@@ -811,6 +1065,10 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_channel", "sc"))
     {
+        if (!require_radio(out))
+        {
+            return;
+        }
         uint8_t channel = 0;
         if (!parse_channel(arg1, &channel) || arg2 != nullptr)
         {
@@ -828,6 +1086,10 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_modulation", "sd"))
     {
+        if (!require_radio(out))
+        {
+            return;
+        }
         if (arg1 == nullptr || arg2 != nullptr)
         {
             write(out, "error: usage set_modulation <modulation>\n");
@@ -844,6 +1106,10 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_cca_enabled", "sce"))
     {
+        if (!require_radio(out))
+        {
+            return;
+        }
         bool enabled = false;
         if (!parse_bool(arg1, &enabled) || arg2 != nullptr)
         {
@@ -861,6 +1127,10 @@ void console::handle_line(const char* line, const out_s& out)
 
     if (cmd_is(cmd, "set_tx_power", "stp"))
     {
+        if (!require_radio(out))
+        {
+            return;
+        }
         int8_t dbm = 0;
         if (!parse_tx_power(arg1, &dbm) || arg2 != nullptr)
         {
@@ -967,9 +1237,16 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage use <0-9>\n");
             return;
         }
+        const WinjectMode prev = settings::instance().configured_mode();
         if (!settings::instance().use(static_cast<uint8_t>(value)))
         {
             write(out, "error: slot empty\n");
+            return;
+        }
+        const WinjectMode next = settings::instance().configured_mode();
+        if (prev == WINJECT_MODE_OTA || next == WINJECT_MODE_OTA)
+        {
+            reboot_after_ok(out);
             return;
         }
         write(out, "ok\n");
@@ -1108,6 +1385,9 @@ void console::accept_clients()
 
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        // Keep enough room for a full status dump even when heap is tight.
+        const int sndbuf = 4096;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
         if (!set_nonblock(fd) || !attach_client(fd))
         {
             close(fd);
@@ -1203,15 +1483,39 @@ void console::attach_reactor()
     sync_tcp();
 }
 
-bool console::init(upstream_rx& rx, upstream_tx& tx, manager& netmgr)
+bool console::init(manager& netmgr)
 {
     if (ready_)
     {
         return true;
     }
 
-    rx_ = &rx;
-    tx_ = &tx;
+    tx_ep_ = nullptr;
+    rx_ep_ = nullptr;
+    ci_ = nullptr;
+    netmgr_ = &netmgr;
+    reactor_ = &netmgr.reactor();
+    reactor_->wake_up(
+        [this]()
+        {
+            attach_reactor();
+        });
+
+    ready_ = true;
+    return true;
+}
+
+bool console::init(lc_tx_endpoint& tx_ep, lc_rx_endpoint& rx_ep,
+                   channel_info_endpoint& ci, manager& netmgr)
+{
+    if (ready_)
+    {
+        return true;
+    }
+
+    tx_ep_ = &tx_ep;
+    rx_ep_ = &rx_ep;
+    ci_ = &ci;
     netmgr_ = &netmgr;
     reactor_ = &netmgr.reactor();
     reactor_->wake_up(

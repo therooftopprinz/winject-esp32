@@ -1,11 +1,15 @@
+#include "channel_info_endpoint.h"
 #include "config.h"
 #include "console.h"
-#include "ethernet.h"
 #include "frame.h"
+#include "lc_rx.h"
+#include "lc_rx_endpoint.h"
+#include "lc_tx.h"
+#include "lc_tx_endpoint.h"
 #include "ota.h"
+#include "packet.h"
 #include "settings.h"
-#include "upstream_rx.h"
-#include "upstream_tx.h"
+#include "udp_logger.h"
 #include "wifi.h"
 
 #include "esp_event.h"
@@ -18,10 +22,7 @@
 #include "nvs_flash.h"
 
 static const char* TAG = "winject";
-static ethernet& g_ethernet = ethernet::instance();
 static manager& g_netmgr = manager::instance();
-static upstream_rx& g_upstream_rx = upstream_rx::instance();
-static upstream_tx& g_upstream_tx = upstream_tx::instance();
 static console g_console;
 
 extern "C" void app_main(void)
@@ -40,10 +41,46 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     settings::instance().load_current();
+    if (!udp_logger::instance().init())
+    {
+        ESP_LOGE(TAG, "udp logger init failed");
+    }
     if (!g_netmgr.start())
     {
         ESP_LOGE(TAG, "network manager start failed");
     }
+
+    if (settings::instance().configured_mode() == WINJECT_MODE_OTA)
+    {
+        ESP_LOGI(TAG, "OTA mode: network + console + HTTP update only");
+        frameSetMode(WINJECT_MODE_OTA);
+        g_console.init(g_netmgr);
+        otaBegin(g_netmgr);
+        return;
+    }
+
+    if (!packet_allocator::tx().init(WIFI_RADIO_TX_QUEUE) ||
+        !packet_allocator::rx().init(WIFI_RADIO_RX_QUEUE))
+    {
+        ESP_LOGE(TAG, "packet allocator init failed");
+    }
+
+    lc_tx& lctx = lc_tx::instance();
+    lc_rx& lcrx = lc_rx::instance();
+    lc_tx_endpoint& tx_ep = lc_tx_endpoint::instance();
+    lc_rx_endpoint& rx_ep = lc_rx_endpoint::instance();
+    channel_info_endpoint& ci = channel_info_endpoint::instance();
+
+    if (!lctx.init() || !lcrx.init() || !tx_ep.init(lctx) || !rx_ep.init())
+    {
+        ESP_LOGE(TAG, "lc init failed");
+    }
+    lcrx.set_endpoint(rx_ep);
+    if (!ci.init())
+    {
+        ESP_LOGE(TAG, "channel info init failed");
+    }
+    lctx.set_channel_info(ci);
 
     bool radio_ok = wifi::instance().initialize();
     if (!radio_ok)
@@ -56,19 +93,30 @@ extern "C" void app_main(void)
         radio_ok = false;
     }
 
-    if (!g_upstream_rx.init(g_ethernet) || !g_upstream_tx.init(g_ethernet))
+    if (radio_ok)
     {
-        ESP_LOGE(TAG, "upstream init failed");
+        if (!wifi::instance().tx().init(lctx) ||
+            !wifi::instance().rx().init(lcrx))
+        {
+            ESP_LOGE(TAG, "wifi lc wiring failed");
+            radio_ok = false;
+        }
     }
-    else if (radio_ok && !settings::instance().apply_live())
+
+    if (radio_ok && !settings::instance().apply_live())
     {
         ESP_LOGE(TAG, "settings apply failed");
     }
 
-    if (!g_upstream_rx.start_task() || !g_upstream_tx.start_task())
+    if (!tx_ep.start() || !lcrx.start() || !ci.start())
     {
-        ESP_LOGE(TAG, "upstream task create failed");
+        ESP_LOGE(TAG, "endpoint start failed");
     }
-    g_console.init(g_upstream_rx, g_upstream_tx, g_netmgr);
+    if (radio_ok && !wifi::instance().tx().start())
+    {
+        ESP_LOGE(TAG, "wifi_tx start failed");
+    }
+
+    g_console.init(tx_ep, rx_ep, ci, g_netmgr);
     otaBegin(g_netmgr);
 }

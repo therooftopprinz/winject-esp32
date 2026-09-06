@@ -182,38 +182,48 @@ bool console_client::send_cmd(const std::string& cmd, std::string* error)
     }
 }
 
-static bool parse_upstream_rx(const std::string& line, std::string* airport,
-                              uint16_t* rx_port)
+static bool parse_upstream_tx_inject(const std::string& line, std::string* bus,
+                                     uint16_t* inject_port)
 {
-    static const char k_prefix[] = "upstream_";
-    if (line.rfind(k_prefix, 0) != 0 || line.rfind("upstream unset", 0) == 0)
+    static const char k_prefix[] = "upstream_tx ";
+    if (line.rfind(k_prefix, 0) != 0)
     {
         return false;
     }
-    const auto sp = line.find(' ', sizeof(k_prefix) - 1);
-    if (sp == std::string::npos)
+    const auto bus_pos = line.find("bus=");
+    if (bus_pos == std::string::npos)
     {
         return false;
     }
-    *airport = line.substr(sizeof(k_prefix) - 1, sp - (sizeof(k_prefix) - 1));
-    const auto rx = line.find(" rx=");
-    if (rx == std::string::npos)
+    size_t start = bus_pos + 4;
+    while (start < line.size() && line[start] == ' ')
+    {
+        start++;
+    }
+    size_t stop = start;
+    while (stop < line.size() && line[stop] != ' ')
+    {
+        stop++;
+    }
+    if (stop == start)
     {
         return false;
     }
-    const char* p = line.c_str() + rx + 4;
-    if (*p == '-' || *p == '\0')
+    *bus = line.substr(start, stop - start);
+
+    const auto addr_pos = line.find("address=");
+    if (addr_pos == std::string::npos)
     {
-        *rx_port = 0;
-        return true;
+        return false;
     }
     char* end = nullptr;
-    const unsigned long v = strtoul(p, &end, 10);
-    if (end == p || v > 65535)
+    const unsigned long port =
+        strtoul(line.c_str() + addr_pos + 8, &end, 10);
+    if (end == line.c_str() + addr_pos + 8 || port == 0 || port > 65535)
     {
         return false;
     }
-    *rx_port = static_cast<uint16_t>(v);
+    *inject_port = static_cast<uint16_t>(port);
     return true;
 }
 
@@ -330,18 +340,19 @@ bool console_client::release_inject_port(uint16_t port,
     }
     for (const auto& line : lines)
     {
-        std::string airport;
-        uint16_t rx_port = 0;
-        if (!parse_upstream_rx(line, &airport, &rx_port) || rx_port != port)
+        std::string bus;
+        uint16_t inject_port = 0;
+        if (!parse_upstream_tx_inject(line, &bus, &inject_port) ||
+            inject_port != port)
         {
             continue;
         }
-        if (airport == keep_airport)
+        if (bus == keep_airport)
         {
             continue;
         }
-        LOG_INF("unset stale rx %s (held inject %u)", airport.c_str(), port);
-        if (!send_cmd("unset_upstream_rx " + airport, error))
+        LOG_INF("unset stale tx bus=%s (held inject %u)", bus.c_str(), port);
+        if (!send_cmd("unset_upstream_tx bus=" + bus, error))
         {
             return false;
         }

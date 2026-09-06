@@ -1,50 +1,120 @@
 # WInject-ESP32
 
-WInject-ESP is a **bfc-tunnel external multicast** radio.
+ESP-IDF firmware for Wireless-Tag **WT32-ETH01** (ESP32 + LAN8720): a **bfc-tunnel external multicast** radio. Addressing on the air is a **bus** (`lcid` / `uint8`), not a peer airport MAC. Up to five PDUs may share one 802.11 MPDU; demux is by bus only. This is the as-built reference; [refactor.md](refactor.md) is the design precursor.
 
 ```
-bfc-tunnel  --UDP payload-->  WT32-ETH01  --802.11 TX-->  WiFi
-bfc-tunnel  <--UDP payload--  WT32-ETH01  <--802.11 RX--  WiFi
-bfc-tunnel  --TCP cmds-->  control plane
+host  --UDP payload-->  WT32-ETH01  --802.11 TX-->  WiFi
+host  <--UDP payload--  WT32-ETH01  <--802.11 RX--  WiFi
+host  --TCP cmds-->  control plane (2323)
+host  <--UDP channel_info--  WT32-ETH01
 ```
+
+There is no LLC mux header, no FEC, and no PDCP in firmware. UDP payloads are LCP bodies only (no 802.11 header, no radiotap, no FCS). Max payload **1476** bytes (`WIFI_PAYLOAD_MAX` = 1500 − 24). Max present PDUs per MPDU: **5**.
+
+**Data path:** `lc_tx_endpoint` (UDP bind) → `lc_tx` queue → `wifi_tx` (combine ≤5, stamp, inject). Air RX: `wifi_rx` promiscuous → `lc_rx` (unpack slots) → `lc_rx_endpoint` (fan-out). **CPU0** runs the WiFi driver + inject task; **CPU1** runs Ethernet/lwIP, TCP console, OTA, and endpoint tasks.
 
 # 802.11 frame
 
-Firmware owns the MAC header (no radiotap, no FCS on the UDP path). IBSS data, `ToDS=0`, `FromDS=0`:
+Firmware owns the MAC header. IBSS data, `ToDS=0`, `FromDS=0`:
 
 ```
 Offset  Size  Field
 0       2     Frame Control  0x0008
 2       2     Duration       0x0000
-4       6     Addr1 DA       FF:FF:FF:FF:FF:FF     broadcast dst
-10      6     Addr2 SA       mode + airport (see Operating Modes)
-16      6     Addr3 BSSID    mode-selected group address
+4       6     Addr1          PDU slot bit packing (with Addr2)
+10      6     Addr2          PDU slot bit packing (with Addr1)
+16      6     Addr3          mode BSSID prefix + domain
 22      2     Sequence       firmware-owned
-24      N     Payload        UDP datagram
+24      N     Body           concatenated payloads (present slots only)
 ```
 
-RX accepts Data (and QoS Data) whose Addr3 is the mode BSSID. In `BFC_TUNNEL_DEVICE`, Addr3 is the tunnel BSSID; in `STANDALONE`, Addr3 is the standalone BSSID **and** Addr2 is a configured airport (RX table as-is, or the TX-table filter SA). Forwarding also requires Addr1 broadcast, not our TX SA, and a `set_upstream_tx` dest (tunnel: any dest; standalone: Addr2 is the dest airport on broadcast, or the swapped P2P response). Then the body is forwarded. Max payload 1476 bytes.
+Arbitrary Addr1/Addr2 rely on the `ieee80211_raw_frame_sanity_check` override (`return 0`) and `-Wl,-z,muldefs`. The STA eFuse MAC is board identity / logs only — it is **not** on the air.
 
-| Mode | Addr2 SA (TX) | Addr3 BSSID | Airport |
-|------|---------------|-------------|---------|
-| `BFC_TUNNEL_DEVICE` | WiFi STA MAC (eFuse) | `BA:DD:CA:FE:BA:BE` | ignored, always `0` |
-| `STANDALONE` | airport MAC | `DE:AD:CA:FE:BA:BE` | `00:00:00:xx:xx:xx` broadcast, or `xx:xx:xx:yy:yy:yy` P2P |
+### Addr1 || Addr2 — PDU slots (96 bits)
+
+Treat `Addr1[0..5] || Addr2[0..5]` as a **96-bit LSB-first** bit stream (bit 0 = LSB of `Addr1[0]` = 802.11 **I/G**).
+
+Five fixed slots × (`bus` `uint8` + `size` `uint11`) = **95 bits**, plus **1 bit** reserved as Addr1 I/G (former trailing spare):
+
+```
+emit ig           (1 bit, always 1 on TX)   # group DA → raw inject skips ACK wait
+for slot i = 0..4:
+    emit bus[i]   (8 bits, LSB-first)
+    emit size[i]  (11 bits, LSB-first)
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ig` | **1** on TX (group / multicast DA). RX ignores. Without this, an even `bus` made Addr1 unicast and the ESP MAC waited for ACKs that never arrived. |
+| `bus` | logical-channel / bus id (`0` = broadcast). Also called **lcid**. Full 8-bit value; not constrained by I/G. |
+| `size` | payload length in bytes; **`0` = slot absent** (`bus` ignored, no body bytes) |
+
+**Present PDUs** = slots with `size > 0`, in order `0…4`. Body = those payloads concatenated. RX drops if `sum(sizes) != body_len`, or any `size > WIFI_PAYLOAD_MAX`.
+
+### Addr3 — mode BSSID + domain
+
+Last two octets = big-endian **domain** (`uint16`). Domain `0` is unset / invalid on the air.
+
+| Mode | Addr3 prefix (4 bytes) | Full form |
+|------|------------------------|-----------|
+| `STANDALONE` | `CA:FE:BA:BE` | `CA:FE:BA:BE:DH:DL` |
+| `BFC_TUNNEL_DEVICE` | `BA:DD:CA:FE` | `BA:DD:CA:FE:DH:DL` |
+
+| Domain | Last two octets | Standalone Addr3 | Tunnel Addr3 |
+|--------|-----------------|------------------|--------------|
+| `0x0001` | `00:01` | `CA:FE:BA:BE:00:01` | `BA:DD:CA:FE:00:01` |
+| `0x1234` | `12:34` | `CA:FE:BA:BE:12:34` | `BA:DD:CA:FE:12:34` |
+
+RX: Addr3 prefix must match the local mode; domain must equal the local domain (unset or mismatch → drop).
+
+### Header examples
+
+**One PDU.** Domain `0x1234`, slot 0 `bus=0xB2` `size=3`, body `AA BB CC`:
+
+```
+Addr1  65:07:00:00:00:00   (I/G=1, then bus/size…)
+Addr2  00:00:00:00:00:00
+Addr3  BA:DD:CA:FE:12:34   (tunnel) or CA:FE:BA:BE:12:34 (standalone)
+Body   AA BB CC
+```
+
+**Two PDUs.** Slot 0 `bus=0xB2` `size=2` (`AA BB`), slot 1 `bus=0xC3` `size=3` (`DD EE FF`):
+
+```
+Addr1  65:05:30:3C:00:00
+Addr2  00:00:00:00:00:00
+Body   AA BB DD EE FF
+```
+
+### PDU combine (TX)
+
+`wifi_tx` may pack several queued LCPs into one MPDU:
+
+1. Pop `lc_tx` head → output buffer (already has 24-byte headroom).
+2. Slot 0 ← `{bus, size}`; present count = 1.
+3. While present `< 5` and body + next payload ≤ `WIFI_PAYLOAD_MAX`, pop the next donor (any bus), append its payload, fill the next slot.
+4. Pack slots into Addr1||Addr2; stamp Addr3 = mode prefix + domain; inject.
+
+Solo send skips step 3 (no copy). Domain unset → TX drops without inject.
 
 # Control Plane Console
 
-Available on **TCP** `2323` after Ethernet has an IP (DHCP lease in `AUTO`, or the static address). UART0 is logs only (115200).
+Available on **TCP** `2323` after Ethernet has an IP (DHCP lease in `AUTO`, or the static address). Up to **4** concurrent clients. Banner: `WInject-ESP32  bus/domain radio`. UART0 is logs only (115200). Bool args accept `0|1|true|false|on|off|yes|no`. Radio commands need the radio path (unavailable in `OTA`). Upstream bind/forward tables hold up to **128** entries (`WIFI_AIRPORT_MAX`).
 
 Commands:
 
-- `set_upstream_rx|sur [airport] <udpport>` - bind this UDP port and inject each datagram as one 802.11 frame. Airport defaults to `0`. In `STANDALONE`, airport is the TX SA (`00:00:00:xx:xx:xx` broadcast or `xx:xx:xx:yy:yy:yy` P2P); repeat the command with another airport to add another endpoint.
-- `set_upstream_tx|sut [airport] <udp_host> <udp_port>` - forward matching WiFi payloads to this host. Airport defaults to `0`. In `STANDALONE`, use the same airport as inject: broadcast matches Addr2 as-is, P2P matches the swapped response `yy:yy:yy:xx:xx:xx`. Repeat to add another dest.
-- `unset_upstream_rx [airport]` - unbind the RX UDP socket for this airport. Empty uses the default airport `0`.
-- `unset_upstream_tx [airport]` - remove the TX forwarding entry for this airport. Empty uses the default airport `0`.
-- `set_allow_failed_crc|saf <allow>` - Forward failed CRC to upstream (`1`/`0`, `true`/`false`, `on`/`off`). Default `0`.
-- `set_mode|sm <mode>` - set operating mode
-    - Available modes
-    - `BFC_TUNNEL_DEVICE` (default) - Used as bfc-tunnel external multicast device.
-    - `STANDALONE` - Used as standalone winject device.
+- `set_mode|sm <mode>` - set operating mode (`BFC_TUNNEL_DEVICE`, `STANDALONE`, `OTA`). Switching to/from `OTA` persists and reboots. Other mode changes apply live (BSSID prefix) until `save`.
+- `set_domain|sdom <domain>` - set air domain (`1`–`65535`, hex; optional `0x` prefix). Required for TX and RX.
+- `unset_domain|udom` - clear domain (`0`); air path invalid until set again.
+- `set_upstream_tx|sut bus=<lcid> <udp_port>` - bind this UDP port; each datagram is one LCP stamped with that bus on TX. Same bus replaces; same port on another bus steals the port. Bind is `0.0.0.0`.
+- `unset_upstream_tx|uut bus=<lcid>` - unbind the inject UDP socket for that bus.
+- `set_upstream_rx|sur bus=<lcid> <host> <udp_port>` - forward air PDUs matching that bus to this host. Same bus+dest is idempotent; multiple dests per bus are allowed. Exact bus match only (`bus=0` matches broadcast slots only).
+- `unset_upstream_rx|uur bus=<lcid>` - remove all forward dests for that bus.
+- `set_upstream_ci|suc to=<host>:<port>` - subscribe to channel-info UDP (flow control + RX air metrics).
+- `unset_upstream_ci|usuc to=<host>:<port>` - remove a channel-info subscriber.
+- `set_logger|sl address=<host>:<port> level=<error|warn|info|debug>` - single UDP text logger (replaces any previous dest). Rate-limited (~50 Hz). Not persisted in NVS. Works in `OTA`.
+- `unset_logger|ul` - disable the UDP logger.
+- `set_allow_failed_crc|saf <allow>` - Forward failed-CRC air frames (bool). Default `0`.
 - `set_channel|sc <channel>` - Set WIFI channel (1–13)
 - `set_modulation|sd <modulation>` - Set WIFI modulation
 
@@ -85,85 +155,198 @@ Commands:
 	- Available modes
     - `STATIC` - use the address from `set_ip`. DHCP server is allowed.
     - `AUTO` (default) - DHCP client. If no lease in 5 s, apply `set_ip` as a static fallback. DHCP server is blocked.
-- `set_enable_dhcp_server|sed <enabled>` - Enable the DHCP server (`1`/`0`, `true`/`false`, `on`/`off`). Default `0`. Takes effect only in `STATIC`; in `AUTO` the setting is stored but the server stays blocked.
-- `set_ip|sfi <ip>` - Set the static / fallback address. In `STATIC`, the DHCP server (if enabled) serves that `/24`; pool is host `.1`–`.64` except the device if it is in that range. `.65`–`.254` are for static/external hosts.
-- `save|sv <slot>` - save settings to NVS slot `0`–`9` and make that slot current
-- `save|sv` - save to the current slot (last `save <n>` / `use <n>`, or `0` at first boot)
+- `set_enable_dhcp_server|sed <enabled>` - Enable the DHCP server (bool). Default `0`. Takes effect only in `STATIC`; in `AUTO` the setting is stored but the server stays blocked.
+- `set_ip|sfi <ip>` / `set_fallback_ip|sfi <ip>` - Set the static / fallback address. In `STATIC`, the DHCP server (if enabled) serves that `/24`; pool is host `.1`–`.64` except the device if it is in that range. `.65`–`.254` are for static/external hosts.
+- `save|sv [0-9]` - save settings to NVS slot `0`–`9` (or the current slot if omitted) and make that slot current. Blob **v3**: mode, radio, network, domain, `sut`/`sur` tables, CI subscribers — **not** the UDP logger.
 - `use|u <slot>` - load slot `0`–`9`, apply it, and make it current. Empty slot is an error.
-- `set_cca_enabled|sce` `<is_enabled>` - Enable or disable TX CCA / CSMA (`1`/`0`, `true`/`false`, `on`/`off`). Disabling lets inject skip wait-for-idle.
-- `set_tx_power|stp` `<dbm>` - Maximum Wi-Fi TX power in dBm (`2`–`20`). Default `20`. ESP32 maps this to 0.25 dBm units internally.
-- `status|s` - Ethernet, mode, radio, and upstream
+- `set_cca_enabled|sce <is_enabled>` - Enable or disable TX CCA / CSMA (bool). Disabling lets inject skip wait-for-idle.
+- `set_tx_power|stp <dbm>` - Maximum Wi-Fi TX power in dBm (`2`–`20`). Default `20`. ESP32 maps this to 0.25 dBm units internally.
+- `status|s` - device, network, wifi, upstreams, channel metrics, logger, channel_info
 - `reset|r` - software-restart the ESP32 (`esp_restart`)
 
-Also: `help|h`.
+Also: `help` / `?`.
 
-Defaults: channel `1`, modulation `DSS_1M_L`, CCA enabled, TX power `20` dBm, `allow_failed_crc` off, network `AUTO`, DHCP server off, static/fallback `192.168.32.1`. Upstream RX/TX are unset until configured. Boot loads the last-used slot (default slot `0`); an empty slot `0` keeps these defaults. UDP payload is the tunnel body only (no 802.11 header, no radiotap, no FCS). Max payload 1476 bytes. `set_upstream_rx` binds the Ethernet unicast; the air-to-UDP send socket binds `0.0.0.0` so `set_ip` does not break TX.
+**Naming:** `set_upstream_tx` / `sut` = host **transmits** onto the air (UDP → radio). `set_upstream_rx` / `sur` = host **receives** from the air (radio → UDP). Bus value is 1–2 hex digits (`bus=b2`, `bus=0`).
+
+Defaults: channel `1`, modulation `DSS_1M_L`, CCA enabled, TX power `20` dBm, `allow_failed_crc` off, network `AUTO`, DHCP server off, static/fallback `192.168.32.1`, domain unset, no upstreams, no CI subscribers, logger unset. Boot loads the last-used NVS slot (default `0`); an empty slot `0` keeps these defaults. TX/RX packet pools and LC queues are depth **16**.
+
+# Domain and bus
+
+## Domain
+
+| Command | Alias | Arguments |
+|---------|-------|-----------|
+| `set_domain` | `sdom` | `<domain>` — hex `1`…`65535` (`0` reserved / unset) |
+| `unset_domain` | `udom` | (none) |
+
+Written into Addr3 last two octets on every TX. RX drops frames whose domain ≠ local domain. Persisted with `save` / `use`.
+
+## Bus (`bus=<lcid>`)
+
+Canonical console key: **`bus`**. One byte; `bus=0` is broadcast.
+
+| Path | Console | Bus role |
+|------|---------|----------|
+| UDP → air | `set_upstream_tx` / `sut` | stamp this bus into the air slot |
+| air → UDP | `set_upstream_rx` / `sur` | match present air slots with this bus |
+
+**RX match (exact, not wildcard):**
+
+| Air slot `bus` | Matches `sur` bind |
+|----------------|--------------------|
+| `N` (1…255) | only `bind.bus == N` |
+| `0` (broadcast) | only `bind.bus == 0` |
+
+A broadcast air slot does **not** fan out to every `sur` bind. A non-zero air bus does **not** match a `bus=0` bind. Multiple `sur` dests for the same bus all receive a copy. Self-TX frames that match a local `sur` are forwarded like any other (no self-TX blackhole).
 
 # Operating Modes
 
-Airport is the 802.11 source address, not a UDP port. The two modes pick different BSSIDs so tunnel and standalone traffic on the same channel do not mix.
+Both radio modes use the same Addr1/Addr2 packing. Only the Addr3 prefix differs, so tunnel and standalone traffic on the same channel and domain do not mix.
 
 ## `BFC_TUNNEL_DEVICE` (default)
 
-One multicast radio for bfc-tunnel. Identity is the chip, not the console airport.
-
-- Airport is hardcoded to `0`. If the argument is present it must be `0`; any other value is an error.
-- TX Addr2 is the WiFi STA MAC from `esp_wifi_get_mac(WIFI_IF_STA)` (factory eFuse). Every flashed board already has a unique SA.
-- Addr3 is `BA:DD:CA:FE:BA:BE`.
-- RX heard: Addr3 is that BSSID (other networks on the channel are ignored).
-- RX match: heard + DA broadcast + not own STA SA + at least one `set_upstream_tx`. Every other radio on the tunnel group is forwarded to every TX dest.
-- Omitted airport on `set_upstream_rx` / `set_upstream_tx` stays valid (`0`).
+Multicast radio for bfc-tunnel. Same combine path as standalone.
 
 ```
 set_mode BFC_TUNNEL_DEVICE
-set_upstream_rx 9000
-set_upstream_tx 192.168.253.10 9001
+set_domain 1234
+set_upstream_tx bus=b2 9000
+set_upstream_rx bus=a1 192.168.32.10 9001
 ```
 
 ## `STANDALONE`
 
-Same role as [../winject](../../winject): a point-to-point inject radio with operator-assigned identity and several UDP endpoints. It is not a clone of that stack. There is still no LLC, FEC, or PDCP.
-
-Original winject packs Addr2 as `SRC(24)|DST(24)` (`-src 000101 -dst 000202`) and muxes several L3 PDUs into one 802.11 body (LLC `nLC` / LCID). Standalone muxes by **frame**: one UDP datagram is one 802.11 MPDU, and the airport **is** Addr2. Demux on RX is “which SA”, not “which LCID in the payload”.
-
-Standalone airports are 3-byte halves, written `xx:xx:xx:yy:yy:yy` or `xxxxxxxxxxxx` (unicast; not all-zero; not IEEE broadcast/multicast). P2P also requires the peer half `yy:yy:yy` to be unicast so the swapped response SA is valid.
-
-| Form | Airport | TX Addr2 | RX filter |
-|------|---------|----------|-----------|
-| Broadcast | `00:00:00:xx:xx:xx` | `00:00:00:xx:xx:xx` | same SA (no swap) |
-| P2P | `xx:xx:xx:yy:yy:yy` (X = you, Y = peer) | `xx:xx:xx:yy:yy:yy` | `yy:yy:yy:xx:xx:xx` |
-
-- Each `set_upstream_rx <airport> <udpport>` binds that UDP port and stamps that airport as Addr2 on inject. Another airport adds another binding; the same airport replaces the port.
-- Each `set_upstream_tx <airport> <udp_host> <udp_port>` uses the same airport string as inject. Broadcast forwards frames whose Addr2 equals that airport. P2P forwards the swapped response `yy:yy:yy:xx:xx:xx`. Another airport adds another dest; the same airport replaces the dest.
-- Addr3 is `DE:AD:CA:FE:BA:BE` (not winject’s `DE:AD:BE:EF:CA:FE`). Same-channel PC winject and ESP32 standalone do not match.
-- RX heard: Addr3 is that BSSID **and** Addr2 is a local TX SA or a TX-table filter SA. Other SAs on that BSSID are ignored.
-- RX match: heard + DA broadcast + SA matches a `set_upstream_tx` filter. Drop P2P SAs that are local RX-table airports (no self-loop). Broadcast airports share Addr2 on every radio, so they are not classified as self.
-- The STA MAC is not used in the 802.11 header. `status` still prints it for the AP SSID / board identity.
-- Two P2P radios that should hear each other use swapped airports: A is `xx:xx:xx:yy:yy:yy`, B is `yy:yy:yy:xx:xx:xx`. Each radio uses that string on both `set_upstream_rx` and `set_upstream_tx`. Firmware filters the swap for the response.
+Same wire format; Addr3 prefix is `CA:FE:BA:BE`. Use distinct buses for distinct flows (e.g. data vs ACK). Example — two radios, data bus `b2` A→B and return bus `a1` B→A, domain `0x1234`:
 
 ```
+# A
 set_mode STANDALONE
-set_upstream_rx 02:02:03:04:05:06 9000
-set_upstream_tx 02:02:03:04:05:06 192.168.253.10 9001
-set_upstream_rx 00:00:00:AA:BB:CC 9010
-set_upstream_tx 00:00:00:AA:BB:CC 192.168.253.10 9011
-```
+set_domain 1234
+set_upstream_tx bus=b2 9000
+set_upstream_rx bus=a1 192.168.32.10 9001
 
-That is one P2P link and one broadcast endpoint on the same radio. A datagram on UDP 9000 goes out as SA `02:02:03:04:05:06`; an air frame with SA `04:05:06:02:02:03` is sent to `…:9001`. Broadcast inject on UDP 9010 uses SA `00:00:00:AA:BB:CC`; receivers that configured that same broadcast airport forward it to `…:9011`. Each UDP bind is a second 802.11 frame, not a second LLC in the first frame.
-
-On the peer radio the P2P pair is swapped:
-
-```
+# B
 set_mode STANDALONE
-set_upstream_rx 04:05:06:02:02:03 9000
-set_upstream_tx 04:05:06:02:02:03 192.168.253.10 9002
+set_domain 1234
+set_upstream_tx bus=a1 9000
+set_upstream_rx bus=b2 192.168.32.11 9001
 ```
 
-`set_mode` changes BSSID and SA rules immediately. Existing UDP binds stay; the next inject and the next RX match use the new mode. `save` / `use` persist mode, radio, network mode, static IP, DHCP server enable, and the airport tables in NVS slots `0`–`9`. Boot loads the last-used slot.
+## `OTA`
+
+Boot-only / console-selected: Ethernet + TCP console + HTTP OTA only — **no WiFi, no LC, no endpoints**. Radio console commands return `error: unavailable in OTA mode`. Logger commands still work. Entering or leaving `OTA` via `set_mode` persists the mode and reboots.
+
+# Channel info
+
+UDP telemetry to `set_upstream_ci` subscribers (packed little structs):
+
+| `info_type` | Payload | When |
+|-------------|---------|------|
+| `1` `E_CHANNEL_INFO_TYPE_FLOW_CTRL` | `tx_queue_size`, `tx_queue_capacity` | published when `lc_tx` occupancy is above half capacity |
+| `2` `E_CHANNEL_INFO_TYPE_RX_AIR` | `rssi`, `snr` | ~100 ms while air RX is valid |
+
+# UDP logger
+
+Runtime diagnostic text lines to one host (not persisted). Host helper: `python3 tools/udp_log.py --port 9999`.
+
+```
+set_logger address=192.168.32.10:9999 level=warn
+unset_logger
+```
+
+| Level | Includes |
+|-------|----------|
+| `error` | `tx_fail` (inject abandoned) |
+| `warn` | `tx_retry` (`NO_MEM` / other), `tx_drop no_pkt_pool` / `queue_full` |
+| `info` | `tx_ok after_retries=…` |
+| `debug` | every successful `tx_ok` |
+
+Line shape: `<us_timestamp> <level> <message>\n`. Only one logger at a time; `set_logger` replaces the previous dest/level.
+
+# Status page
+
+TCP console `status|s` prints a sectioned snapshot (`#` headers). Fields are space-separated `key=value` tokens.
+
+```
+# device
+device uptime=<s>s reset_reason=<name> heap_usage=<bytes> heap_free=<bytes> mode=<mode> domain=<hex|unset>
+# network
+network ip=<ipv4|-> console_port=2323
+dhcp mode=<STATIC|AUTO> static_ip=<ipv4> dhcps=<off|blocked|enabled|active> pool=<start>-<end_host> netmask=<a.b.c.0>/24
+ota url=http://<ip>:80/update
+  | ota waiting
+# wifi
+wifi channel=<1-13> modulation=<code> cca=<enabled|disabled> tx_power=<2-20> allow_failed_crc=<true|false>
+# radio
+radio rssi=<dBm|-> snr=<dB|->
+# upstreams
+upstream_tx bus=<hex> address=<udp_port>
+upstream_rx bus=<hex> address=<host>:<port>
+  | upstream unset
+# channel
+channel_tx queue=<n> drop_nomem=<n> retry_count=<n> retry_nomem=<n> retry_other=<n>
+           inject_ok=<n> inject_fail=<n> in_flight=<n> tx_latency=<uus|-> inject_wait=<uus|->
+channel_rx queue=<n> drop_no_pkt_pool=<n> drop_queue_full=<n> drop_crc_error=<n>
+channels_tx bus=<hex> drop_no_pkt_pool=<n> drop_queue_full=<n>
+channels_rx bus=<hex> drop_send_fail=<n>
+# logger
+logger address=<host>:<port> level=<error|warn|info|debug> emitted=<n> dropped=<n>
+  | logger unset
+# channel_info
+channel_info subscribers=<host:port[,…]|->
+```
+
+In `OTA` mode, after network/ota lines status prints `# radio` / `radio disabled (OTA mode)` and stops (no wifi, upstream, channel, logger, or channel_info sections).
+
+| Line | Meaning |
+|------|---------|
+| `device` | Seconds since boot; last reset cause (`power-on`, `external`, `software`, `panic`, `interrupt-wdt`, `task-wdt`, `wdt`, `brownout`, `unknown`); 8-bit heap used/free; mode; domain hex or `unset` |
+| `network` | Current Ethernet IPv4 (`-` until assigned); TCP console port |
+| `dhcp` | Network mode; `set_ip` static/fallback; DHCP server state (`off`, `blocked` in `AUTO` when enabled, `enabled` in `STATIC` but not running, `active` when serving); pool start–end host octet; `/24` of the static address |
+| `ota` | Upload URL once Ethernet has an IP; otherwise `ota waiting` |
+| `wifi` | Configured channel, TX modulation code, CCA, TX power dBm, CRC-forward policy |
+| `radio` | Last heard air RSSI/SNR (`-` until a frame is accepted) |
+| `upstream_tx` / `upstream_rx` | One line per inject bind / forward dest. With none: `upstream unset` |
+| `channel_tx` | `lc_tx` depth; final inject abandon (`drop_nomem`, any exhausted retry); total / `NO_MEM` (infinite retry) / other (`WIFI_RADIO_INJECT_RETRIES`) `esp_wifi_80211_tx` retries; successful / failed injects; pending TX-done count; mean head-of-line submit→TX-done latency; mean wall time inside `inject_retry` |
+| `channel_rx` | RX queue depth; pool / queue / CRC drops |
+| `channels_tx` / `channels_rx` | Per-bus drop counters for inject / forward |
+| `logger` | Active UDP logger dest + level and emit/drop counts, or `logger unset` |
+| `channel_info` | Comma-separated UDP subscribers, or `-` when none |
+
+Example (tunnel, one inject and one forward):
+
+```
+# device
+device uptime=123s reset_reason=power-on heap_usage=45678 heap_free=12345 mode=BFC_TUNNEL_DEVICE domain=1234
+# network
+network ip=192.168.32.1 console_port=2323
+dhcp mode=AUTO static_ip=192.168.32.1 dhcps=off pool=192.168.32.2-64 netmask=192.168.32.0/24
+ota url=http://192.168.32.1:80/update
+# wifi
+wifi channel=1 modulation=DSS_1M_L cca=enabled tx_power=20 allow_failed_crc=false
+# radio
+radio rssi=-42 snr=18
+# upstreams
+upstream_tx bus=B2 address=9000
+upstream_rx bus=A1 address=192.168.32.10:9001
+# channel
+channel_tx queue=0 drop_nomem=0 retry_count=0 retry_nomem=0 retry_other=0 inject_ok=0 inject_fail=0 in_flight=0 tx_latency=312us inject_wait=-
+channel_rx queue=0 drop_no_pkt_pool=0 drop_queue_full=0 drop_crc_error=0
+channels_tx bus=B2 drop_no_pkt_pool=0 drop_queue_full=0
+channels_rx bus=A1 drop_send_fail=0
+# logger
+logger unset
+# channel_info
+channel_info subscribers=-
+```
+
+# Board / indicators
+
+WT32-ETH01 LAN8720: PHY addr 1, MDC 23, MDIO 18, power 16, RMII clock on GPIO0 in (optional GPIO17 out). Activity LEDs (active-low, 1 ms stretch): **IO5** = WiFi RX (silk RXD), **IO17** = WiFi TX (silk TXD). TX LED is disabled when RMII clock uses GPIO17. Hostname `winject-esp32`.
 
 # Ethernet addressing
 
-The raw 802.11 radio starts at boot in `BFC_TUNNEL_DEVICE` or `STANDALONE` and stays there. OTA and the TCP console listen on Ethernet as soon as it has an IPv4 address.
+The radio starts at boot in the configured mode (`BFC_TUNNEL_DEVICE`, `STANDALONE`, or `OTA`). OTA and the TCP console listen on Ethernet as soon as it has an IPv4 address.
 
 `AUTO` (default) runs a DHCP client. If no lease arrives within **5 seconds**, Ethernet applies the static address from `set_ip`. That fallback is static only: it does not start a DHCP server.
 
@@ -190,3 +373,5 @@ curl -F "firmware=@.pio/build/wt32-eth01/firmware.bin" http://192.168.32.1/updat
 ```
 
 Use the DHCP-assigned Ethernet address when a lease arrived before the 5 s timeout. There is no OTA password.
+
+`set_mode OTA` boots network+console+HTTP only (no WiFi). Leave OTA with `set_mode BFC_TUNNEL_DEVICE` or `set_mode STANDALONE` (persists and reboots).

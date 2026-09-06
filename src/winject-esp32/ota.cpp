@@ -129,7 +129,7 @@ static esp_err_t handleUpdate(httpd_req_t* req)
     }
 
     esp_ota_handle_t ota = 0;
-    if (esp_ota_begin(update, OTA_SIZE_UNKNOWN, &ota) != ESP_OK)
+    if (esp_ota_begin(update, OTA_WITH_SEQUENTIAL_WRITES, &ota) != ESP_OK)
     {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "ota begin failed\n");
@@ -268,6 +268,8 @@ void otaBegin(manager& netmgr)
     config.core_id = APP_TASK_CORE;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
+    config.recv_wait_timeout = 30;
+    config.send_wait_timeout = 30;
     if (httpd_start(&g_httpd, &config) != ESP_OK)
     {
         ESP_LOGE(TAG, "httpd start failed");

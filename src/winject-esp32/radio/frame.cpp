@@ -16,27 +16,21 @@
 #endif
 
 static const char* TAG = "frame";
-static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static const uint8_t kZeroMac[6] = {};
-static const uint8_t kBssidTunnel[6] = {WIFI_BSSID_TUNNEL};
-static const uint8_t kBssidStandalone[6] = {WIFI_BSSID_STANDALONE};
+static const uint8_t kPrefixTunnel[4] = {WIFI_BSSID_PREFIX_TUNNEL};
+static const uint8_t kPrefixStandalone[4] = {WIFI_BSSID_PREFIX_STANDALONE};
 
 static constexpr int kSeqlockTries = 16;
 
 struct FrameRules
 {
     WinjectMode mode;
-    uint8_t bssid[6];
+    uint8_t prefix[4];
     uint8_t staMac[6];
-    uint8_t localSas[WIFI_AIRPORT_MAX][6];
-    size_t localSaCount;
-    uint8_t peerSas[WIFI_AIRPORT_MAX][6];
-    size_t peerSaCount;
 };
 
 static FrameRules g_rules = {
     WINJECT_MODE_BFC_TUNNEL_DEVICE,
-    {WIFI_BSSID_TUNNEL},
+    {WIFI_BSSID_PREFIX_TUNNEL},
 };
 static std::atomic<uint32_t> g_seqlock{0};
 static std::atomic<uint16_t> g_txSeq{0};
@@ -69,198 +63,158 @@ private:
     bool owned_ = false;
 };
 
-static size_t headerLen(const uint8_t* mpdu, size_t len)
+static bool snapshot_rules(FrameRules* out)
 {
-    if (mpdu == nullptr || len < WIFI_HDR_LEN)
+    if (out == nullptr)
     {
-        return 0;
+        return false;
     }
-    if ((mpdu[0] & 0x0C) != 0x08)
+    for (int i = 0; i < kSeqlockTries; i++)
     {
-        return 0;
-    }
-    if ((mpdu[0] & 0xF0) == 0x80)
-    {
-        return len >= WIFI_QOS_HDR_LEN ? WIFI_QOS_HDR_LEN : 0;
-    }
-    if ((mpdu[0] & 0xF0) == 0x00)
-    {
-        return WIFI_HDR_LEN;
-    }
-    return 0;
-}
-
-static bool macHalfZero(const uint8_t mac[3])
-{
-    return mac[0] == 0 && mac[1] == 0 && mac[2] == 0;
-}
-
-static bool macInList(const uint8_t mac[6], const uint8_t list[][6], size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-    {
-        if (memcmp(mac, list[i], 6) == 0)
+        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
+        if ((s1 & 1u) != 0)
+        {
+            continue;
+        }
+        *out = g_rules;
+        if (s1 == g_seqlock.load(std::memory_order_acquire))
         {
             return true;
         }
     }
-    return false;
-}
-
-static bool saMatchesPeerList(const uint8_t sa[6], const uint8_t list[][6],
-                              size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-    {
-        if (frameStandaloneSaMatchesAirport(sa, list[i]))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void copyAirportList(uint8_t dst[][6], size_t* dstCount,
-                            const uint8_t macs[][6], size_t count)
-{
-    if (count > WIFI_AIRPORT_MAX)
-    {
-        count = WIFI_AIRPORT_MAX;
-    }
-    if (count == 0 || macs == nullptr)
-    {
-        *dstCount = 0;
-        return;
-    }
-    memcpy(dst, macs, count * 6);
-    *dstCount = count;
-}
-
-static bool bssidEq(const uint8_t* mpdu, size_t len, const uint8_t bssid[6])
-{
-    return mpdu != nullptr && len >= 22 && memcmp(mpdu + 16, bssid, 6) == 0;
-}
-
-static bool heardWith(const FrameRules& r, const uint8_t* mpdu, size_t len)
-{
-    if (!bssidEq(mpdu, len, r.bssid))
-    {
-        return false;
-    }
-    if (r.mode == WINJECT_MODE_BFC_TUNNEL_DEVICE)
-    {
-        return true;
-    }
-    const uint8_t* sa = mpdu + 10;
-    return macInList(sa, r.localSas, r.localSaCount) ||
-           saMatchesPeerList(sa, r.peerSas, r.peerSaCount);
-}
-
-static FrameRxClass classifyWith(const FrameRules& r, const uint8_t* mpdu,
-                                 size_t len)
-{
-    const size_t hdr = headerLen(mpdu, len);
-    if (hdr == 0)
-    {
-        return FRAME_RX_NONE;
-    }
-    if (memcmp(mpdu + 4, kBroadcast, 6) != 0)
-    {
-        return FRAME_RX_NONE;
-    }
-    if (!bssidEq(mpdu, len, r.bssid))
-    {
-        return FRAME_RX_NONE;
-    }
-
-    const uint8_t* sa = mpdu + 10;
-    if (r.mode == WINJECT_MODE_BFC_TUNNEL_DEVICE)
-    {
-        if (memcmp(sa, r.staMac, 6) == 0)
-        {
-            return FRAME_RX_SELF;
-        }
-        if (r.peerSaCount == 0)
-        {
-            return FRAME_RX_NONE;
-        }
-        return FRAME_RX_MATCH;
-    }
-    if (macInList(sa, r.localSas, r.localSaCount) &&
-        !frameAirportIsBroadcastStandalone(sa))
-    {
-        return FRAME_RX_SELF;
-    }
-    if (saMatchesPeerList(sa, r.peerSas, r.peerSaCount))
-    {
-        return FRAME_RX_MATCH;
-    }
-    return FRAME_RX_NONE;
-}
-
-bool frameAirportIsZero(const uint8_t mac[6])
-{
-    return mac != nullptr && memcmp(mac, kZeroMac, 6) == 0;
-}
-
-bool frameAirportValidStandalone(const uint8_t mac[6])
-{
-    if (mac == nullptr || frameAirportIsZero(mac))
-    {
-        return false;
-    }
-    if ((mac[0] & 0x01) != 0)
-    {
-        return false;
-    }
-    if (!macHalfZero(mac) && (mac[3] & 0x01) != 0)
-    {
-        return false;
-    }
+    *out = g_rules;
     return true;
 }
 
-bool frameAirportIsBroadcastStandalone(const uint8_t mac[6])
+static void emit_bits(uint8_t* packed, size_t* bit, uint16_t value, int nbits)
 {
-    return mac != nullptr && macHalfZero(mac) && !macHalfZero(mac + 3);
+    for (int i = 0; i < nbits; i++)
+    {
+        const size_t b = (*bit)++;
+        if ((value & 1u) != 0)
+        {
+            packed[b / 8] |= static_cast<uint8_t>(1u << (b % 8));
+        }
+        value = static_cast<uint16_t>(value >> 1);
+    }
 }
 
-void frameAirportSwap(const uint8_t in[6], uint8_t out[6])
+static uint16_t take_bits(const uint8_t* packed, size_t* bit, int nbits)
 {
-    if (in == nullptr || out == nullptr)
+    uint16_t value = 0;
+    for (int i = 0; i < nbits; i++)
+    {
+        const size_t b = (*bit)++;
+        if ((packed[b / 8] & (1u << (b % 8))) != 0)
+        {
+            value |= static_cast<uint16_t>(1u << i);
+        }
+    }
+    return value;
+}
+
+void framePackSlots(uint8_t addr1[6], uint8_t addr2[6],
+                    const pdu_slot_t slots[WIFI_PDU_SLOTS])
+{
+    if (addr1 == nullptr || addr2 == nullptr || slots == nullptr)
     {
         return;
     }
-    uint8_t tmp[6];
-    memcpy(tmp, in + 3, 3);
-    memcpy(tmp + 3, in, 3);
-    memcpy(out, tmp, 6);
+    uint8_t packed[12] = {};
+    size_t bit = 0;
+    // Bit 0 of Addr1[0] is 802.11 I/G. Force group (1) so raw inject does not
+    // wait for an ACK. The former trailing spare bit pays for this.
+    emit_bits(packed, &bit, 1, 1);
+    for (int i = 0; i < WIFI_PDU_SLOTS; i++)
+    {
+        const uint16_t size = static_cast<uint16_t>(slots[i].size & 0x7FFu);
+        emit_bits(packed, &bit, slots[i].bus, 8);
+        emit_bits(packed, &bit, size, 11);
+    }
+    memcpy(addr1, packed, 6);
+    memcpy(addr2, packed + 6, 6);
 }
 
-void frameStandaloneFilterSa(const uint8_t airport[6], uint8_t sa[6])
+void frameUnpackSlots(const uint8_t addr1[6], const uint8_t addr2[6],
+                      pdu_slot_t slots[WIFI_PDU_SLOTS])
 {
-    if (airport == nullptr || sa == nullptr)
+    if (addr1 == nullptr || addr2 == nullptr || slots == nullptr)
     {
         return;
     }
-    if (frameAirportIsBroadcastStandalone(airport))
+    uint8_t packed[12];
+    memcpy(packed, addr1, 6);
+    memcpy(packed + 6, addr2, 6);
+    size_t bit = 0;
+    (void)take_bits(packed, &bit, 1);  // I/G (ignore)
+    for (int i = 0; i < WIFI_PDU_SLOTS; i++)
     {
-        memcpy(sa, airport, 6);
-        return;
+        slots[i].bus = static_cast<bus_t>(take_bits(packed, &bit, 8));
+        slots[i].size = take_bits(packed, &bit, 11);
     }
-    frameAirportSwap(airport, sa);
 }
 
-bool frameStandaloneSaMatchesAirport(const uint8_t sa[6],
-                                     const uint8_t airport[6])
+size_t frameSlotPayloadBytes(const pdu_slot_t slots[WIFI_PDU_SLOTS])
 {
-    if (sa == nullptr || airport == nullptr)
+    if (slots == nullptr)
+    {
+        return 0;
+    }
+    size_t sum = 0;
+    for (int i = 0; i < WIFI_PDU_SLOTS; i++)
+    {
+        sum += slots[i].size;
+    }
+    return sum;
+}
+
+void frameBuildAddr3(uint8_t addr3[6], uint16_t domain)
+{
+    if (addr3 == nullptr)
+    {
+        return;
+    }
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    memcpy(addr3, rules.prefix, 4);
+    addr3[4] = static_cast<uint8_t>(domain >> 8);
+    addr3[5] = static_cast<uint8_t>(domain);
+}
+
+bool frameAddr3Accept(const uint8_t* mpdu, size_t len, uint16_t domain)
+{
+    if (mpdu == nullptr || len < 22 || domain == 0)
     {
         return false;
     }
-    uint8_t want[6] = {};
-    frameStandaloneFilterSa(airport, want);
-    return memcmp(sa, want, 6) == 0;
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    if (memcmp(mpdu + 16, rules.prefix, 4) != 0)
+    {
+        return false;
+    }
+    const uint16_t got = static_cast<uint16_t>((mpdu[20] << 8) | mpdu[21]);
+    return got == domain;
+}
+
+void frameStampHeader(uint8_t* hdr, const pdu_slot_t slots[WIFI_PDU_SLOTS],
+                      uint16_t domain)
+{
+    if (hdr == nullptr || slots == nullptr)
+    {
+        return;
+    }
+    hdr[0] = 0x08;
+    hdr[1] = 0x00;
+    hdr[2] = 0x00;
+    hdr[3] = 0x00;
+    framePackSlots(hdr + 4, hdr + 10, slots);
+    frameBuildAddr3(hdr + 16, domain);
+    const uint16_t seq =
+        g_txSeq.fetch_add(1, std::memory_order_relaxed) & 0x0FFF;
+    const uint16_t seqCtl = static_cast<uint16_t>(seq << 4);
+    hdr[22] = static_cast<uint8_t>(seqCtl);
+    hdr[23] = static_cast<uint8_t>(seqCtl >> 8);
 }
 
 const char* frameModeName(WinjectMode mode)
@@ -271,6 +225,8 @@ const char* frameModeName(WinjectMode mode)
             return "BFC_TUNNEL_DEVICE";
         case WINJECT_MODE_STANDALONE:
             return "STANDALONE";
+        case WINJECT_MODE_OTA:
+            return "OTA";
         default:
             return "UNKNOWN";
     }
@@ -292,19 +248,32 @@ bool frameParseMode(const char* text, WinjectMode* mode)
         *mode = WINJECT_MODE_STANDALONE;
         return true;
     }
+    if (strcasecmp(text, "OTA") == 0)
+    {
+        *mode = WINJECT_MODE_OTA;
+        return true;
+    }
     return false;
 }
 
 bool frameSetMode(WinjectMode mode)
 {
-    const uint8_t* bssid = nullptr;
+    if (mode == WINJECT_MODE_OTA)
+    {
+        RulesWriter writer;
+        g_rules.mode = mode;
+        ESP_LOGI(TAG, "mode OTA");
+        return true;
+    }
+
+    const uint8_t* prefix = nullptr;
     if (mode == WINJECT_MODE_BFC_TUNNEL_DEVICE)
     {
-        bssid = kBssidTunnel;
+        prefix = kPrefixTunnel;
     }
     else if (mode == WINJECT_MODE_STANDALONE)
     {
-        bssid = kBssidStandalone;
+        prefix = kPrefixStandalone;
     }
     else
     {
@@ -313,42 +282,18 @@ bool frameSetMode(WinjectMode mode)
 
     RulesWriter writer;
     g_rules.mode = mode;
-    memcpy(g_rules.bssid, bssid, 6);
+    memcpy(g_rules.prefix, prefix, 4);
 
-    ESP_LOGI(TAG, "mode %s  BSSID %02X:%02X:%02X:%02X:%02X:%02X",
-             frameModeName(mode), bssid[0], bssid[1], bssid[2], bssid[3],
-             bssid[4], bssid[5]);
+    ESP_LOGI(TAG, "mode %s  BSSID %02X:%02X:%02X:%02X:DH:DL",
+             frameModeName(mode), prefix[0], prefix[1], prefix[2], prefix[3]);
     return true;
 }
 
 WinjectMode frameGetMode()
 {
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        const WinjectMode mode = g_rules.mode;
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return mode;
-        }
-    }
-    return g_rules.mode;
-}
-
-void frameSetLocalAirports(const uint8_t macs[][6], size_t count)
-{
-    RulesWriter writer;
-    copyAirportList(g_rules.localSas, &g_rules.localSaCount, macs, count);
-}
-
-void frameSetPeerAirports(const uint8_t macs[][6], size_t count)
-{
-    RulesWriter writer;
-    copyAirportList(g_rules.peerSas, &g_rules.peerSaCount, macs, count);
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    return rules.mode;
 }
 
 bool frameBegin()
@@ -366,155 +311,9 @@ bool frameBegin()
 
     ESP_LOGI(TAG,
              "STA %02X:%02X:%02X:%02X:%02X:%02X  BSSID "
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], g_rules.bssid[0],
-             g_rules.bssid[1], g_rules.bssid[2], g_rules.bssid[3],
-             g_rules.bssid[4], g_rules.bssid[5]);
-    return true;
-}
-
-size_t frameWrap(const uint8_t* payload, size_t payloadLen, const uint8_t sa[6],
-                 uint8_t* out, size_t outMax)
-{
-    if (payload == nullptr || out == nullptr)
-    {
-        return 0;
-    }
-    if (payloadLen > WIFI_PAYLOAD_MAX)
-    {
-        return 0;
-    }
-    const size_t total = WIFI_HDR_LEN + payloadLen;
-    if (outMax < total)
-    {
-        return 0;
-    }
-
-    WinjectMode mode = WINJECT_MODE_BFC_TUNNEL_DEVICE;
-    uint8_t sta[6] = {};
-    uint8_t bssid[6] = {};
-    bool got = false;
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        mode = g_rules.mode;
-        memcpy(sta, g_rules.staMac, 6);
-        memcpy(bssid, g_rules.bssid, 6);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            got = true;
-            break;
-        }
-    }
-    if (!got)
-    {
-        return 0;
-    }
-
-    const uint8_t* src = sta;
-    if (mode == WINJECT_MODE_STANDALONE)
-    {
-        if (!frameAirportValidStandalone(sa))
-        {
-            return 0;
-        }
-        src = sa;
-    }
-
-    out[0] = 0x08;
-    out[1] = 0x00;
-    out[2] = 0x00;
-    out[3] = 0x00;
-    memcpy(out + 4, kBroadcast, 6);
-    memcpy(out + 10, src, 6);
-    memcpy(out + 16, bssid, 6);
-
-    const uint16_t seq =
-        g_txSeq.fetch_add(1, std::memory_order_relaxed) & 0x0FFF;
-    const uint16_t seqCtl = static_cast<uint16_t>(seq << 4);
-    out[22] = static_cast<uint8_t>(seqCtl);
-    out[23] = static_cast<uint8_t>(seqCtl >> 8);
-
-    if (payloadLen > 0)
-    {
-        memcpy(out + WIFI_HDR_LEN, payload, payloadLen);
-    }
-    return total;
-}
-
-bool frameBssidMatch(const uint8_t* mpdu, size_t len)
-{
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        const bool ok = bssidEq(mpdu, len, g_rules.bssid);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return ok;
-        }
-    }
-    return false;
-}
-
-bool frameHeard(const uint8_t* mpdu, size_t len)
-{
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        const bool ok = heardWith(g_rules, mpdu, len);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return ok;
-        }
-    }
-    return false;
-}
-
-bool frameMatch(const uint8_t* mpdu, size_t len)
-{
-    return frameClassify(mpdu, len) == FRAME_RX_MATCH;
-}
-
-FrameRxClass frameClassify(const uint8_t* mpdu, size_t len)
-{
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        const FrameRxClass kind = classifyWith(g_rules, mpdu, len);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return kind;
-        }
-    }
-    return FRAME_RX_NONE;
-}
-
-bool frameUnwrap(const uint8_t* mpdu, size_t len, const uint8_t** payload,
-                 size_t* payloadLen)
-{
-    if (!frameMatch(mpdu, len) || payload == nullptr || payloadLen == nullptr)
-    {
-        return false;
-    }
-    const size_t hdr = headerLen(mpdu, len);
-    *payload = mpdu + hdr;
-    *payloadLen = len - hdr;
+             "%02X:%02X:%02X:%02X:DH:DL",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], g_rules.prefix[0],
+             g_rules.prefix[1], g_rules.prefix[2], g_rules.prefix[3]);
     return true;
 }
 
@@ -524,40 +323,18 @@ void frameGetStaMac(uint8_t mac[6])
     {
         return;
     }
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        memcpy(mac, g_rules.staMac, 6);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return;
-        }
-    }
-    memcpy(mac, g_rules.staMac, 6);
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    memcpy(mac, rules.staMac, 6);
 }
 
-void frameGetBssid(uint8_t bssid[6])
+void frameGetBssidPrefix(uint8_t prefix[4])
 {
-    if (bssid == nullptr)
+    if (prefix == nullptr)
     {
         return;
     }
-    for (int i = 0; i < kSeqlockTries; i++)
-    {
-        const uint32_t s1 = g_seqlock.load(std::memory_order_acquire);
-        if ((s1 & 1u) != 0)
-        {
-            continue;
-        }
-        memcpy(bssid, g_rules.bssid, 6);
-        if (s1 == g_seqlock.load(std::memory_order_acquire))
-        {
-            return;
-        }
-    }
-    memcpy(bssid, g_rules.bssid, 6);
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    memcpy(prefix, rules.prefix, 4);
 }
