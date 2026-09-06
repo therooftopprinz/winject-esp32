@@ -12,17 +12,17 @@ lc_tx& lc_tx::instance()
 
 bool lc_tx::init()
 {
-    return q_.init();
+    return q.init();
 }
 
 void lc_tx::set_channel_info(channel_info_endpoint& ci)
 {
-    ci_ = &ci;
+    this->ci = &ci;
 }
 
 void lc_tx::publish_flow_ctrl()
 {
-    if (ci_ == nullptr)
+    if (ci == nullptr)
     {
         return;
     }
@@ -31,12 +31,12 @@ void lc_tx::publish_flow_ctrl()
     {
         return;
     }
-    ci_->on_flow_ctrl_info(size, k_queue_cap);
+    ci->on_flow_ctrl_info(size, k_queue_cap);
 }
 
 bool lc_tx::tx(bus_t bus, packet&& pkt)
 {
-    if (!q_.ready() || !pkt.is_valid())
+    if (!q.ready() || !pkt.is_valid())
     {
         drop_count_.fetch_add(1, std::memory_order_relaxed);
         publish_flow_ctrl();
@@ -45,7 +45,7 @@ bool lc_tx::tx(bus_t bus, packet&& pkt)
     slot_s slot;
     slot.bus = bus;
     slot.pkt = std::move(pkt);
-    if (!q_.try_push(std::move(slot)))
+    if (!q.try_push(std::move(slot)))
     {
         drop_count_.fetch_add(1, std::memory_order_relaxed);
         publish_flow_ctrl();
@@ -61,7 +61,7 @@ bool lc_tx::peek(bus_t* bus, uint16_t* payload_size) const
     {
         return false;
     }
-    const slot_s* slot = q_.peek();
+    const slot_s* slot = q.peek();
     if (slot == nullptr || !slot->pkt.has_value() || !slot->pkt->is_valid())
     {
         return false;
@@ -75,7 +75,7 @@ packet lc_tx::pop(bus_t* bus, TickType_t wait)
 {
     packet out;
     slot_s slot;
-    if (!q_.pop(&slot, wait))
+    if (!q.pop(&slot, wait))
     {
         return out;
     }
@@ -93,7 +93,7 @@ packet lc_tx::pop(bus_t* bus, TickType_t wait)
 
 uint8_t lc_tx::queue_size() const
 {
-    return q_.size();
+    return q.size();
 }
 
 uint32_t lc_tx::drop_count() const

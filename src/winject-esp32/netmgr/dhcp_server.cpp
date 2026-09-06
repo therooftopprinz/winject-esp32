@@ -56,7 +56,7 @@ void dhcp_server::assigned_ip_event_handler(void* arg, esp_event_base_t event_ba
     {
         return;
     }
-    esp_netif_t* netif = self->netif_.load(std::memory_order_relaxed);
+    esp_netif_t* netif = self->netif.load(std::memory_order_relaxed);
     if (event->esp_netif != netif)
     {
         return;
@@ -68,7 +68,7 @@ void dhcp_server::assigned_ip_event_handler(void* arg, esp_event_base_t event_ba
 
 void dhcp_server::bind_netif(esp_netif_t* netif)
 {
-    netif_.store(netif, std::memory_order_relaxed);
+    netif.store(netif, std::memory_order_relaxed);
 }
 
 void dhcp_server::register_events()

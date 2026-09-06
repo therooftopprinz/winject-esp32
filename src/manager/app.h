@@ -32,18 +32,18 @@ private:
     void stats_tick();
     void flush_shutdown();
 
-    config cfg_;
-    reactor reactor_;
-    console_client console_;
-    tx_scheduler scheduler_;
-    std::vector<std::unique_ptr<wifi_udp>> radios_;
-    std::vector<std::unique_ptr<stream>> upstreams_;
-    in_addr device_ip_{};
-    in_addr local_ip_{};
-    int reconnect_ticks_ = 0;
-    bool console_ok_ = false;
-    bool console_connecting_ = false;
-    std::chrono::steady_clock::time_point last_stats_{};
+    config cfg;
+    ::reactor reactor;
+    console_client console;
+    tx_scheduler scheduler;
+    std::vector<std::unique_ptr<wifi_udp>> radios;
+    std::vector<std::unique_ptr<stream>> upstreams;
+    in_addr device_ip{};
+    in_addr local_ip{};
+    int reconnect_ticks = 0;
+    bool console_ok = false;
+    bool console_connecting = false;
+    std::chrono::steady_clock::time_point last_stats{};
 };
 
 #endif  // WINJECT_MANAGER_APP_H_

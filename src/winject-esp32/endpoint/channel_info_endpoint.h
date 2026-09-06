@@ -65,14 +65,14 @@ private:
     bool send_one(const ip_port_t& dest, const void* data, size_t len);
     int find_sub(ip_port_t subscriber) const;
 
-    ip_port_t subs_[k_subscriber_max]{};
-    uint8_t n_subs_ = 0;
-    bfc::socket send_sock_;
-    bfc::semaphore lock_;
-    reactor_t reactor_;
-    std::atomic<int8_t> rssi_{0};
-    std::atomic<int8_t> snr_{0};
-    std::atomic<bool> air_valid_{false};
+    ip_port_t subs[k_subscriber_max]{};
+    uint8_t n_subs = 0;
+    bfc::socket send_sock;
+    bfc::semaphore lock;
+    reactor_t reactor;
+    std::atomic<int8_t> rssi{0};
+    std::atomic<int8_t> snr{0};
+    std::atomic<bool> air_valid{false};
 };
 
 #endif  // WINJECT_CHANNEL_INFO_ENDPOINT_H_

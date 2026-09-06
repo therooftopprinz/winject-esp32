@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Start winject-manager on both radios and run bw_test over manager TCP forwarding.
 #
-# Edit configuration/winject-tests/bw_a.cfg / bw_b.cfg for your radio IPs and host local_ip,
-# or pass RADIO_A RADIO_B HOST_IP as the first three arguments.
+# Radios are programmed STANDALONE with a shared domain and two bus pairs
+# (b2/a1 for A→B, c3/d4 for B→A). Edit configuration/winject-tests/bw_a.cfg /
+# bw_b.cfg for your radio IPs and host local_ip, or pass RADIO_A RADIO_B HOST_IP
+# as the first three arguments.
 #
 # Usage:
 #   ./scripts/manager_tcp_bw_test.sh
@@ -76,8 +78,43 @@ while [[ $# -gt 0 ]]; do
       HOST_SET=1
       shift
       ;;
+    --domain)
+      PREP_EXTRA+=(--domain "${2:?--domain needs a value}")
+      BW_ARGS+=(--domain "$2")
+      shift 2
+      ;;
+    --domain=*)
+      PREP_EXTRA+=(--domain "${1#--domain=}")
+      BW_ARGS+=(--domain "${1#--domain=}")
+      shift
+      ;;
+    --channel)
+      PREP_EXTRA+=(--channel "${2:?--channel needs a value}")
+      BW_ARGS+=(--channel "$2")
+      shift 2
+      ;;
+    --channel=*)
+      PREP_EXTRA+=(--channel "${1#--channel=}")
+      BW_ARGS+=(--channel "${1#--channel=}")
+      shift
+      ;;
+    --modulation)
+      PREP_EXTRA+=(--modulation "${2:?--modulation needs a value}")
+      BW_ARGS+=(--modulation "$2")
+      shift 2
+      ;;
+    --modulation=*)
+      PREP_EXTRA+=(--modulation "${1#--modulation=}")
+      BW_ARGS+=(--modulation "${1#--modulation=}")
+      shift
+      ;;
     --no-cca)
       PREP_EXTRA+=(--no-cca)
+      BW_ARGS+=("$1")
+      shift
+      ;;
+    --cca)
+      PREP_EXTRA+=(--cca)
       BW_ARGS+=("$1")
       shift
       ;;
@@ -94,7 +131,7 @@ fi
 
 ensure_winject_manager "$ROOT"
 
-echo "configuring radios (fixed forward ports 9210/9220)..."
+echo "configuring radios (domain/bus pairs, forward ports 9210/9220)..."
 python3 "$ROOT/scripts/prepare_radios_for_manager.py" --a "$RADIO_A" --b "$RADIO_B" --host "$HOST_IP" --verbose "${PREP_EXTRA[@]+"${PREP_EXTRA[@]}"}" || exit 1
 
 patch_conf() {
@@ -148,10 +185,11 @@ fi
 echo "running bw_test --tcp --a $RADIO_A --b $RADIO_B --host $HOST_IP ${BW_ARGS[*]}"
 # Do not exec: the EXIT trap must run to kill managers. exec would replace this
 # shell and leave winject-manager orphans retxing CONNECT forever.
+# --tcp skips sut/sur rebind (prepare_radios + managers own those) but still
+# applies channel/modulation/cca from BW_ARGS.
 set +e
 python3 "$ROOT/tools/bw_test.py" \
   --tcp \
-  --skip-config \
   --a "$RADIO_A" \
   --b "$RADIO_B" \
   --host "$HOST_IP" \

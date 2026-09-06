@@ -20,8 +20,8 @@ console_client::~console_client()
 
 void console_client::close()
 {
-    close_socket(&sock_);
-    pending_.clear();
+    close_socket(&sock);
+    pending.clear();
 }
 
 bool console_client::start_connect(const config& cfg, std::string* error)
@@ -37,13 +37,13 @@ bool console_client::start_connect(const config& cfg, std::string* error)
     addr.sin_family = AF_INET;
     addr.sin_addr = ip;
     addr.sin_port = htons(cfg.console_port);
-    sock_ = make_tcp4();
-    if (sock_.fd() < 0)
+    sock = make_tcp4();
+    if (sock.fd() < 0)
     {
         *error = strerror(errno);
         return false;
     }
-    const int cr = sock_.connect(addr);
+    const int cr = sock.connect(addr);
     if (cr < 0 && errno != EINPROGRESS)
     {
         *error = "console " + cfg.device + ":" +
@@ -56,27 +56,27 @@ bool console_client::start_connect(const config& cfg, std::string* error)
 
 bool console_client::finish_connect(std::string* error)
 {
-    if (sock_.fd() < 0)
+    if (sock.fd() < 0)
     {
         *error = "no socket";
         return false;
     }
     int soerr = 0;
     socklen_t slen = sizeof(soerr);
-    getsockopt(sock_.fd(), SOL_SOCKET, SO_ERROR, &soerr, &slen);
+    getsockopt(sock.fd(), SOL_SOCKET, SO_ERROR, &soerr, &slen);
     if (soerr != 0)
     {
         *error = std::string("console: ") + strerror(soerr);
         return false;
     }
-    const int flags = fcntl(sock_.fd(), F_GETFL, 0);
+    const int flags = fcntl(sock.fd(), F_GETFL, 0);
     if (flags >= 0)
     {
-        fcntl(sock_.fd(), F_SETFL, flags & ~O_NONBLOCK);
+        fcntl(sock.fd(), F_SETFL, flags & ~O_NONBLOCK);
     }
     sockaddr_in local = {};
     socklen_t len = sizeof(local);
-    if (getsockname(sock_.fd(), reinterpret_cast<sockaddr*>(&local), &len) == 0)
+    if (getsockname(sock.fd(), reinterpret_cast<sockaddr*>(&local), &len) == 0)
     {
         local_ip_ = local.sin_addr;
     }
@@ -89,15 +89,15 @@ bool console_client::read_line(std::string* line, std::string* error)
     const auto deadline = clock::now() + std::chrono::seconds(3);
     while (true)
     {
-        const auto nl = pending_.find('\n');
+        const auto nl = pending.find('\n');
         if (nl != std::string::npos)
         {
-            *line = pending_.substr(0, nl);
+            *line = pending.substr(0, nl);
             if (!line->empty() && line->back() == '\r')
             {
                 line->pop_back();
             }
-            pending_.erase(0, nl + 1);
+            pending.erase(0, nl + 1);
             return true;
         }
         const auto now = clock::now();
@@ -110,7 +110,7 @@ bool console_client::read_line(std::string* line, std::string* error)
                               deadline - now)
                               .count();
         pollfd pfd = {};
-        pfd.fd = sock_.fd();
+        pfd.fd = sock.fd();
         pfd.events = POLLIN;
         const int pr = poll(&pfd, 1, static_cast<int>(left));
         if (pr == 0)
@@ -128,13 +128,13 @@ bool console_client::read_line(std::string* line, std::string* error)
             return false;
         }
         char buf[256];
-        const ssize_t n = recv(sock_.fd(), buf, sizeof(buf), 0);
+        const ssize_t n = recv(sock.fd(), buf, sizeof(buf), 0);
         if (n <= 0)
         {
             *error = n == 0 ? "console closed" : strerror(errno);
             return false;
         }
-        pending_.append(buf, static_cast<size_t>(n));
+        pending.append(buf, static_cast<size_t>(n));
     }
 }
 
@@ -148,7 +148,7 @@ bool console_client::send_cmd(const std::string& cmd, std::string* error)
     size_t off = 0;
     while (off < wire.size())
     {
-        const ssize_t n = send(sock_.fd(), wire.data() + off, wire.size() - off, 0);
+        const ssize_t n = send(sock.fd(), wire.data() + off, wire.size() - off, 0);
         if (n < 0)
         {
             if (errno == EINTR)
@@ -182,7 +182,7 @@ bool console_client::send_cmd(const std::string& cmd, std::string* error)
     }
 }
 
-static bool parse_upstream_tx_inject(const std::string& line, std::string* bus,
+static bool parse_upstream_tx_inject(const std::string& line, uint8_t* bus,
                                      uint16_t* inject_port)
 {
     static const char k_prefix[] = "upstream_tx ";
@@ -209,7 +209,10 @@ static bool parse_upstream_tx_inject(const std::string& line, std::string* bus,
     {
         return false;
     }
-    *bus = line.substr(start, stop - start);
+    if (!parse_bus(line.substr(start, stop - start), bus))
+    {
+        return false;
+    }
 
     const auto addr_pos = line.find("address=");
     if (addr_pos == std::string::npos)
@@ -232,7 +235,7 @@ bool console_client::query_status(std::vector<std::string>* lines,
 {
     lines->clear();
     const char* wire = "status\n";
-    if (send(sock_.fd(), wire, 7, 0) < 0)
+    if (send(sock.fd(), wire, 7, 0) < 0)
     {
         *error = strerror(errno);
         return false;
@@ -247,17 +250,17 @@ bool console_client::query_status(std::vector<std::string>* lines,
     {
         while (true)
         {
-            const auto nl = pending_.find('\n');
+            const auto nl = pending.find('\n');
             if (nl == std::string::npos)
             {
                 return;
             }
-            std::string line = pending_.substr(0, nl);
+            std::string line = pending.substr(0, nl);
             if (!line.empty() && line.back() == '\r')
             {
                 line.pop_back();
             }
-            pending_.erase(0, nl + 1);
+            pending.erase(0, nl + 1);
             if (!line.empty())
             {
                 lines->push_back(std::move(line));
@@ -292,7 +295,7 @@ bool console_client::query_status(std::vector<std::string>* lines,
             wait = 1;
         }
         pollfd pfd = {};
-        pfd.fd = sock_.fd();
+        pfd.fd = sock.fd();
         pfd.events = POLLIN;
         const int pr = poll(&pfd, 1, wait);
         if (pr == 0)
@@ -309,13 +312,13 @@ bool console_client::query_status(std::vector<std::string>* lines,
             return false;
         }
         char buf[512];
-        const ssize_t n = recv(sock_.fd(), buf, sizeof(buf), 0);
+        const ssize_t n = recv(sock.fd(), buf, sizeof(buf), 0);
         if (n <= 0)
         {
             *error = n == 0 ? "console closed" : strerror(errno);
             return false;
         }
-        pending_.append(buf, static_cast<size_t>(n));
+        pending.append(buf, static_cast<size_t>(n));
     }
     drain();
     if (got)
@@ -326,33 +329,33 @@ bool console_client::query_status(std::vector<std::string>* lines,
     return false;
 }
 
-bool console_client::release_inject_port(uint16_t port,
-                                        const std::string& keep_airport,
-                                        std::string* error)
+bool console_client::release_inject_port(uint16_t port, uint8_t keep_bus,
+                                         std::string* error)
 {
     std::vector<std::string> lines;
     std::string status_err;
     if (!query_status(&lines, &status_err))
     {
-        LOG_INF("status unavailable (%s); trying set_upstream_rx anyway",
+        LOG_INF("status unavailable (%s); trying set_upstream_tx anyway",
                 status_err.c_str());
         return true;
     }
     for (const auto& line : lines)
     {
-        std::string bus;
+        uint8_t bus = 0;
         uint16_t inject_port = 0;
         if (!parse_upstream_tx_inject(line, &bus, &inject_port) ||
             inject_port != port)
         {
             continue;
         }
-        if (bus == keep_airport)
+        if (bus == keep_bus)
         {
             continue;
         }
-        LOG_INF("unset stale tx bus=%s (held inject %u)", bus.c_str(), port);
-        if (!send_cmd("unset_upstream_tx bus=" + bus, error))
+        LOG_INF("unset stale tx bus=%s (held inject %u)",
+                bus_to_string(bus).c_str(), port);
+        if (!send_cmd("unset_upstream_tx bus=" + bus_to_string(bus), error))
         {
             return false;
         }
@@ -381,18 +384,18 @@ bool console_client::program(const config& cfg,
     addr.sin_family = AF_INET;
     addr.sin_addr = ip;
     addr.sin_port = htons(cfg.console_port);
-    sock_ = make_tcp4();
-    if (sock_.fd() < 0)
+    sock = make_tcp4();
+    if (sock.fd() < 0)
     {
         *error = strerror(errno);
         return false;
     }
-    const int flags = fcntl(sock_.fd(), F_GETFL, 0);
+    const int flags = fcntl(sock.fd(), F_GETFL, 0);
     if (flags >= 0)
     {
-        fcntl(sock_.fd(), F_SETFL, flags & ~O_NONBLOCK);
+        fcntl(sock.fd(), F_SETFL, flags & ~O_NONBLOCK);
     }
-    if (sock_.connect(addr) < 0)
+    if (sock.connect(addr) < 0)
     {
         *error = "console " + cfg.device + ":" +
                  std::to_string(cfg.console_port) + ": " + strerror(errno);
@@ -401,31 +404,31 @@ bool console_client::program(const config& cfg,
     }
     sockaddr_in local = {};
     socklen_t len = sizeof(local);
-    if (getsockname(sock_.fd(), reinterpret_cast<sockaddr*>(&local), &len) == 0)
+    if (getsockname(sock.fd(), reinterpret_cast<sockaddr*>(&local), &len) == 0)
     {
         local_ip_ = local.sin_addr;
     }
     *local_ip_out = local_ip_;
-    sock_.set_sock_opt(IPPROTO_TCP, TCP_NODELAY, 1);
+    sock.set_sock_opt(IPPROTO_TCP, TCP_NODELAY, 1);
 
     struct timeval tv = {};
     tv.tv_sec = 0;
     tv.tv_usec = 800000;
-    setsockopt(sock_.fd(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock.fd(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     char drain[4096];
-    recv(sock_.fd(), drain, sizeof(drain), 0);
+    recv(sock.fd(), drain, sizeof(drain), 0);
 
     auto run_cmd = [&](const std::string& cmd) -> bool
     {
         std::string wire = cmd;
         wire.push_back('\n');
-        if (send(sock_.fd(), wire.data(), wire.size(), 0) < 0)
+        if (send(sock.fd(), wire.data(), wire.size(), 0) < 0)
         {
             *error = strerror(errno);
             return false;
         }
-        pending_.clear();
+        pending.clear();
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         std::string buf;
@@ -454,14 +457,15 @@ bool console_client::program(const config& cfg,
     if (!run_cmd(std::string("set_mode ") + cfg.radio_mode_name()) ||
         !run_cmd("set_channel " + std::to_string(cfg.channel)) ||
         !run_cmd("set_modulation " + cfg.modulation) ||
-        !run_cmd("set_tx_power " + std::to_string(cfg.power_dbm)))
+        !run_cmd("set_tx_power " + std::to_string(cfg.power_dbm)) ||
+        !run_cmd("set_domain " + domain_to_string(cfg.domain)))
     {
         close();
         return false;
     }
-    LOG_INF("radio programmed mode=%s ch=%u mod=%s pwr=%d",
+    LOG_INF("radio programmed mode=%s ch=%u mod=%s pwr=%d domain=%s",
             cfg.radio_mode_name(), cfg.channel, cfg.modulation.c_str(),
-            cfg.power_dbm);
+            cfg.power_dbm, domain_to_string(cfg.domain).c_str());
 
     for (size_t i = 0; i < cfg.upstreams.size(); i++)
     {
@@ -471,29 +475,26 @@ bool console_client::program(const config& cfg,
             close();
             return false;
         }
-        const std::string airport = airport_to_string(cfg.upstreams[i].airport);
-        if (!release_inject_port(inject_ports[i], airport, error))
+        const auto& up = cfg.upstreams[i];
+        if (!release_inject_port(inject_ports[i], up.bus_tx, error))
         {
             close();
             return false;
         }
-        std::string sur = "set_upstream_rx ";
-        std::string sut = "set_upstream_tx ";
-        if (cfg.radio_mode == radio_mode_e::standalone)
-        {
-            sur += airport + " ";
-            sut += airport + " ";
-        }
-        sur += std::to_string(inject_ports[i]);
-        sut += ipv4_to_string(local_ip_) + " " + std::to_string(forward_ports[i]);
-        if (!run_cmd(sur) || !run_cmd(sut))
+        const std::string sut = "set_upstream_tx bus=" + bus_to_string(up.bus_tx) +
+                                " " + std::to_string(inject_ports[i]);
+        const std::string sur = "set_upstream_rx bus=" + bus_to_string(up.bus_rx) +
+                                " " + ipv4_to_string(local_ip_) + " " +
+                                std::to_string(forward_ports[i]);
+        if (!run_cmd(sut) || !run_cmd(sur))
         {
             close();
             return false;
         }
-        LOG_INF("upstream-%zu airport=%s inject=%u forward=%s:%u", i,
-                airport.c_str(), inject_ports[i],
-                ipv4_to_string(local_ip_).c_str(), forward_ports[i]);
+        LOG_INF("upstream-%zu bus_tx=%s bus_rx=%s inject=%u forward=%s:%u", i,
+                bus_to_string(up.bus_tx).c_str(), bus_to_string(up.bus_rx).c_str(),
+                inject_ports[i], ipv4_to_string(local_ip_).c_str(),
+                forward_ports[i]);
     }
     close();
     return true;
@@ -504,13 +505,14 @@ bool console_client::apply_radio(const config& cfg, std::string* error)
     if (!send_cmd(std::string("set_mode ") + cfg.radio_mode_name(), error) ||
         !send_cmd("set_channel " + std::to_string(cfg.channel), error) ||
         !send_cmd("set_modulation " + cfg.modulation, error) ||
-        !send_cmd("set_tx_power " + std::to_string(cfg.power_dbm), error))
+        !send_cmd("set_tx_power " + std::to_string(cfg.power_dbm), error) ||
+        !send_cmd("set_domain " + domain_to_string(cfg.domain), error))
     {
         return false;
     }
-    LOG_INF("radio programmed mode=%s ch=%u mod=%s pwr=%d",
+    LOG_INF("radio programmed mode=%s ch=%u mod=%s pwr=%d domain=%s",
             cfg.radio_mode_name(), cfg.channel, cfg.modulation.c_str(),
-            cfg.power_dbm);
+            cfg.power_dbm, domain_to_string(cfg.domain).c_str());
     return true;
 }
 
@@ -518,26 +520,22 @@ bool console_client::apply_upstream(const config& cfg, const upstream_config_s& 
                                   uint16_t inject_port, uint16_t forward_port,
                                   in_addr local_ip, std::string* error)
 {
-    const std::string airport = airport_to_string(up.airport);
-    if (!release_inject_port(inject_port, airport, error))
+    (void)cfg;
+    if (!release_inject_port(inject_port, up.bus_tx, error))
     {
         return false;
     }
-    std::string sur = "set_upstream_rx ";
-    std::string sut = "set_upstream_tx ";
-    if (cfg.radio_mode == radio_mode_e::standalone)
-    {
-        sur += airport + " ";
-        sut += airport + " ";
-    }
-    sur += std::to_string(inject_port);
-    sut += ipv4_to_string(local_ip) + " " + std::to_string(forward_port);
-    if (!send_cmd(sur, error) || !send_cmd(sut, error))
+    const std::string sut = "set_upstream_tx bus=" + bus_to_string(up.bus_tx) +
+                            " " + std::to_string(inject_port);
+    const std::string sur = "set_upstream_rx bus=" + bus_to_string(up.bus_rx) +
+                            " " + ipv4_to_string(local_ip) + " " +
+                            std::to_string(forward_port);
+    if (!send_cmd(sut, error) || !send_cmd(sur, error))
     {
         return false;
     }
-    LOG_INF("upstream-%zu airport=%s inject=%u forward=%s:%u", up.index,
-            airport.c_str(), inject_port, ipv4_to_string(local_ip).c_str(),
-            forward_port);
+    LOG_INF("upstream-%zu bus_tx=%s bus_rx=%s inject=%u forward=%s:%u", up.index,
+            bus_to_string(up.bus_tx).c_str(), bus_to_string(up.bus_rx).c_str(),
+            inject_port, ipv4_to_string(local_ip).c_str(), forward_port);
     return true;
 }

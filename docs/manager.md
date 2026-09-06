@@ -11,20 +11,23 @@ winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
 winject.mode          = STANDALONE
+winject.domain        = 1234
 # Optional. Default 10000 kbps if omitted.
 # winject.max_rate_kbps = 10000
 
 upstream.size = 5
 
 upstream-0.mode             = UDP_GENERIC_FORWARDING
-upstream-0.airport          = <airport>
+upstream-0.bus_tx           = b2
+upstream-0.bus_rx           = a1
 upstream-0.scheduler_budget = 100
 upstream-0.rx               = <interface>:<port>
 upstream-0.tx               = <target_host>:<port>
 
 # GStreamer udpsink -> manager (bind and receive)
 upstream-0.mode             = UDP_SERVER_FORWARDING
-upstream-0.airport          = <airport>
+upstream-0.bus_tx           = b2
+upstream-0.bus_rx           = a1
 upstream-0.scheduler_budget = 1024
 upstream-0.bind_address     = <interface>:<port>
 # Optional packet-block Reed-Solomon (ISA-L). Same k/n on both managers.
@@ -35,13 +38,15 @@ upstream-0.bind_address     = <interface>:<port>
 
 # Manager -> GStreamer udpsrc (send)
 upstream-0.mode             = UDP_CLIENT_FORWARDING
-upstream-0.airport          = <airport>
+upstream-0.bus_tx           = a1
+upstream-0.bus_rx           = b2
 upstream-0.scheduler_budget = 1024
 upstream-0.connect_address  = <target_host>:<port>
 
 # SSH client forwarding (manager connects to sshd)
 upstream-0.mode             = TCP_CLIENT_FORWARDING
-upstream-0.airport          = <airport>
+upstream-0.bus_tx           = c3
+upstream-0.bus_rx           = d4
 upstream-0.scheduler_budget = 1024
 upstream-0.rcv_buffer_size  = 16384
 upstream-0.snd_buffer_size  = 16384
@@ -49,24 +54,28 @@ upstream-0.connect_address  = <target_host>:<port>
 
 # SSH server forwarding (SSH client connects here)
 upstream-0.mode             = TCP_SERVER_FORWARDING
-upstream-0.airport          = <airport>
+upstream-0.bus_tx           = d4
+upstream-0.bus_rx           = c3
 upstream-0.scheduler_budget = 1024
 upstream-0.rcv_buffer_size  = 16384
 upstream-0.snd_buffer_size  = 16384
 upstream-0.bind_address     = <interface>:<port>
 ```
 
-`winject.device` / `winject.console` are the ESP32 Ethernet address and TCP console (firmware default 2323). Optional `winject.local_ip` overrides the address used in `set_upstream_tx`; otherwise it is inferred from the console socket.
+`winject.device` / `winject.console` are the ESP32 Ethernet address and TCP console (firmware default 2323). Optional `winject.local_ip` overrides the address used in `set_upstream_rx`; otherwise it is inferred from the console socket.
 
-# Airport
+# Domain and bus
 
-Each `upstream-N` owns one ESP32 UDP upstream. `airport` is required and must be unique on this radio.
+Each `upstream-N` owns one ESP32 UDP inject/forward pair. Addressing matches firmware ([winject.md](winject.md)): a shared **domain** on Addr3 and a **bus** (`lcid`) per direction.
 
-- STANDALONE broadcast: `00:00:00:xx:xx:xx`
-- STANDALONE P2P: `xx:xx:xx:yy:yy:yy` (you|peer). The peer manager uses the swapped `yy:yy:yy:xx:xx:xx`.
-- BFC_TUNNEL_DEVICE: airport `0`, and `upstream.size` must be 1.
+- `winject.domain` — hex `1`…`ffff` (required). Both managers on a link must use the same domain.
+- `upstream-N.bus_tx` — bus stamped on UDP→air (`set_upstream_tx` / `sut`). 1–2 hex digits, not `0`.
+- `upstream-N.bus_rx` — bus filtered on air→UDP (`set_upstream_rx` / `sur`). Must differ from `bus_tx`.
+- All `bus_tx` / `bus_rx` values on one manager must be unique.
+- Peer manager swaps the pair: A’s `bus_tx` is B’s `bus_rx`, and vice versa.
+- `BFC_TUNNEL_DEVICE`: `upstream.size` must be 1 (same domain/bus rules).
 
-The manager issues `set_upstream_rx <airport> <inject_port>` and `set_upstream_tx <airport> <local_ip> <forward_port>` for each entry. Inject and forward UDP ports are assigned automatically.
+The manager issues `set_domain`, then for each entry `set_upstream_tx bus=<bus_tx> <inject_port>` and `set_upstream_rx bus=<bus_rx> <local_ip> <forward_port>`. Inject and forward UDP ports are assigned automatically.
 
 # Modes
 
@@ -78,7 +87,7 @@ The manager issues `set_upstream_rx <airport> <inject_port>` and `set_upstream_t
 | `TCP_SERVER_FORWARDING` | listen `bind_address` (one client) |
 | `TCP_CLIENT_FORWARDING` | connect `connect_address` after the peer stream is up |
 
-Host TCP receive for the TCP modes runs on a dedicated blocking-read thread per connection; bytes are queued onto the reactor for ARQ and radio inject so a full send window cannot stall ACK processing. Over the air the manager uses selective-repeat ARQ with cumulative ACK + SACK blocks (out-of-order DATA is buffered, only missing SNs are retransmitted).
+Host TCP receive for the TCP modes runs on a dedicated blocking-read thread per connection; bytes are queued onto the reactor for ARQ and radio inject so a full send window cannot stall ACK processing. Over the air the manager uses selective-repeat ARQ with cumulative ACK + SACK blocks (out-of-order DATA is buffered, only missing SNs are retransmitted). DATA and ACK share the upstream’s `bus_tx` / `bus_rx` pair (same UDP inject/forward path).
 
 `scheduler_budget` is the max bytes this upstream may inject per scheduler wakeup. `winject.max_rate_kbps` caps aggregate DATA inject rate (ACKs are not charged). If omitted or `0`, the default is 10000. The scheduler runs on a 500 µs timer and also immediately after radio RX / TCP ingest so reverse ACKs are not delayed a full tick.
 
@@ -99,23 +108,29 @@ Host A (SSH client side, video source):
 
 ```
 winject.mode = STANDALONE
+winject.domain = 1234
 upstream-0.mode = TCP_SERVER_FORWARDING
-upstream-0.airport = 02:02:03:04:05:06
+upstream-0.bus_tx = c3
+upstream-0.bus_rx = d4
 upstream-0.bind_address = 127.0.0.1:22022
 upstream-1.mode = UDP_SERVER_FORWARDING
-upstream-1.airport = 00:00:00:AA:BB:CC
+upstream-1.bus_tx = b2
+upstream-1.bus_rx = a1
 upstream-1.bind_address = 127.0.0.1:22081
 ```
 
-Host B (sshd side, video sink), swapped P2P airport on TCP:
+Host B (sshd side, video sink), swapped bus pairs:
 
 ```
 winject.mode = STANDALONE
+winject.domain = 1234
 upstream-0.mode = TCP_CLIENT_FORWARDING
-upstream-0.airport = 04:05:06:02:02:03
+upstream-0.bus_tx = d4
+upstream-0.bus_rx = c3
 upstream-0.connect_address = 127.0.0.1:22
 upstream-1.mode = UDP_CLIENT_FORWARDING
-upstream-1.airport = 00:00:00:AA:BB:CC
+upstream-1.bus_tx = a1
+upstream-1.bus_rx = b2
 upstream-1.connect_address = 127.0.0.1:21082
 ```
 
@@ -123,11 +138,11 @@ upstream-1.connect_address = 127.0.0.1:21082
 
 The manager fetches official [BFC](https://github.com/therooftopprinz/BFC) into the CMake build directory for INI parsing, sockets, and the epoll reactor.
 
-Build: `cmake -S src/manager -B src/manager/build && cmake --build src/manager/build`. Run: `./src/manager/build/winject-manager src/manager/winject.conf.example`. Host tests: `pio run -t test`. Radio console commands are in [winject.md](winject.md).
+Build: `cmake -S src/manager -B build_manager_arm && cmake --build build_manager_arm`. Run: `./build_manager_arm/winject-manager src/manager/winject.conf.example`. Host tests: see `.cursor/skills/build/SKILL.md`. Radio console commands are in [winject.md](winject.md).
 
 # TCP bandwidth test (bw_test)
 
-Use manager TCP forwarding with `tools/bw_test.py --tcp` (length-prefixed records over manager TCP; radios stay in `STANDALONE` with P2P airports).
+Use manager TCP forwarding via `scripts/manager_tcp_bw_test.sh` (length-prefixed records over manager TCP). Radios are `STANDALONE` with domain `1234` and two bus pairs (`b2`/`a1` for A→B, `c3`/`d4` for B→A); `prepare_radios_for_manager.py` programs `sut`/`sur` before managers start.
 
 ```bash
 chmod +x scripts/manager_tcp_bw_test.sh
@@ -136,7 +151,7 @@ chmod +x scripts/manager_tcp_bw_test.sh
 ./scripts/manager_tcp_bw_test.sh 192.168.253.11 192.168.253.12 192.168.253.106 -- --bidir
 ```
 
-Configs: `configuration/winject-tests/bw_a.cfg` (radio A) and `bw_b.cfg` (radio B). Host sends A→B via manager A `:29000`, receives on TCP `:9002`; B→A uses `:29001` and listen `:9001`. Managers use `winject.skip_console` so the script programs the radios first. Auto TCP offer is ~55% of the UDP estimate (original winject AM target). Prefer `--kbps 7000`–`8000` or `--no-cca` when measuring; if the air path is lossy, step down.
+Configs: `configuration/winject-tests/bw_a.cfg` (radio A) and `bw_b.cfg` (radio B). Host sends A→B via manager A `:29000`, receives on TCP `:9002`; B→A uses `:29001` and listen `:9001`. Managers use `winject.skip_console` so the script programs the radios first. `bw_test --tcp` does not rebind upstreams but still applies `--channel` / `--modulation` / CCA. Auto TCP offer is ~55% of the UDP estimate (original winject AM target). Prefer `--kbps 7000`–`8000` or `--no-cca` when measuring; if the air path is lossy, step down.
 
 # Air TX-RX latency (lat_test)
 
@@ -156,4 +171,4 @@ CASES=raw,fec10-15,fec10-11,tcp ./scripts/manager_lat_test.sh
 | `fec10-11` | UDP `RS_BLOCK_ERASURE` k=10 n=11 |
 | `tcp` | manager TCP ARQ (`bw_a.cfg` / `bw_b.cfg`) |
 
-UDP configs: `configuration/winject-tests/lat_udp_a.cfg` / `lat_udp_b.cfg` (same P2P airports and ports as the TCP bw test). Decoder emits a block only after `k` shards; encoder waits for `k` datagrams or the FEC timeout.
+UDP configs: `configuration/winject-tests/lat_udp_a.cfg` / `lat_udp_b.cfg` (same bus pairs and ports as the TCP bw test). Decoder emits a block only after `k` shards; encoder waits for `k` datagrams or the FEC timeout.

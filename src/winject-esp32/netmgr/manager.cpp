@@ -22,15 +22,15 @@ manager& manager::instance()
 }
 
 manager::manager()
-    : eth_(ethernet::instance()),
-      dhcp_client_(dhcp_client::instance()),
-      dhcp_server_(dhcp_server::instance())
+    : eth(ethernet::instance()),
+      dhcp_client(dhcp_client::instance()),
+      dhcp_server(dhcp_server::instance())
 {
 }
 
 manager::~manager()
 {
-    if (started_.load(std::memory_order_acquire))
+    if (started.load(std::memory_order_acquire))
     {
         reactor_.stop();
     }
@@ -68,74 +68,74 @@ uint32_t manager::static_ip() const
 bool manager::dhcp_server_should_run() const
 {
     auto is_static = network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_STATIC;
-    auto is_wanted = dhcp_server_wanted_.load(std::memory_order_relaxed);
+    auto is_wanted = dhcp_server_wanted.load(std::memory_order_relaxed);
     return is_static && is_wanted;
 }
 
 bool manager::apply_network_locked()
 {
-    if (!eth_.ready())
+    if (!eth.ready())
     {
         return true;
     }
 
-    esp_netif_t* netif = eth_.netif();
+    esp_netif_t* netif = eth.netif();
     if (network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_AUTO)
     {
-        auto_gen_.fetch_add(1, std::memory_order_relaxed);
-        if (eth_.netif_is_dhcp_server())
+        auto_gen.fetch_add(1, std::memory_order_relaxed);
+        if (eth.netif_is_dhcp_server())
         {
-            if (!eth_.rebuild_dhcp_client())
+            if (!eth.rebuild_dhcp_client())
             {
                 return false;
             }
-            netif = eth_.netif();
+            netif = eth.netif();
         }
-        else if (!dhcp_server_.stop(netif) || !dhcp_client_.start(netif))
+        else if (!dhcp_server.stop(netif) || !dhcp_client.start(netif))
         {
             return false;
         }
-        eth_.set_using_static(false);
-        eth_.set_connected(eth_.has_ipv4());
+        eth.set_using_static(false);
+        eth.set_connected(eth.has_ipv4());
         ESP_LOGI(TAG, "network AUTO (dhcp client; dhcps blocked)");
         schedule_static_fallback();
         return true;
     }
 
     cancel_static_fallback();
-    auto_gen_.fetch_add(1, std::memory_order_relaxed);
+    auto_gen.fetch_add(1, std::memory_order_relaxed);
     const uint32_t ip = static_ip();
     if (dhcp_server_should_run())
     {
-        if (!eth_.netif_is_dhcp_server())
+        if (!eth.netif_is_dhcp_server())
         {
-            return eth_.rebuild_dhcp_server(ip);
+            return eth.rebuild_dhcp_server(ip);
         }
-        return eth_.apply_static_ip(ip) && dhcp_server_.start(netif, ip);
+        return eth.apply_static_ip(ip) && dhcp_server.start(netif, ip);
     }
 
-    if (eth_.netif_is_dhcp_server())
+    if (eth.netif_is_dhcp_server())
     {
-        if (!eth_.rebuild_dhcp_client())
+        if (!eth.rebuild_dhcp_client())
         {
             return false;
         }
-        netif = eth_.netif();
+        netif = eth.netif();
     }
-    else if (!dhcp_server_.stop(netif))
+    else if (!dhcp_server.stop(netif))
     {
         return false;
     }
-    return eth_.apply_static_ip(ip);
+    return eth.apply_static_ip(ip);
 }
 
 bool manager::apply_network()
 {
-    if (!eth_.mutex().ready())
+    if (!eth.mutex().ready())
     {
         return true;
     }
-    bfc::semaphore::lock lock(eth_.mutex());
+    bfc::semaphore::lock lock(eth.mutex());
     if (!lock)
     {
         return false;
@@ -145,40 +145,40 @@ bool manager::apply_network()
 
 void manager::cancel_static_fallback()
 {
-    if (!fallback_timer_set_)
+    if (!fallback_timer_set)
     {
         return;
     }
-    reactor_.get_timer().cancel(fallback_timer_id_);
-    fallback_timer_set_ = false;
+    reactor_.get_timer().cancel(fallback_timer_id);
+    fallback_timer_set = false;
 }
 
 void manager::on_static_fallback(uint32_t gen)
 {
-    fallback_timer_set_ = false;
-    if (auto_gen_.load(std::memory_order_relaxed) != gen ||
+    fallback_timer_set = false;
+    if (auto_gen.load(std::memory_order_relaxed) != gen ||
         network_mode_.load(std::memory_order_relaxed) != NETMGR_MODE_AUTO)
     {
         return;
     }
 
-    bfc::semaphore::lock lock(eth_.mutex());
+    bfc::semaphore::lock lock(eth.mutex());
     if (!lock)
     {
         ESP_LOGE(TAG, "static fallback lock failed");
         return;
     }
-    if (auto_gen_.load(std::memory_order_relaxed) != gen ||
+    if (auto_gen.load(std::memory_order_relaxed) != gen ||
         network_mode_.load(std::memory_order_relaxed) != NETMGR_MODE_AUTO)
     {
         return;
     }
-    if (eth_.has_ipv4())
+    if (eth.has_ipv4())
     {
         return;
     }
     ESP_LOGI(TAG, "no DHCP lease; static fallback");
-    if (!eth_.apply_static_ip(static_ip()))
+    if (!eth.apply_static_ip(static_ip()))
     {
         ESP_LOGE(TAG, "static fallback failed");
     }
@@ -187,34 +187,34 @@ void manager::on_static_fallback(uint32_t gen)
 void manager::schedule_static_fallback()
 {
     cancel_static_fallback();
-    const uint32_t gen = auto_gen_.load(std::memory_order_relaxed);
-    fallback_timer_id_ =
+    const uint32_t gen = auto_gen.load(std::memory_order_relaxed);
+    fallback_timer_id =
         reactor_.get_timer().wait_ms(DHCP_FALLBACK_MS,
                                      [this, gen]()
                                      {
                                          on_static_fallback(gen);
                                      });
-    fallback_timer_set_ = true;
+    fallback_timer_set = true;
 }
 
 void manager::bring_up()
 {
     ensure_static_ip();
-    eth_.begin();
-    dhcp_server_.register_events();
+    eth.begin();
+    dhcp_server.register_events();
     if (!apply_network())
     {
         ESP_LOGE(TAG, "network apply failed");
-        init_ok_.store(false, std::memory_order_release);
+        init_ok.store(false, std::memory_order_release);
         return;
     }
-    init_ok_.store(true, std::memory_order_release);
+    init_ok.store(true, std::memory_order_release);
 }
 
 void manager::run_reactor()
 {
     bring_up();
-    SemaphoreHandle_t done = init_done_;
+    SemaphoreHandle_t done = init_done;
     if (done != nullptr)
     {
         xSemaphoreGive(done);
@@ -229,9 +229,9 @@ void manager::reactor_task(void* arg)
 
 bool manager::start()
 {
-    if (started_.load(std::memory_order_acquire))
+    if (started.load(std::memory_order_acquire))
     {
-        return init_ok_.load(std::memory_order_acquire);
+        return init_ok.load(std::memory_order_acquire);
     }
 
     SemaphoreHandle_t init_done = xSemaphoreCreateBinary();
@@ -240,7 +240,7 @@ bool manager::start()
         ESP_LOGE(TAG, "init semaphore alloc failed");
         return false;
     }
-    init_done_ = init_done;
+    this->init_done = init_done;
 
     const BaseType_t ok =
         xTaskCreatePinnedToCore(reactor_task, "reactor", 6144, this,
@@ -248,7 +248,7 @@ bool manager::start()
     if (ok != pdPASS)
     {
         ESP_LOGE(TAG, "reactor task create failed");
-        init_done_ = nullptr;
+        init_done = nullptr;
         vSemaphoreDelete(init_done);
         return false;
     }
@@ -256,16 +256,16 @@ bool manager::start()
     if (xSemaphoreTake(init_done, portMAX_DELAY) != pdTRUE)
     {
         ESP_LOGE(TAG, "reactor init wait failed");
-        init_done_ = nullptr;
+        init_done = nullptr;
         vSemaphoreDelete(init_done);
         reactor_.stop();
         return false;
     }
-    init_done_ = nullptr;
+    init_done = nullptr;
     vSemaphoreDelete(init_done);
 
-    started_.store(true, std::memory_order_release);
-    return init_ok_.load(std::memory_order_acquire);
+    started.store(true, std::memory_order_release);
+    return init_ok.load(std::memory_order_acquire);
 }
 
 manager::reactor_t& manager::reactor()
@@ -275,7 +275,7 @@ manager::reactor_t& manager::reactor()
 
 bool manager::connected() const
 {
-    return eth_.connected();
+    return eth.connected();
 }
 
 NetmgrMode manager::network_mode() const
@@ -323,7 +323,7 @@ bool manager::set_network_mode(NetmgrMode mode)
     }
     const NetmgrMode previous =
         network_mode_.exchange(mode, std::memory_order_relaxed);
-    if (previous == mode && eth_.ready())
+    if (previous == mode && eth.ready())
     {
         return true;
     }
@@ -332,17 +332,17 @@ bool manager::set_network_mode(NetmgrMode mode)
 
 bool manager::dhcp_server_enabled() const
 {
-    return dhcp_server_wanted_.load(std::memory_order_relaxed);
+    return dhcp_server_wanted.load(std::memory_order_relaxed);
 }
 
 bool manager::dhcp_server_active() const
 {
-    return dhcp_server_.active();
+    return dhcp_server.active();
 }
 
 bool manager::set_dhcp_server_enabled(bool enabled)
 {
-    dhcp_server_wanted_.store(enabled, std::memory_order_relaxed);
+    dhcp_server_wanted.store(enabled, std::memory_order_relaxed);
     if (network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_AUTO)
     {
         ESP_LOGI(TAG, "dhcps %s (blocked in AUTO)",
@@ -359,7 +359,7 @@ bool manager::set_ip(uint32_t ip)
         return false;
     }
     static_ip_.store(ip, std::memory_order_relaxed);
-    if (!eth_.ready())
+    if (!eth.ready())
     {
         return true;
     }
@@ -367,14 +367,14 @@ bool manager::set_ip(uint32_t ip)
     {
         return apply_network();
     }
-    if (eth_.using_static())
+    if (eth.using_static())
     {
-        bfc::semaphore::lock lock(eth_.mutex());
+        bfc::semaphore::lock lock(eth.mutex());
         if (!lock)
         {
             return false;
         }
-        return eth_.apply_static_ip(ip);
+        return eth.apply_static_ip(ip);
     }
     return true;
 }
@@ -391,10 +391,10 @@ bool manager::static_ipv4(uint32_t* out) const
 
 bool manager::dhcp_pool(uint32_t* start, uint32_t* end) const
 {
-    return dhcp_server_.pool_range(static_ip(), start, end);
+    return dhcp_server.pool_range(static_ip(), start, end);
 }
 
 bool manager::local_ipv4(uint32_t* out) const
 {
-    return eth_.local_ipv4(out);
+    return eth.local_ipv4(out);
 }

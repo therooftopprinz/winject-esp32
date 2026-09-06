@@ -11,17 +11,17 @@ wifi_udp::~wifi_udp()
     close();
 }
 
-bool wifi_udp::open(reactor& reactor, const sockaddr_in& inject,
+bool wifi_udp::open(::reactor& reactor, const sockaddr_in& inject,
                     uint16_t forward_port, rx on_rx, idle on_idle)
 {
     close();
-    reactor_ = &reactor;
-    inject_ = inject;
-    on_rx_ = std::move(on_rx);
-    on_idle_ = std::move(on_idle);
+    this->reactor = &reactor;
+    this->inject = inject;
+    this->on_rx = std::move(on_rx);
+    this->on_idle = std::move(on_idle);
     forward_port_ = forward_port;
-    sock_ = make_udp4();
-    if (sock_.fd() < 0)
+    sock = make_udp4();
+    if (sock.fd() < 0)
     {
         LOG_ERR("radio udp socket failed: %s", strerror(errno));
         close();
@@ -31,15 +31,15 @@ bool wifi_udp::open(reactor& reactor, const sockaddr_in& inject,
     // be exclusive or a stale manager can keep stealing unicast packets while
     // this process shows radio_rx=0.
     const int zero = 0;
-    if (setsockopt(sock_.fd(), SOL_SOCKET, SO_REUSEADDR, &zero, sizeof(zero)) <
+    if (setsockopt(sock.fd(), SOL_SOCKET, SO_REUSEADDR, &zero, sizeof(zero)) <
             0 ||
-        !bind_udp_port(sock_.fd(), forward_port_))
+        !bind_udp_port(sock.fd(), forward_port_))
     {
         LOG_ERR("radio udp bind %u failed: %s", forward_port_, strerror(errno));
         close();
         return false;
     }
-    if (!reactor.add_read_rdy(sock_.fd(),
+    if (!reactor.add_read_rdy(sock.fd(),
                               [this]()
                               {
                                   on_forward();
@@ -53,24 +53,24 @@ bool wifi_udp::open(reactor& reactor, const sockaddr_in& inject,
 
 void wifi_udp::close()
 {
-    if (sock_.fd() >= 0)
+    if (sock.fd() >= 0)
     {
-        if (reactor_ != nullptr)
+        if (reactor != nullptr)
         {
-            reactor_->rem_read_rdy(sock_.fd());
+            reactor->rem_read_rdy(sock.fd());
         }
-        close_socket(&sock_);
+        close_socket(&sock);
     }
     forward_port_ = 0;
 }
 
 bool wifi_udp::send(const uint8_t* data, size_t len)
 {
-    if (sock_.fd() < 0 || data == nullptr || len == 0)
+    if (sock.fd() < 0 || data == nullptr || len == 0)
     {
         return false;
     }
-    return udp_send_to(sock_.fd(), inject_, data, len);
+    return udp_send_to(sock.fd(), inject, data, len);
 }
 
 void wifi_udp::on_forward()
@@ -78,7 +78,7 @@ void wifi_udp::on_forward()
     bool any = false;
     while (true)
     {
-        const ssize_t n = udp_recv_from(sock_.fd(), buf_, sizeof(buf_), nullptr);
+        const ssize_t n = udp_recv_from(sock.fd(), buf, sizeof(buf), nullptr);
         if (n < 0)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -93,15 +93,15 @@ void wifi_udp::on_forward()
             break;
         }
         any = true;
-        if (on_rx_)
+        if (on_rx)
         {
-            on_rx_(buf_, static_cast<size_t>(n));
+            on_rx(buf, static_cast<size_t>(n));
         }
     }
     // One scheduler pass after the burst so cumulative/SACK ACK uses the latest
     // rx state and goes out immediately (do not wait for the timer).
-    if (any && on_idle_)
+    if (any && on_idle)
     {
-        on_idle_();
+        on_idle();
     }
 }

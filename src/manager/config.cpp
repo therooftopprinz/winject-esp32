@@ -3,7 +3,6 @@
 #include <bfc/configuration_parser.hpp>
 #include <cctype>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -219,6 +218,17 @@ bool config::load(const std::string& path, std::string* error)
         return false;
     }
 
+    std::string domain_s;
+    if (!require_arg(parser, "winject.domain", &domain_s, error))
+    {
+        return false;
+    }
+    if (!parse_domain(domain_s, &domain))
+    {
+        *error = "invalid winject.domain";
+        return false;
+    }
+
     auto rate = parser.as<unsigned>("winject.max_rate_kbps");
     if (rate && *rate > 0)
     {
@@ -276,20 +286,27 @@ bool config::load(const std::string& path, std::string* error)
             *error = "invalid " + key_of(i, "mode");
             return false;
         }
-        std::string airport;
-        if (!require_arg(parser, key_of(i, "airport"), &airport, error))
+        std::string bus_tx_s;
+        std::string bus_rx_s;
+        if (!require_arg(parser, key_of(i, "bus_tx"), &bus_tx_s, error) ||
+            !require_arg(parser, key_of(i, "bus_rx"), &bus_rx_s, error))
         {
             return false;
         }
-        if (!parse_airport(airport, u.airport))
+        if (!parse_bus(bus_tx_s, &u.bus_tx) || u.bus_tx == 0)
         {
-            *error = "invalid " + key_of(i, "airport");
+            *error = "invalid " + key_of(i, "bus_tx");
             return false;
         }
-        if (radio_mode == radio_mode_e::bfc_tunnel_device &&
-            !airport_is_zero(u.airport))
+        if (!parse_bus(bus_rx_s, &u.bus_rx) || u.bus_rx == 0)
         {
-            *error = "BFC_TUNNEL_DEVICE airport must be 0";
+            *error = "invalid " + key_of(i, "bus_rx");
+            return false;
+        }
+        if (u.bus_tx == u.bus_rx)
+        {
+            *error = key_of(i, "bus_tx") + " and " + key_of(i, "bus_rx") +
+                     " must differ";
             return false;
         }
         auto budget = parser.as<unsigned>(key_of(i, "scheduler_budget"));
@@ -376,9 +393,10 @@ bool config::load(const std::string& path, std::string* error)
         }
         for (const auto& prev : upstreams)
         {
-            if (memcmp(prev.airport, u.airport, 6) == 0)
+            if (prev.bus_tx == u.bus_tx || prev.bus_rx == u.bus_tx ||
+                prev.bus_tx == u.bus_rx || prev.bus_rx == u.bus_rx)
             {
-                *error = "duplicate airport on upstream-" + std::to_string(i);
+                *error = "duplicate bus on upstream-" + std::to_string(i);
                 return false;
             }
         }

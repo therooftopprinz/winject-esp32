@@ -40,19 +40,19 @@ private:
     void on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type);
     bool accept_mpdu(const uint8_t* mpdu, size_t len) const;
 
-    wifi& radio_;
-    lc_rx* rx_ = nullptr;
+    wifi& radio;
+    lc_rx* rx = nullptr;
     std::atomic<uint16_t> domain_{0};
-    std::atomic<bool> allow_failed_crc_{false};
-    std::atomic<uint32_t> udp_rx_pkt_{0};
-    std::atomic<uint32_t> drop_crc_error_{0};
-    std::atomic<uint32_t> drop_rx_no_pkt_pool_{0};
-    std::atomic<uint32_t> drop_rx_queue_full_{0};
-    std::atomic<uint32_t> udp_fwd_pkt_{0};
-    std::atomic<bool> air_valid_{false};
-    std::atomic<const char*> modulation_{nullptr};
-    std::atomic<int8_t> rssi_{0};
-    std::atomic<int8_t> snr_{0};
+    std::atomic<bool> allow_failed_crc{false};
+    std::atomic<uint32_t> udp_rx_pkt{0};
+    std::atomic<uint32_t> drop_crc_error{0};
+    std::atomic<uint32_t> drop_rx_no_pkt_pool{0};
+    std::atomic<uint32_t> drop_rx_queue_full{0};
+    std::atomic<uint32_t> udp_fwd_pkt{0};
+    std::atomic<bool> air_valid{false};
+    std::atomic<const char*> modulation{nullptr};
+    std::atomic<int8_t> rssi{0};
+    std::atomic<int8_t> snr{0};
 };
 
 #endif  // WINJECT_WIFI_RX_H_

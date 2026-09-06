@@ -29,6 +29,8 @@ add_executable(winject-manager
     radio/wifi_udp.cpp
     tx_scheduler.cpp
     endpoint/tcp_endpoint.cpp
+    endpoint/tcp_client_endpoint.cpp
+    endpoint/tcp_server_endpoint.cpp
     endpoint/udp_endpoint.cpp
     stream/tcp_stream.cpp
 )

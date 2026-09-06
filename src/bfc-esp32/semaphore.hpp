@@ -28,34 +28,34 @@ public:
 
     bool take()
     {
-        mutex_.lock();
+        mutex.lock();
         return true;
     }
 
     void give()
     {
-        mutex_.unlock();
+        mutex.unlock();
     }
 
     class lock
     {
     public:
-        explicit lock(semaphore& sem) : sem_(&sem), owned_(sem.take())
+        explicit lock(semaphore& sem) : sem(&sem), owned(sem.take())
         {
         }
 
         ~lock()
         {
-            if (owned_ && sem_ != nullptr)
+            if (owned && sem != nullptr)
             {
-                sem_->give();
+                sem->give();
             }
         }
 
-        lock(lock&& other) noexcept : sem_(other.sem_), owned_(other.owned_)
+        lock(lock&& other) noexcept : sem(other.sem), owned(other.owned)
         {
-            other.sem_ = nullptr;
-            other.owned_ = false;
+            other.sem = nullptr;
+            other.owned = false;
         }
 
         lock(const lock&) = delete;
@@ -64,16 +64,16 @@ public:
 
         explicit operator bool() const
         {
-            return owned_;
+            return owned;
         }
 
     private:
-        semaphore* sem_;
-        bool owned_;
+        semaphore* sem;
+        bool owned;
     };
 
 private:
-    std::mutex mutex_;
+    std::mutex mutex;
     bool ready_ = false;
 };
 
@@ -98,29 +98,29 @@ public:
 
     bool init()
     {
-        if (handle_ != nullptr)
+        if (handle != nullptr)
         {
             return true;
         }
-        handle_ = xSemaphoreCreateMutex();
-        return handle_ != nullptr;
+        handle = xSemaphoreCreateMutex();
+        return handle != nullptr;
     }
 
     bool ready() const
     {
-        return handle_ != nullptr;
+        return handle != nullptr;
     }
 
     bool take(TickType_t ticks = portMAX_DELAY)
     {
-        return handle_ != nullptr && xSemaphoreTake(handle_, ticks) == pdTRUE;
+        return handle != nullptr && xSemaphoreTake(handle, ticks) == pdTRUE;
     }
 
     void give()
     {
-        if (handle_ != nullptr)
+        if (handle != nullptr)
         {
-            xSemaphoreGive(handle_);
+            xSemaphoreGive(handle);
         }
     }
 
@@ -128,22 +128,22 @@ public:
     {
     public:
         explicit lock(semaphore& sem, TickType_t ticks = portMAX_DELAY)
-            : sem_(&sem), owned_(sem.take(ticks))
+            : sem(&sem), owned(sem.take(ticks))
         {
         }
 
         ~lock()
         {
-            if (owned_ && sem_ != nullptr)
+            if (owned && sem != nullptr)
             {
-                sem_->give();
+                sem->give();
             }
         }
 
-        lock(lock&& other) noexcept : sem_(other.sem_), owned_(other.owned_)
+        lock(lock&& other) noexcept : sem(other.sem), owned(other.owned)
         {
-            other.sem_ = nullptr;
-            other.owned_ = false;
+            other.sem = nullptr;
+            other.owned = false;
         }
 
         lock(const lock&) = delete;
@@ -152,16 +152,16 @@ public:
 
         explicit operator bool() const
         {
-            return owned_;
+            return owned;
         }
 
     private:
-        semaphore* sem_;
-        bool owned_;
+        semaphore* sem;
+        bool owned;
     };
 
 private:
-    SemaphoreHandle_t handle_ = nullptr;
+    SemaphoreHandle_t handle = nullptr;
 };
 
 }  // namespace bfc

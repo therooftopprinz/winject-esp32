@@ -18,7 +18,7 @@ lc_rx& lc_rx::instance()
 
 bool lc_rx::init()
 {
-    return q_.init();
+    return q.init();
 }
 
 void lc_rx::task(void* arg)
@@ -52,17 +52,17 @@ void lc_rx::run()
 
 void lc_rx::set_endpoint(lc_rx_endpoint& ep)
 {
-    ep_ = &ep;
+    this->ep = &ep;
 }
 
 bool lc_rx::rx(packet&& pkt)
 {
-    if (!q_.ready() || !pkt.is_valid())
+    if (!q.ready() || !pkt.is_valid())
     {
         drop_count_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    if (!q_.try_push(std::optional<packet>(std::move(pkt))))
+    if (!q.try_push(std::optional<packet>(std::move(pkt))))
     {
         drop_count_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -97,7 +97,7 @@ void lc_rx::handle_mpdu(packet&& mpdu)
         }
     }
 
-    if (ep_ == nullptr)
+    if (ep == nullptr)
     {
         return;
     }
@@ -112,7 +112,7 @@ void lc_rx::handle_mpdu(packet&& mpdu)
         packet pdu = mpdu.share();
         pdu.set_packet_offset(off);
         pdu.set_packet_size(slots[i].size);
-        ep_->forward(slots[i].bus, std::move(pdu));
+        ep->forward(slots[i].bus, std::move(pdu));
         off += slots[i].size;
     }
 }
@@ -121,7 +121,7 @@ packet lc_rx::pop(TickType_t wait)
 {
     packet out;
     std::optional<packet> slot;
-    if (!q_.pop(&slot, wait) || !slot.has_value())
+    if (!q.pop(&slot, wait) || !slot.has_value())
     {
         return out;
     }
@@ -130,7 +130,7 @@ packet lc_rx::pop(TickType_t wait)
 
 uint8_t lc_rx::queue_size() const
 {
-    return q_.size();
+    return q.size();
 }
 
 uint32_t lc_rx::drop_count() const

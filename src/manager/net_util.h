@@ -12,9 +12,15 @@ constexpr size_t k_wifi_payload_max = 1476;
 
 bool parse_host_port(const std::string& text, sockaddr_in* out);
 bool parse_host(const std::string& text, in_addr* out);
-bool parse_airport(const std::string& text, uint8_t mac[6]);
-bool airport_is_zero(const uint8_t mac[6]);
-std::string airport_to_string(const uint8_t mac[6]);
+// Bus / lcid: 1–2 hex digits (optional 0x). Broadcast 0 is allowed for parse
+// but manager configs reject it for bus_tx / bus_rx.
+bool parse_bus(const std::string& text, uint8_t* bus);
+// Domain: hex 1…65535 (optional 0x).
+bool parse_domain(const std::string& text, uint16_t* domain);
+// Console `bus=` value (lowercase hex, no 0x).
+std::string bus_to_string(uint8_t bus);
+// Console `set_domain` value (lowercase 1–4 hex digits).
+std::string domain_to_string(uint16_t domain);
 std::string sockaddr_to_string(const sockaddr_in& addr);
 std::string ipv4_to_string(in_addr addr);
 bool set_nonblock(int fd);

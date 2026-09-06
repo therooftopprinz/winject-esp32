@@ -29,19 +29,19 @@ class reactive_task_queue : public reactive_task_queue_base<cb_t>
 public:
     reactive_task_queue()
     {
-        queue_lock_ = xSemaphoreCreateMutex();
-        cb_lock_ = xSemaphoreCreateMutex();
+        queue_lock = xSemaphoreCreateMutex();
+        cb_lock = xSemaphoreCreateMutex();
     }
 
     ~reactive_task_queue()
     {
-        if (queue_lock_ != nullptr)
+        if (queue_lock != nullptr)
         {
-            vSemaphoreDelete(queue_lock_);
+            vSemaphoreDelete(queue_lock);
         }
-        if (cb_lock_ != nullptr)
+        if (cb_lock != nullptr)
         {
-            vSemaphoreDelete(cb_lock_);
+            vSemaphoreDelete(cb_lock);
         }
     }
 
@@ -51,74 +51,74 @@ public:
     template <typename U>
     size_t push(U&& u)
     {
-        if (queue_lock_ == nullptr ||
-            xSemaphoreTake(queue_lock_, portMAX_DELAY) != pdTRUE)
+        if (queue_lock == nullptr ||
+            xSemaphoreTake(queue_lock, portMAX_DELAY) != pdTRUE)
         {
             return 0;
         }
-        queue_.emplace_back(std::forward<U>(u));
-        const size_t n = queue_.size();
-        xSemaphoreGive(queue_lock_);
+        queue.emplace_back(std::forward<U>(u));
+        const size_t n = queue.size();
+        xSemaphoreGive(queue_lock);
         return n;
     }
 
     std::vector<T> pop()
     {
         std::vector<T> out;
-        if (queue_lock_ == nullptr ||
-            xSemaphoreTake(queue_lock_, portMAX_DELAY) != pdTRUE)
+        if (queue_lock == nullptr ||
+            xSemaphoreTake(queue_lock, portMAX_DELAY) != pdTRUE)
         {
             return out;
         }
-        out = std::move(queue_);
-        xSemaphoreGive(queue_lock_);
+        out = std::move(queue);
+        xSemaphoreGive(queue_lock);
         return out;
     }
 
     size_t size()
     {
-        if (queue_lock_ == nullptr ||
-            xSemaphoreTake(queue_lock_, portMAX_DELAY) != pdTRUE)
+        if (queue_lock == nullptr ||
+            xSemaphoreTake(queue_lock, portMAX_DELAY) != pdTRUE)
         {
             return 0;
         }
-        const size_t n = queue_.size();
-        xSemaphoreGive(queue_lock_);
+        const size_t n = queue.size();
+        xSemaphoreGive(queue_lock);
         return n;
     }
 
     void set_callback(cb_t cb) override
     {
-        if (cb_lock_ == nullptr ||
-            xSemaphoreTake(cb_lock_, portMAX_DELAY) != pdTRUE)
+        if (cb_lock == nullptr ||
+            xSemaphoreTake(cb_lock, portMAX_DELAY) != pdTRUE)
         {
             return;
         }
-        cb_ = std::move(cb);
-        xSemaphoreGive(cb_lock_);
+        this->cb = std::move(cb);
+        xSemaphoreGive(cb_lock);
     }
 
     bool has_data() override
     {
-        if (queue_lock_ == nullptr ||
-            xSemaphoreTake(queue_lock_, portMAX_DELAY) != pdTRUE)
+        if (queue_lock == nullptr ||
+            xSemaphoreTake(queue_lock, portMAX_DELAY) != pdTRUE)
         {
             return false;
         }
-        const bool ok = !queue_.empty();
-        xSemaphoreGive(queue_lock_);
+        const bool ok = !queue.empty();
+        xSemaphoreGive(queue_lock);
         return ok;
     }
 
     void notify_callback() override
     {
-        if (cb_lock_ == nullptr ||
-            xSemaphoreTake(cb_lock_, portMAX_DELAY) != pdTRUE)
+        if (cb_lock == nullptr ||
+            xSemaphoreTake(cb_lock, portMAX_DELAY) != pdTRUE)
         {
             return;
         }
-        cb_t cb = cb_;
-        xSemaphoreGive(cb_lock_);
+        cb_t cb = this->cb;
+        xSemaphoreGive(cb_lock);
         if (cb)
         {
             cb();
@@ -126,10 +126,10 @@ public:
     }
 
 private:
-    SemaphoreHandle_t queue_lock_ = nullptr;
-    SemaphoreHandle_t cb_lock_ = nullptr;
-    std::vector<T> queue_;
-    cb_t cb_ = nullptr;
+    SemaphoreHandle_t queue_lock = nullptr;
+    SemaphoreHandle_t cb_lock = nullptr;
+    std::vector<T> queue;
+    cb_t cb = nullptr;
 };
 
 // Blocking (or polled) queue. The waiter uses this task's notification
@@ -138,16 +138,16 @@ template <typename T>
 class task_queue
 {
 public:
-    explicit task_queue(bool blocking = true) : blocking_(blocking)
+    explicit task_queue(bool blocking = true) : blocking(blocking)
     {
-        lock_ = xSemaphoreCreateMutex();
+        lock = xSemaphoreCreateMutex();
     }
 
     ~task_queue()
     {
-        if (lock_ != nullptr)
+        if (lock != nullptr)
         {
-            vSemaphoreDelete(lock_);
+            vSemaphoreDelete(lock);
         }
     }
 
@@ -157,15 +157,15 @@ public:
     template <typename U>
     size_t push(U&& u)
     {
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return 0;
         }
-        queue_.emplace_back(std::forward<U>(u));
-        const size_t n = queue_.size();
-        const TaskHandle_t waiter = waiter_;
-        xSemaphoreGive(lock_);
-        if (blocking_ && waiter != nullptr)
+        queue.emplace_back(std::forward<U>(u));
+        const size_t n = queue.size();
+        const TaskHandle_t waiter = this->waiter;
+        xSemaphoreGive(lock);
+        if (blocking && waiter != nullptr)
         {
             xTaskNotifyGive(waiter);
         }
@@ -175,48 +175,48 @@ public:
     std::vector<T> pop()
     {
         std::vector<T> out;
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return out;
         }
-        while (blocking_ && queue_.empty())
+        while (blocking && queue.empty())
         {
-            waiter_ = xTaskGetCurrentTaskHandle();
-            xSemaphoreGive(lock_);
+            waiter = xTaskGetCurrentTaskHandle();
+            xSemaphoreGive(lock);
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-            if (xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+            if (xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
             {
                 return out;
             }
         }
-        waiter_ = nullptr;
-        out = std::move(queue_);
-        xSemaphoreGive(lock_);
+        waiter = nullptr;
+        out = std::move(queue);
+        xSemaphoreGive(lock);
         return out;
     }
 
     size_t size()
     {
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return 0;
         }
-        const size_t n = queue_.size();
-        xSemaphoreGive(lock_);
+        const size_t n = queue.size();
+        xSemaphoreGive(lock);
         return n;
     }
 
     void wake_up()
     {
-        if (!blocking_)
+        if (!blocking)
         {
             return;
         }
         TaskHandle_t waiter = nullptr;
-        if (lock_ != nullptr && xSemaphoreTake(lock_, portMAX_DELAY) == pdTRUE)
+        if (lock != nullptr && xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
         {
-            waiter = waiter_;
-            xSemaphoreGive(lock_);
+            waiter = this->waiter;
+            xSemaphoreGive(lock);
         }
         if (waiter != nullptr)
         {
@@ -225,10 +225,10 @@ public:
     }
 
 private:
-    bool blocking_ = true;
-    SemaphoreHandle_t lock_ = nullptr;
-    TaskHandle_t waiter_ = nullptr;
-    std::vector<T> queue_;
+    bool blocking = true;
+    SemaphoreHandle_t lock = nullptr;
+    TaskHandle_t waiter = nullptr;
+    std::vector<T> queue;
 };
 
 }  // namespace bfc

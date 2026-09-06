@@ -42,7 +42,7 @@ public:
     RulesWriter()
     {
         g_writeLock.init();
-        owned_ = g_writeLock.take();
+        owned = g_writeLock.take();
         g_seqlock.fetch_add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
     }
@@ -50,7 +50,7 @@ public:
     ~RulesWriter()
     {
         g_seqlock.fetch_add(1, std::memory_order_release);
-        if (owned_)
+        if (owned)
         {
             g_writeLock.give();
         }
@@ -60,7 +60,7 @@ public:
     RulesWriter& operator=(const RulesWriter&) = delete;
 
 private:
-    bool owned_ = false;
+    bool owned = false;
 };
 
 static bool snapshot_rules(FrameRules* out)

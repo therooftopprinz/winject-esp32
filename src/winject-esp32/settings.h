@@ -67,15 +67,15 @@ private:
     bool read_blob(uint8_t slot, snapshot_s* snap);
     bool write_blob(uint8_t slot, const snapshot_s& snap);
 
-    lc_tx_endpoint& sut_;
-    lc_rx_endpoint& sur_;
-    channel_info_endpoint& ci_;
-    manager& netmgr_;
+    lc_tx_endpoint& sut;
+    lc_rx_endpoint& sur;
+    channel_info_endpoint& ci;
+    manager& netmgr;
     uint8_t current_slot_ = 0;
-    bool has_loaded_ = false;
-    snapshot_s loaded_{};
-    snapshot_s scratch_{};
-    uint8_t blob_[k_blob_max]{};
+    bool has_loaded = false;
+    snapshot_s loaded{};
+    snapshot_s scratch{};
+    uint8_t blob[k_blob_max]{};
 };
 
 #endif  // WINJECT_SETTINGS_H_

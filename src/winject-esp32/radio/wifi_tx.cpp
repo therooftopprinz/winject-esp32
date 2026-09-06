@@ -32,11 +32,11 @@ extern "C"
     void phy_enable_cca(void) __attribute__((weak));
 }
 
-wifi_tx::wifi_tx(wifi& radio) : radio_(radio) {}
+wifi_tx::wifi_tx(wifi& radio) : radio(radio) {}
 
 int8_t wifi_tx::power_dbm() const
 {
-    return tx_power_dbm_;
+    return tx_power_dbm;
 }
 
 bool wifi_tx::set_domain(uint16_t domain)
@@ -52,18 +52,18 @@ uint16_t wifi_tx::domain() const
 
 bool wifi_tx::apply_power()
 {
-    esp_err_t err = radio_.apply_country();
+    esp_err_t err = radio.apply_country();
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "set_country failed: %s", esp_err_to_name(err));
         return false;
     }
 
-    const int8_t quarter_dbm = static_cast<int8_t>(tx_power_dbm_ * 4);
+    const int8_t quarter_dbm = static_cast<int8_t>(tx_power_dbm * 4);
     err = esp_wifi_set_max_tx_power(quarter_dbm);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "set_max_tx_power %d dBm failed: %s", tx_power_dbm_,
+        ESP_LOGE(TAG, "set_max_tx_power %d dBm failed: %s", tx_power_dbm,
                  esp_err_to_name(err));
         return false;
     }
@@ -72,19 +72,19 @@ bool wifi_tx::apply_power()
 
 bool wifi_tx::apply_cca()
 {
-    const int err = hal_mac_tx_set_cca(cca_enabled_ ? 1 : 0);
+    const int err = hal_mac_tx_set_cca(cca_enabled ? 1 : 0);
     if (err != 0)
     {
         ESP_LOGE(TAG, "hal_mac_tx_set_cca failed: %d", err);
         return false;
     }
 
-    if (cca_enabled_)
+    if (cca_enabled)
     {
-        if (phy_cca_off_ && phy_enable_cca)
+        if (phy_cca_off && phy_enable_cca)
         {
             phy_enable_cca();
-            phy_cca_off_ = false;
+            phy_cca_off = false;
         }
         return true;
     }
@@ -92,19 +92,19 @@ bool wifi_tx::apply_cca()
     if (esp_rom_phy_disable_cca)
     {
         esp_rom_phy_disable_cca();
-        phy_cca_off_ = true;
+        phy_cca_off = true;
     }
     else if (phy_disable_cca)
     {
         phy_disable_cca();
-        phy_cca_off_ = true;
+        phy_cca_off = true;
     }
     return true;
 }
 
 bool wifi_tx::init(lc_tx& tx)
 {
-    tx_ = &tx;
+    this->tx = &tx;
     return true;
 }
 
@@ -128,7 +128,7 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
         uint16_t seq = 0;
         const bool have_seq = seq_of(frame, len, &seq);
         {
-            bfc::semaphore::lock lock(radio_.lock(), pdMS_TO_TICKS(50));
+            bfc::semaphore::lock lock(radio.lock, pdMS_TO_TICKS(50));
             if (!lock)
             {
                 vTaskDelay(1);
@@ -139,7 +139,7 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
                 note_submit(seq);
             }
         }
-        // Do not hold radio_.lock() across 80211_tx: that call posts into the
+        // Do not hold radio.lock across 80211_tx: that call posts into the
         // Wi-Fi task (same core as TX-done / promiscuous). A lock inversion
         // there stalls completions, so the driver ring never drains.
         const esp_err_t err = esp_wifi_80211_tx(
@@ -155,25 +155,25 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
             cancel_submit(seq);
         }
         retries++;
-        tx_retry_count_.fetch_add(1, std::memory_order_relaxed);
+        tx_retry_count.fetch_add(1, std::memory_order_relaxed);
         if (err == ESP_ERR_NO_MEM)
         {
-            tx_retry_nomem_.fetch_add(1, std::memory_order_relaxed);
+            tx_retry_nomem.fetch_add(1, std::memory_order_relaxed);
             udp_logger::instance().log(
                 log_level_e::warn,
                 "tx_retry err=NO_MEM retries=%d in_flight=%u q=%u", retries,
-                static_cast<unsigned>(in_flight_.load(std::memory_order_relaxed)),
-                tx_ != nullptr ? static_cast<unsigned>(tx_->queue_size()) : 0u);
+                static_cast<unsigned>(in_flight.load(std::memory_order_relaxed)),
+                tx != nullptr ? static_cast<unsigned>(tx->queue_size()) : 0u);
             vTaskDelay(1);
             continue;
         }
-        tx_retry_other_.fetch_add(1, std::memory_order_relaxed);
+        tx_retry_other.fetch_add(1, std::memory_order_relaxed);
         udp_logger::instance().log(
             log_level_e::warn,
             "tx_retry err=%s retries=%d in_flight=%u q=%u", esp_err_to_name(err),
             retries,
-            static_cast<unsigned>(in_flight_.load(std::memory_order_relaxed)),
-            tx_ != nullptr ? static_cast<unsigned>(tx_->queue_size()) : 0u);
+            static_cast<unsigned>(in_flight.load(std::memory_order_relaxed)),
+            tx != nullptr ? static_cast<unsigned>(tx->queue_size()) : 0u);
         if (++fail_tries >= WIFI_RADIO_INJECT_RETRIES)
         {
             break;
@@ -185,14 +185,14 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
     const uint64_t dt = t1 > t0 ? t1 - t0 : 0;
     if (dt > 0 && dt <= 30000000ull)
     {
-        const uint32_t slot = inject_wait_next_.fetch_add(
+        const uint32_t slot = inject_wait_next.fetch_add(
                                   1, std::memory_order_relaxed) %
                               kInjectWaitSamples;
-        inject_wait_us_[slot].store(static_cast<uint32_t>(dt),
+        inject_wait_us[slot].store(static_cast<uint32_t>(dt),
                                     std::memory_order_relaxed);
-        uint32_t n = inject_wait_count_.load(std::memory_order_relaxed);
+        uint32_t n = inject_wait_count.load(std::memory_order_relaxed);
         while (n < kInjectWaitSamples &&
-               !inject_wait_count_.compare_exchange_weak(
+               !inject_wait_count.compare_exchange_weak(
                    n, n + 1, std::memory_order_relaxed))
         {
         }
@@ -200,7 +200,7 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
 
     if (ok)
     {
-        inject_ok_.fetch_add(1, std::memory_order_relaxed);
+        inject_ok.fetch_add(1, std::memory_order_relaxed);
         if (retries > 0)
         {
             udp_logger::instance().log(
@@ -208,7 +208,7 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
                 "tx_ok after_retries=%d wait_us=%u in_flight=%u", retries,
                 static_cast<unsigned>(dt),
                 static_cast<unsigned>(
-                    in_flight_.load(std::memory_order_relaxed)));
+                    in_flight.load(std::memory_order_relaxed)));
         }
         else
         {
@@ -216,18 +216,18 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
                 log_level_e::debug, "tx_ok wait_us=%u in_flight=%u",
                 static_cast<unsigned>(dt),
                 static_cast<unsigned>(
-                    in_flight_.load(std::memory_order_relaxed)));
+                    in_flight.load(std::memory_order_relaxed)));
         }
     }
     else
     {
-        inject_fail_.fetch_add(1, std::memory_order_relaxed);
+        inject_fail.fetch_add(1, std::memory_order_relaxed);
         udp_logger::instance().log(
             log_level_e::error,
             "tx_fail err=%s retries=%d wait_us=%u in_flight=%u q=%u",
             esp_err_to_name(last_err), retries, static_cast<unsigned>(dt),
-            static_cast<unsigned>(in_flight_.load(std::memory_order_relaxed)),
-            tx_ != nullptr ? static_cast<unsigned>(tx_->queue_size()) : 0u);
+            static_cast<unsigned>(in_flight.load(std::memory_order_relaxed)),
+            tx != nullptr ? static_cast<unsigned>(tx->queue_size()) : 0u);
     }
     return ok;
 }
@@ -237,14 +237,14 @@ void wifi_tx::run()
     uint32_t consecutive_ok = 0;
     for (;;)
     {
-        if (tx_ == nullptr)
+        if (tx == nullptr)
         {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
         bus_t bus = 0;
-        packet out = tx_->pop(&bus, portMAX_DELAY);
+        packet out = tx->pop(&bus, portMAX_DELAY);
         if (!out.is_valid())
         {
             continue;
@@ -261,13 +261,13 @@ void wifi_tx::run()
         {
             bus_t next = 0;
             uint16_t nsz = 0;
-            if (!tx_->peek(&next, &nsz) ||
+            if (!tx->peek(&next, &nsz) ||
                 out.size() + nsz > WIFI_PAYLOAD_MAX)
             {
                 break;
             }
             bus_t dbus = 0;
-            packet donor = tx_->pop(&dbus, 0);
+            packet donor = tx->pop(&dbus, 0);
             if (!donor.is_valid())
             {
                 break;
@@ -282,7 +282,7 @@ void wifi_tx::run()
         const bool ok = inject_retry(out.data(), out.size());
         if (ok)
         {
-            radio_.pulse_tx_led();
+            radio.pulse_tx_led();
             consecutive_ok++;
             if ((consecutive_ok & 31u) == 0)
             {
@@ -296,7 +296,7 @@ void wifi_tx::run()
         else
         {
             consecutive_ok = 0;
-            drop_tx_nomem_.fetch_add(1, std::memory_order_relaxed);
+            drop_tx_nomem.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -308,7 +308,7 @@ void wifi_tx::task(void* arg)
 
 bool wifi_tx::start(BaseType_t core, UBaseType_t prio, uint32_t stack_bytes)
 {
-    if (tx_ == nullptr)
+    if (tx == nullptr)
     {
         ESP_LOGE(TAG, "wifi_tx start without lc_tx");
         return false;
@@ -328,22 +328,22 @@ void wifi_tx::fill_status(wifi_status_s* status)
     {
         return;
     }
-    status->cca_enabled = cca_enabled_;
-    status->tx_power_dbm = tx_power_dbm_;
-    status->udp_tx_pkt = udp_tx_pkt_.load(std::memory_order_relaxed);
-    status->drop_tx_nomem = drop_tx_nomem_.load(std::memory_order_relaxed);
-    status->tx_retry_count = tx_retry_count_.load(std::memory_order_relaxed);
-    status->tx_retry_nomem = tx_retry_nomem_.load(std::memory_order_relaxed);
-    status->tx_retry_other = tx_retry_other_.load(std::memory_order_relaxed);
-    status->inject_ok = inject_ok_.load(std::memory_order_relaxed);
-    status->inject_fail = inject_fail_.load(std::memory_order_relaxed);
+    status->cca_enabled = cca_enabled;
+    status->tx_power_dbm = tx_power_dbm;
+    status->udp_tx_pkt = udp_tx_pkt.load(std::memory_order_relaxed);
+    status->drop_tx_nomem = drop_tx_nomem.load(std::memory_order_relaxed);
+    status->tx_retry_count = tx_retry_count.load(std::memory_order_relaxed);
+    status->tx_retry_nomem = tx_retry_nomem.load(std::memory_order_relaxed);
+    status->tx_retry_other = tx_retry_other.load(std::memory_order_relaxed);
+    status->inject_ok = inject_ok.load(std::memory_order_relaxed);
+    status->inject_fail = inject_fail.load(std::memory_order_relaxed);
     status->tx_in_flight =
-        static_cast<uint16_t>(in_flight_.load(std::memory_order_relaxed));
+        static_cast<uint16_t>(in_flight.load(std::memory_order_relaxed));
     status->tx_queue =
-        tx_ != nullptr ? static_cast<uint16_t>(tx_->queue_size()) : 0;
+        tx != nullptr ? static_cast<uint16_t>(tx->queue_size()) : 0;
     status->domain = domain_.load(std::memory_order_relaxed);
 
-    const uint32_t n = latency_count_.load(std::memory_order_relaxed);
+    const uint32_t n = latency_count.load(std::memory_order_relaxed);
     if (n == 0)
     {
         status->tx_latency_valid = false;
@@ -354,13 +354,13 @@ void wifi_tx::fill_status(wifi_status_s* status)
         uint64_t sum = 0;
         for (uint32_t i = 0; i < n; i++)
         {
-            sum += latency_us_[i].load(std::memory_order_relaxed);
+            sum += latency_us[i].load(std::memory_order_relaxed);
         }
         status->tx_latency_valid = true;
         status->tx_latency_us = static_cast<uint32_t>(sum / n);
     }
 
-    const uint32_t wn = inject_wait_count_.load(std::memory_order_relaxed);
+    const uint32_t wn = inject_wait_count.load(std::memory_order_relaxed);
     if (wn == 0)
     {
         status->inject_wait_valid = false;
@@ -370,7 +370,7 @@ void wifi_tx::fill_status(wifi_status_s* status)
     uint64_t wsum = 0;
     for (uint32_t i = 0; i < wn; i++)
     {
-        wsum += inject_wait_us_[i].load(std::memory_order_relaxed);
+        wsum += inject_wait_us[i].load(std::memory_order_relaxed);
     }
     status->inject_wait_valid = true;
     status->inject_wait_us = static_cast<uint32_t>(wsum / wn);
@@ -378,37 +378,37 @@ void wifi_tx::fill_status(wifi_status_s* status)
 
 void wifi_tx::note_udp_tx_pkt()
 {
-    udp_tx_pkt_.fetch_add(1, std::memory_order_relaxed);
+    udp_tx_pkt.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool wifi_tx::set_cca_enabled(bool enabled)
 {
-    if (!radio_.ready())
+    if (!radio.ready())
     {
         return false;
     }
-    if (cca_enabled_ == enabled)
+    if (cca_enabled == enabled)
     {
         return true;
     }
-    bfc::semaphore::lock lock(radio_.lock(), pdMS_TO_TICKS(1000));
+    bfc::semaphore::lock lock(radio.lock, pdMS_TO_TICKS(1000));
     if (!lock)
     {
         return false;
     }
-    const bool previous = cca_enabled_;
-    cca_enabled_ = enabled;
+    const bool previous = cca_enabled;
+    cca_enabled = enabled;
     const bool ok = apply_cca();
     if (!ok)
     {
-        cca_enabled_ = previous;
+        cca_enabled = previous;
     }
     return ok;
 }
 
 bool wifi_tx::set_tx_power(int8_t dbm)
 {
-    if (!radio_.ready())
+    if (!radio.ready())
     {
         return false;
     }
@@ -416,21 +416,21 @@ bool wifi_tx::set_tx_power(int8_t dbm)
     {
         return false;
     }
-    if (tx_power_dbm_ == dbm)
+    if (tx_power_dbm == dbm)
     {
         return true;
     }
-    bfc::semaphore::lock lock(radio_.lock(), pdMS_TO_TICKS(1000));
+    bfc::semaphore::lock lock(radio.lock, pdMS_TO_TICKS(1000));
     if (!lock)
     {
         return false;
     }
-    const int8_t previous = tx_power_dbm_;
-    tx_power_dbm_ = dbm;
+    const int8_t previous = tx_power_dbm;
+    tx_power_dbm = dbm;
     const bool ok = apply_power();
     if (!ok)
     {
-        tx_power_dbm_ = previous;
+        tx_power_dbm = previous;
         apply_power();
     }
     return ok;
@@ -450,11 +450,11 @@ bool wifi_tx::seq_of(const uint8_t* frame, size_t len, uint16_t* seq)
 void wifi_tx::record_latency(uint32_t us)
 {
     const uint32_t slot =
-        latency_next_.fetch_add(1, std::memory_order_relaxed) % kLatencySamples;
-    latency_us_[slot].store(us, std::memory_order_relaxed);
-    uint32_t n = latency_count_.load(std::memory_order_relaxed);
+        latency_next.fetch_add(1, std::memory_order_relaxed) % kLatencySamples;
+    latency_us[slot].store(us, std::memory_order_relaxed);
+    uint32_t n = latency_count.load(std::memory_order_relaxed);
     while (n < kLatencySamples &&
-           !latency_count_.compare_exchange_weak(n, n + 1,
+           !latency_count.compare_exchange_weak(n, n + 1,
                                                  std::memory_order_relaxed))
     {
     }
@@ -465,35 +465,35 @@ void wifi_tx::note_submit(uint16_t seq)
     const size_t idx = static_cast<size_t>(seq) & (kPendingCap - 1);
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
     uint8_t hol = 0;
-    if (pending_used_[idx].load(std::memory_order_acquire) != 0)
+    if (pending_used[idx].load(std::memory_order_acquire) != 0)
     {
         hol = 0;
     }
-    else if (in_flight_.fetch_add(1, std::memory_order_relaxed) == 0)
+    else if (in_flight.fetch_add(1, std::memory_order_relaxed) == 0)
     {
         hol = 1;
     }
-    pending_t0_us_[idx].store(now, std::memory_order_relaxed);
-    pending_seq_[idx].store(seq, std::memory_order_relaxed);
-    pending_hol_[idx].store(hol, std::memory_order_relaxed);
-    pending_used_[idx].store(1, std::memory_order_release);
+    pending_t0_us[idx].store(now, std::memory_order_relaxed);
+    pending_seq[idx].store(seq, std::memory_order_relaxed);
+    pending_hol[idx].store(hol, std::memory_order_relaxed);
+    pending_used[idx].store(1, std::memory_order_release);
 }
 
 void wifi_tx::cancel_submit(uint16_t seq)
 {
     const size_t idx = static_cast<size_t>(seq) & (kPendingCap - 1);
-    if (pending_used_[idx].load(std::memory_order_acquire) == 0)
+    if (pending_used[idx].load(std::memory_order_acquire) == 0)
     {
         return;
     }
-    if (pending_seq_[idx].load(std::memory_order_relaxed) != seq)
+    if (pending_seq[idx].load(std::memory_order_relaxed) != seq)
     {
         return;
     }
-    pending_used_[idx].store(0, std::memory_order_relaxed);
-    uint32_t n = in_flight_.load(std::memory_order_relaxed);
+    pending_used[idx].store(0, std::memory_order_relaxed);
+    uint32_t n = in_flight.load(std::memory_order_relaxed);
     while (n > 0 &&
-           !in_flight_.compare_exchange_weak(n, n - 1,
+           !in_flight.compare_exchange_weak(n, n - 1,
                                              std::memory_order_relaxed))
     {
     }
@@ -502,25 +502,25 @@ void wifi_tx::cancel_submit(uint16_t seq)
 void wifi_tx::note_done(uint16_t seq)
 {
     const size_t idx = static_cast<size_t>(seq) & (kPendingCap - 1);
-    if (pending_used_[idx].load(std::memory_order_acquire) == 0)
+    if (pending_used[idx].load(std::memory_order_acquire) == 0)
     {
         return;
     }
-    if (pending_seq_[idx].load(std::memory_order_relaxed) != seq)
+    if (pending_seq[idx].load(std::memory_order_relaxed) != seq)
     {
         return;
     }
-    pending_used_[idx].store(0, std::memory_order_relaxed);
-    const bool hol = pending_hol_[idx].load(std::memory_order_relaxed) != 0;
-    const uint64_t t0 = pending_t0_us_[idx].load(std::memory_order_relaxed);
+    pending_used[idx].store(0, std::memory_order_relaxed);
+    const bool hol = pending_hol[idx].load(std::memory_order_relaxed) != 0;
+    const uint64_t t0 = pending_t0_us[idx].load(std::memory_order_relaxed);
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-    uint32_t n = in_flight_.load(std::memory_order_relaxed);
+    uint32_t n = in_flight.load(std::memory_order_relaxed);
     while (n > 0 &&
-           !in_flight_.compare_exchange_weak(n, n - 1,
+           !in_flight.compare_exchange_weak(n, n - 1,
                                              std::memory_order_relaxed))
     {
     }
-    const uint64_t prev = last_done_us_.exchange(now, std::memory_order_relaxed);
+    const uint64_t prev = last_done_us.exchange(now, std::memory_order_relaxed);
 
     uint64_t dt = 0;
     if (hol)
@@ -552,7 +552,7 @@ void wifi_tx::on_tx_done(const esp_80211_tx_info_t* info)
     {
         return;
     }
-    wifi::instance().tx_.note_done(seq);
+    wifi::instance().tx.note_done(seq);
 }
 
 bool wifi_tx::apply_tx_done_cb()

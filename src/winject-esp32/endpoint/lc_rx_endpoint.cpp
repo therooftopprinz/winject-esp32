@@ -20,11 +20,11 @@ lc_rx_endpoint& lc_rx_endpoint::instance()
 
 bool lc_rx_endpoint::ensure_socket()
 {
-    if (send_sock_.valid())
+    if (send_sock.valid())
     {
         return true;
     }
-    if (!send_sock_.open_udp(htonl(INADDR_ANY), 0))
+    if (!send_sock.open_udp(htonl(INADDR_ANY), 0))
     {
         ESP_LOGE(TAG, "udp send socket failed: %d", errno);
         return false;
@@ -36,7 +36,7 @@ int lc_rx_endpoint::find_exact(bus_t bus, ip_port_t dest) const
 {
     for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
-        if (ep_[i].used && ep_[i].bus == bus && ip_port_eq(ep_[i].dest, dest))
+        if (ep[i].used && ep[i].bus == bus && ip_port_eq(ep[i].dest, dest))
         {
             return i;
         }
@@ -48,7 +48,7 @@ int lc_rx_endpoint::find_free() const
 {
     for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
-        if (!ep_[i].used)
+        if (!ep[i].used)
         {
             return i;
         }
@@ -71,7 +71,7 @@ void lc_rx_endpoint::send_one(entry_s& e, const uint8_t* data, size_t len)
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = e.dest.host;
     addr.sin_port = htons(e.dest.port);
-    const ssize_t n = send_sock_.send(data, len, 0,
+    const ssize_t n = send_sock.send(data, len, 0,
                                       reinterpret_cast<const sockaddr*>(&addr),
                                       sizeof(addr));
     if (n == static_cast<ssize_t>(len))
@@ -88,17 +88,17 @@ void lc_rx_endpoint::send_one(entry_s& e, const uint8_t* data, size_t len)
 
 bool lc_rx_endpoint::init()
 {
-    return lock_.init();
+    return lock.init();
 }
 
 bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
 {
     if (dest.port == 0 || dest.host == 0 || dest.host == 0xFFFFFFFFu ||
-        !lock_.ready())
+        !lock.ready())
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock);
     if (!lock)
     {
         return false;
@@ -113,10 +113,10 @@ bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
         ESP_LOGE(TAG, "rx bind table full");
         return false;
     }
-    ep_[idx].used = true;
-    ep_[idx].bus = bus;
-    ep_[idx].dest = dest;
-    ep_[idx].drop_send_fail.store(0, std::memory_order_relaxed);
+    ep[idx].used = true;
+    ep[idx].bus = bus;
+    ep[idx].dest = dest;
+    ep[idx].drop_send_fail.store(0, std::memory_order_relaxed);
 
     char ip_str[16];
     const uint8_t* b = reinterpret_cast<const uint8_t*>(&dest.host);
@@ -127,11 +127,11 @@ bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
 
 bool lc_rx_endpoint::rem_endpoint(bus_t bus)
 {
-    if (!lock_.ready())
+    if (!lock.ready())
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock);
     if (!lock)
     {
         return false;
@@ -139,12 +139,12 @@ bool lc_rx_endpoint::rem_endpoint(bus_t bus)
     bool any = false;
     for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
-        if (ep_[i].used && ep_[i].bus == bus)
+        if (ep[i].used && ep[i].bus == bus)
         {
-            ep_[i].used = false;
-            ep_[i].bus = 0;
-            ep_[i].dest = {};
-            ep_[i].drop_send_fail.store(0, std::memory_order_relaxed);
+            ep[i].used = false;
+            ep[i].bus = 0;
+            ep[i].dest = {};
+            ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
             any = true;
         }
     }
@@ -154,29 +154,29 @@ bool lc_rx_endpoint::rem_endpoint(bus_t bus)
 
 bool lc_rx_endpoint::load(const lc_rx_bind_s* binds, uint8_t count)
 {
-    if (!lock_.ready() || count > WIFI_AIRPORT_MAX ||
+    if (!lock.ready() || count > WIFI_AIRPORT_MAX ||
         (count > 0 && binds == nullptr))
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock);
     if (!lock)
     {
         return false;
     }
     for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
-        ep_[i].used = false;
-        ep_[i].bus = 0;
-        ep_[i].dest = {};
-        ep_[i].drop_send_fail.store(0, std::memory_order_relaxed);
+        ep[i].used = false;
+        ep[i].bus = 0;
+        ep[i].dest = {};
+        ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
     }
     for (uint8_t i = 0; i < count; i++)
     {
-        ep_[i].used = true;
-        ep_[i].bus = binds[i].bus;
-        ep_[i].dest = binds[i].dest;
-        ep_[i].drop_send_fail.store(0, std::memory_order_relaxed);
+        ep[i].used = true;
+        ep[i].bus = binds[i].bus;
+        ep[i].dest = binds[i].dest;
+        ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
     }
     return true;
 }
@@ -188,25 +188,25 @@ void lc_rx_endpoint::fill_status(lc_rx_bind_s* out, uint8_t* count)
         return;
     }
     *count = 0;
-    if (!lock_.ready())
+    if (!lock.ready())
     {
         return;
     }
-    bfc::semaphore::lock lock(lock_);
+    bfc::semaphore::lock lock(lock);
     if (!lock)
     {
         return;
     }
     for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
     {
-        if (ep_[i].used)
+        if (ep[i].used)
         {
             const uint8_t n = *count;
-            out[n].bus = ep_[i].bus;
-            out[n].dest = ep_[i].dest;
-            out[n].active = send_sock_.valid();
+            out[n].bus = ep[i].bus;
+            out[n].dest = ep[i].dest;
+            out[n].active = send_sock.valid();
             out[n].drop_send_fail =
-                ep_[i].drop_send_fail.load(std::memory_order_relaxed);
+                ep[i].drop_send_fail.load(std::memory_order_relaxed);
             *count = static_cast<uint8_t>(n + 1);
         }
     }
@@ -217,16 +217,16 @@ void lc_rx_endpoint::forward(bus_t bus, packet&& pdu)
     entry_s* entries[WIFI_AIRPORT_MAX];
     uint8_t n = 0;
     {
-        bfc::semaphore::lock lock(lock_);
+        bfc::semaphore::lock lock(lock);
         if (!lock)
         {
             return;
         }
         for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
         {
-            if (ep_[i].used && ep_[i].bus == bus)
+            if (ep[i].used && ep[i].bus == bus)
             {
-                entries[n++] = &ep_[i];
+                entries[n++] = &ep[i];
             }
         }
     }

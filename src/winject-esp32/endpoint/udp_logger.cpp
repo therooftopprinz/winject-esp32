@@ -67,16 +67,16 @@ bool udp_logger::parse_level(const char* text, log_level_e* out)
 
 bool udp_logger::init()
 {
-    return lock_.init();
+    return lock.init();
 }
 
 bool udp_logger::ensure_socket()
 {
-    if (sock_.valid())
+    if (sock.valid())
     {
         return true;
     }
-    if (!sock_.open_udp(htonl(INADDR_ANY), 0))
+    if (!sock.open_udp(htonl(INADDR_ANY), 0))
     {
         ESP_LOGE(TAG, "udp socket failed: %d", errno);
         return false;
@@ -86,11 +86,11 @@ bool udp_logger::ensure_socket()
 
 bool udp_logger::set(ip_port_t dest, log_level_e level)
 {
-    if (dest.host == 0 || dest.port == 0 || !lock_.ready())
+    if (dest.host == 0 || dest.port == 0 || !lock.ready())
     {
         return false;
     }
-    bfc::semaphore::lock guard(lock_);
+    bfc::semaphore::lock guard(lock);
     if (!guard)
     {
         return false;
@@ -99,27 +99,27 @@ bool udp_logger::set(ip_port_t dest, log_level_e level)
     {
         return false;
     }
-    dest_ = dest;
-    level_ = level;
-    set_ = true;
-    last_emit_us_ = 0;
+    this->dest = dest;
+    this->level = level;
+    configured = true;
+    last_emit_us = 0;
     return true;
 }
 
 bool udp_logger::unset()
 {
-    if (!lock_.ready())
+    if (!lock.ready())
     {
         return false;
     }
-    bfc::semaphore::lock guard(lock_);
+    bfc::semaphore::lock guard(lock);
     if (!guard)
     {
         return false;
     }
-    set_ = false;
-    dest_ = {};
-    level_ = log_level_e::warn;
+    configured = false;
+    dest = {};
+    level = log_level_e::warn;
     return true;
 }
 
@@ -130,56 +130,56 @@ void udp_logger::fill_status(udp_logger_status_s* out) const
         return;
     }
     *out = {};
-    if (!lock_.ready())
+    if (!lock.ready())
     {
         return;
     }
-    bfc::semaphore::lock guard(const_cast<bfc::semaphore&>(lock_));
+    bfc::semaphore::lock guard(const_cast<bfc::semaphore&>(lock));
     if (!guard)
     {
         return;
     }
-    out->set = set_;
-    out->dest = dest_;
-    out->level = level_;
-    out->emitted = emitted_;
-    out->dropped = dropped_;
+    out->set = configured;
+    out->dest = dest;
+    out->level = level;
+    out->emitted = emitted;
+    out->dropped = dropped;
 }
 
 bool udp_logger::enabled(log_level_e level) const
 {
-    if (!lock_.ready())
+    if (!lock.ready())
     {
         return false;
     }
-    bfc::semaphore::lock guard(const_cast<bfc::semaphore&>(lock_));
-    if (!guard || !set_)
+    bfc::semaphore::lock guard(const_cast<bfc::semaphore&>(lock));
+    if (!guard || !configured)
     {
         return false;
     }
-    return static_cast<uint8_t>(level) <= static_cast<uint8_t>(level_);
+    return static_cast<uint8_t>(level) <= static_cast<uint8_t>(level);
 }
 
 bool udp_logger::should_emit(log_level_e level)
 {
-    if (!set_)
+    if (!configured)
     {
         return false;
     }
-    if (static_cast<uint8_t>(level) > static_cast<uint8_t>(level_))
+    if (static_cast<uint8_t>(level) > static_cast<uint8_t>(level))
     {
         return false;
     }
     // Always allow errors through the level gate; still rate-limit to protect
     // Ethernet when the radio is hammering NO_MEM retries that escalate.
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-    if (last_emit_us_ != 0 && now >= last_emit_us_ &&
-        (now - last_emit_us_) < k_min_interval_us)
+    if (last_emit_us != 0 && now >= last_emit_us &&
+        (now - last_emit_us) < k_min_interval_us)
     {
-        dropped_++;
+        dropped++;
         return false;
     }
-    last_emit_us_ = now;
+    last_emit_us = now;
     return true;
 }
 
@@ -193,22 +193,22 @@ void udp_logger::log(log_level_e level, const char* fmt, ...)
 
 void udp_logger::vlog(log_level_e level, const char* fmt, va_list args)
 {
-    if (fmt == nullptr || !lock_.ready())
+    if (fmt == nullptr || !lock.ready())
     {
         return;
     }
 
     ip_port_t dest = {};
     {
-        bfc::semaphore::lock guard(lock_);
+        bfc::semaphore::lock guard(lock);
         if (!guard || !should_emit(level))
         {
             return;
         }
-        dest = dest_;
+        this->dest = dest;
         if (!ensure_socket())
         {
-            dropped_++;
+            dropped++;
             return;
         }
     }
@@ -253,20 +253,20 @@ void udp_logger::vlog(log_level_e level, const char* fmt, va_list args)
     addr.sin_addr.s_addr = dest.host;
     addr.sin_port = htons(dest.port);
 
-    bfc::semaphore::lock guard(lock_);
-    if (!guard || !set_ || !sock_.valid())
+    bfc::semaphore::lock guard(lock);
+    if (!guard || !configured || !sock.valid())
     {
         return;
     }
     const ssize_t sent =
-        sock_.send(line, used, 0, reinterpret_cast<const sockaddr*>(&addr),
+        sock.send(line, used, 0, reinterpret_cast<const sockaddr*>(&addr),
                    sizeof(addr));
     if (sent == static_cast<ssize_t>(used))
     {
-        emitted_++;
+        emitted++;
     }
     else
     {
-        dropped_++;
+        dropped++;
     }
 }

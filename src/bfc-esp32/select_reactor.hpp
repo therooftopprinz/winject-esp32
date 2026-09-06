@@ -33,16 +33,16 @@ public:
 
     select_reactor()
     {
-        lock_ = xSemaphoreCreateMutex();
+        lock = xSemaphoreCreateMutex();
     }
 
     ~select_reactor()
     {
         stop();
-        wake_sock_.close();
-        if (lock_ != nullptr)
+        wake_sock.close();
+        if (lock != nullptr)
         {
-            vSemaphoreDelete(lock_);
+            vSemaphoreDelete(lock);
         }
     }
 
@@ -123,36 +123,36 @@ public:
     {
         if (cb)
         {
-            if (lock_ != nullptr &&
-                xSemaphoreTake(lock_, portMAX_DELAY) == pdTRUE)
+            if (lock != nullptr &&
+                xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
             {
-                wake_cbs_.push_back(std::move(cb));
-                xSemaphoreGive(lock_);
+                wake_cbs.push_back(std::move(cb));
+                xSemaphoreGive(lock);
             }
         }
         ensure_wake();
-        if (wake_sock_.valid())
+        if (wake_sock.valid())
         {
             const uint8_t one = 1;
-            wake_sock_.send(&one, sizeof(one), 0,
-                            reinterpret_cast<const sockaddr*>(&wake_addr_),
-                            sizeof(wake_addr_));
+            wake_sock.send(&one, sizeof(one), 0,
+                            reinterpret_cast<const sockaddr*>(&wake_addr),
+                            sizeof(wake_addr));
             return;
         }
-        const TaskHandle_t task = task_.load(std::memory_order_acquire);
+        const TaskHandle_t task = task.load(std::memory_order_acquire);
         if (task != nullptr)
         {
             xTaskNotifyGive(task);
         }
         else
         {
-            pending_wake_.store(true, std::memory_order_release);
+            pending_wake.store(true, std::memory_order_release);
         }
     }
 
     bool is_reactor_thread() const
     {
-        const TaskHandle_t task = task_.load(std::memory_order_acquire);
+        const TaskHandle_t task = task.load(std::memory_order_acquire);
         return task != nullptr && xTaskGetCurrentTaskHandle() == task;
     }
 
@@ -160,7 +160,7 @@ public:
                       uint32_t stack_bytes = 6144)
     {
         bool expected = false;
-        if (!pinned_.compare_exchange_strong(expected, true,
+        if (!pinned.compare_exchange_strong(expected, true,
                                              std::memory_order_acq_rel))
         {
             return true;
@@ -171,7 +171,7 @@ public:
         if (xTaskCreatePinnedToCore(pinned_task, task_name, stack_bytes, this,
                                     prio, nullptr, core) != pdPASS)
         {
-            pinned_.store(false, std::memory_order_release);
+            pinned.store(false, std::memory_order_release);
             return false;
         }
         return true;
@@ -179,17 +179,17 @@ public:
 
     void run()
     {
-        task_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
-        running_.store(true, std::memory_order_release);
+        task.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+        running.store(true, std::memory_order_release);
         ensure_wake();
 
-        while (running_.load(std::memory_order_acquire))
+        while (running.load(std::memory_order_acquire))
         {
             apply_pending_rem();
 
             int timeout_ms = -1;
             int64_t next_deadline_us = 0;
-            if (timer_.get_next_deadline_us(next_deadline_us))
+            if (timer.get_next_deadline_us(next_deadline_us))
             {
                 const int64_t diff =
                     next_deadline_us - timer_t::current_time_us();
@@ -210,7 +210,7 @@ public:
                     }
                 }
             }
-            if (!wake_sock_.valid() && timeout_ms < 0)
+            if (!wake_sock.valid() && timeout_ms < 0)
             {
                 timeout_ms = 100;
             }
@@ -234,11 +234,11 @@ public:
                 }
             };
 
-            if (wake_sock_.valid())
+            if (wake_sock.valid())
             {
-                watch(wake_sock_.fd(), &readfds);
+                watch(wake_sock.fd(), &readfds);
             }
-            for (fd_entry_s& entry : entries_)
+            for (fd_entry_s& entry : entries)
             {
                 if (entry.read_active)
                 {
@@ -271,7 +271,7 @@ public:
             else
             {
                 const bool pending =
-                    pending_wake_.exchange(false, std::memory_order_acq_rel);
+                    pending_wake.exchange(false, std::memory_order_acq_rel);
                 if (!pending)
                 {
                     ulTaskNotifyTake(pdTRUE, timeout_ms < 0
@@ -280,17 +280,17 @@ public:
                 }
             }
 
-            if (wake_sock_.valid() && FD_ISSET(wake_sock_.fd(), &readfds))
+            if (wake_sock.valid() && FD_ISSET(wake_sock.fd(), &readfds))
             {
                 uint8_t tmp[32];
-                while (wake_sock_.recv(tmp, sizeof(tmp)) > 0)
+                while (wake_sock.recv(tmp, sizeof(tmp)) > 0)
                 {
                 }
             }
 
             if (nfds > 0)
             {
-                for (fd_entry_s& entry : entries_)
+                for (fd_entry_s& entry : entries)
                 {
                     if (entry.read_active && FD_ISSET(entry.fd, &readfds) &&
                         entry.read_cb)
@@ -307,11 +307,11 @@ public:
             }
 
             std::vector<cb_t> cbs;
-            if (lock_ != nullptr &&
-                xSemaphoreTake(lock_, portMAX_DELAY) == pdTRUE)
+            if (lock != nullptr &&
+                xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
             {
-                cbs.swap(wake_cbs_);
-                xSemaphoreGive(lock_);
+                cbs.swap(wake_cbs);
+                xSemaphoreGive(lock);
             }
             for (auto& cb : cbs)
             {
@@ -322,21 +322,21 @@ public:
             }
 
             apply_pending_rem();
-            timer_.schedule(timer_t::current_time_us());
+            timer.schedule(timer_t::current_time_us());
         }
 
-        task_.store(nullptr, std::memory_order_release);
+        task.store(nullptr, std::memory_order_release);
     }
 
     void stop()
     {
-        running_.store(false, std::memory_order_release);
+        running.store(false, std::memory_order_release);
         wake_up();
     }
 
     timer_t& get_timer()
     {
-        return timer_;
+        return timer;
     }
 
 private:
@@ -359,7 +359,7 @@ private:
 
     fd_entry_s* find(int fd)
     {
-        for (fd_entry_s& entry : entries_)
+        for (fd_entry_s& entry : entries)
         {
             if (entry.fd == fd)
             {
@@ -376,28 +376,28 @@ private:
         {
             return *existing;
         }
-        entries_.push_back(fd_entry_s{});
-        entries_.back().fd = fd;
-        return entries_.back();
+        entries.push_back(fd_entry_s{});
+        entries.back().fd = fd;
+        return entries.back();
     }
 
     void queue_rem(int fd, bool read, cb_t done)
     {
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return;
         }
-        pending_rem_.push_back(pending_rem_s{fd, read, std::move(done)});
-        xSemaphoreGive(lock_);
+        pending_rem.push_back(pending_rem_s{fd, read, std::move(done)});
+        xSemaphoreGive(lock);
     }
 
     void apply_pending_rem()
     {
         std::vector<pending_rem_s> pending;
-        if (lock_ != nullptr && xSemaphoreTake(lock_, portMAX_DELAY) == pdTRUE)
+        if (lock != nullptr && xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
         {
-            pending.swap(pending_rem_);
-            xSemaphoreGive(lock_);
+            pending.swap(pending_rem);
+            xSemaphoreGive(lock);
         }
         for (pending_rem_s& rem : pending)
         {
@@ -431,35 +431,35 @@ private:
 
     bool ensure_wake()
     {
-        if (wake_sock_.valid())
+        if (wake_sock.valid())
         {
             return true;
         }
-        if (!wake_sock_.open_udp(htonl(INADDR_LOOPBACK), 0))
+        if (!wake_sock.open_udp(htonl(INADDR_LOOPBACK), 0))
         {
             return false;
         }
-        socklen_t len = sizeof(wake_addr_);
-        if (getsockname(wake_sock_.fd(),
-                        reinterpret_cast<sockaddr*>(&wake_addr_), &len) != 0)
+        socklen_t len = sizeof(wake_addr);
+        if (getsockname(wake_sock.fd(),
+                        reinterpret_cast<sockaddr*>(&wake_addr), &len) != 0)
         {
-            wake_sock_.close();
+            wake_sock.close();
             return false;
         }
         return true;
     }
 
-    timer_t timer_;
-    socket wake_sock_;
-    sockaddr_in wake_addr_{};
-    SemaphoreHandle_t lock_ = nullptr;
-    std::vector<fd_entry_s> entries_;
-    std::vector<cb_t> wake_cbs_;
-    std::vector<pending_rem_s> pending_rem_;
-    std::atomic<bool> running_{false};
-    std::atomic<bool> pending_wake_{false};
-    std::atomic<bool> pinned_{false};
-    std::atomic<TaskHandle_t> task_{nullptr};
+    timer_t timer;
+    socket wake_sock;
+    sockaddr_in wake_addr{};
+    SemaphoreHandle_t lock = nullptr;
+    std::vector<fd_entry_s> entries;
+    std::vector<cb_t> wake_cbs;
+    std::vector<pending_rem_s> pending_rem;
+    std::atomic<bool> running{false};
+    std::atomic<bool> pending_wake{false};
+    std::atomic<bool> pinned{false};
+    std::atomic<TaskHandle_t> task{nullptr};
 };
 
 }  // namespace bfc

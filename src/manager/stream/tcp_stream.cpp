@@ -41,41 +41,41 @@ void tcp_stream::write_hdr(uint8_t* p, uint8_t type, uint16_t seq, uint16_t ack,
 
 void tcp_stream::reset()
 {
-    local_ = false;
-    peer_connect_ = false;
-    peer_close_ = false;
-    ack_pending_ = false;
-    connect_give_up_ = false;
-    data_stall_give_up_ = false;
-    tx_seq_ = 0;
-    rx_seq_ = 0;
-    tx_acked_ = 0;
-    tcp_in_off_ = 0;
-    tcp_in_.clear();
-    tcp_out_.clear();
-    unacked_.clear();
-    ctrlq_.clear();
-    reorder_.clear();
+    local = false;
+    peer_connect = false;
+    peer_close = false;
+    ack_pending = false;
+    connect_give_up = false;
+    data_stall_give_up = false;
+    tx_seq = 0;
+    rx_seq = 0;
+    tx_acked = 0;
+    tcp_in_off = 0;
+    tcp_in.clear();
+    tcp_out.clear();
+    unacked.clear();
+    ctrlq.clear();
+    reorder.clear();
 }
 
 void tcp_stream::local_up()
 {
-    if (local_)
+    if (local)
     {
         return;
     }
-    local_ = true;
-    connect_give_up_ = false;
-    data_stall_give_up_ = false;
-    connect_started_ = std::chrono::steady_clock::now();
-    last_connect_ = connect_started_;
-    last_ack_progress_ = connect_started_;
+    local = true;
+    connect_give_up = false;
+    data_stall_give_up = false;
+    connect_started = std::chrono::steady_clock::now();
+    last_connect = connect_started;
+    last_ack_progress = connect_started;
     queue_ctrl(k_type_connect);
 }
 
 bool tcp_stream::has_pending_connect() const
 {
-    for (const auto& f : ctrlq_)
+    for (const auto& f : ctrlq)
     {
         if (f[0] == k_type_connect)
         {
@@ -87,65 +87,65 @@ bool tcp_stream::has_pending_connect() const
 
 void tcp_stream::local_down()
 {
-    if (!local_)
+    if (!local)
     {
         return;
     }
-    local_ = false;
-    peer_connect_ = false;
+    local = false;
+    peer_connect = false;
     // Repeat CLOSE: the peer has no retx timer for ctrl, and a dying
     // manager may only get one scheduler pass on the way out.
     queue_ctrl(k_type_close);
     queue_ctrl(k_type_close);
     queue_ctrl(k_type_close);
-    unacked_.clear();
-    tcp_in_.clear();
-    tcp_in_off_ = 0;
-    reorder_.clear();
+    unacked.clear();
+    tcp_in.clear();
+    tcp_in_off = 0;
+    reorder.clear();
 }
 
 void tcp_stream::local_abort()
 {
-    if (!local_)
+    if (!local)
     {
         return;
     }
-    local_ = false;
-    peer_connect_ = false;
+    local = false;
+    peer_connect = false;
     queue_ctrl(k_type_abort);
-    unacked_.clear();
-    tcp_in_.clear();
-    tcp_in_off_ = 0;
-    reorder_.clear();
+    unacked.clear();
+    tcp_in.clear();
+    tcp_in_off = 0;
+    reorder.clear();
 }
 
 bool tcp_stream::established() const
 {
-    return local_ && peer_connect_ && !peer_close_;
+    return local && peer_connect && !peer_close;
 }
 
 void tcp_stream::queue_ctrl(uint8_t type)
 {
     std::vector<uint8_t> f(k_header_size);
-    write_hdr(f.data(), type, tx_seq_, rx_seq_, 0);
-    ctrlq_.push_back(std::move(f));
+    write_hdr(f.data(), type, tx_seq, rx_seq, 0);
+    ctrlq.push_back(std::move(f));
 }
 
 void tcp_stream::compact_tcp_in()
 {
-    if (tcp_in_off_ == 0)
+    if (tcp_in_off == 0)
     {
         return;
     }
-    if (tcp_in_off_ >= tcp_in_.size())
+    if (tcp_in_off >= tcp_in.size())
     {
-        tcp_in_.clear();
-        tcp_in_off_ = 0;
+        tcp_in.clear();
+        tcp_in_off = 0;
         return;
     }
-    tcp_in_.erase(tcp_in_.begin(),
-                  tcp_in_.begin() + static_cast<std::ptrdiff_t>(tcp_in_off_));
-    tcp_in_off_ = 0;
+    tcp_in.erase(tcp_in.begin(),
+                  tcp_in.begin() + static_cast<std::ptrdiff_t>(tcp_in_off));
+    tcp_in_off = 0;
 }
 
 void tcp_stream::on_tcp_bytes(const uint8_t* data, size_t len)
@@ -154,7 +154,7 @@ void tcp_stream::on_tcp_bytes(const uint8_t* data, size_t len)
     {
         return;
     }
-    tcp_in_.insert(tcp_in_.end(), data, data + len);
+    tcp_in.insert(tcp_in.end(), data, data + len);
     queue_data();
 }
 
@@ -164,27 +164,27 @@ void tcp_stream::queue_data()
     {
         return;
     }
-    while (unacked_.size() < k_window && tcp_in_off_ < tcp_in_.size())
+    while (unacked.size() < k_window && tcp_in_off < tcp_in.size())
     {
-        const size_t avail = tcp_in_.size() - tcp_in_off_;
+        const size_t avail = tcp_in.size() - tcp_in_off;
         const size_t n = avail < k_max_segment ? avail : k_max_segment;
         pending_s p;
-        p.seq = tx_seq_;
+        p.seq = tx_seq;
         p.frame.resize(k_header_size + n);
-        write_hdr(p.frame.data(), k_type_data, tx_seq_, rx_seq_,
+        write_hdr(p.frame.data(), k_type_data, tx_seq, rx_seq,
                   static_cast<uint16_t>(n));
-        memcpy(p.frame.data() + k_header_size, tcp_in_.data() + tcp_in_off_, n);
-        tcp_in_off_ += n;
-        tx_seq_ = static_cast<uint16_t>(tx_seq_ + 1);
-        const bool first_outstanding = unacked_.empty();
-        unacked_.push_back(std::move(p));
+        memcpy(p.frame.data() + k_header_size, tcp_in.data() + tcp_in_off, n);
+        tcp_in_off += n;
+        tx_seq = static_cast<uint16_t>(tx_seq + 1);
+        const bool first_outstanding = unacked.empty();
+        unacked.push_back(std::move(p));
         if (first_outstanding)
         {
             // Stall timer runs only while DATA is outstanding.
-            last_ack_progress_ = std::chrono::steady_clock::now();
+            last_ack_progress = std::chrono::steady_clock::now();
         }
     }
-    if (tcp_in_off_ > 65536 || tcp_in_off_ == tcp_in_.size())
+    if (tcp_in_off > 65536 || tcp_in_off == tcp_in.size())
     {
         compact_tcp_in();
     }
@@ -192,7 +192,7 @@ void tcp_stream::queue_data()
 
 bool tcp_stream::pull_tcp(uint8_t* out, size_t max, size_t* n)
 {
-    if (n == nullptr || out == nullptr || tcp_out_.empty() || max == 0)
+    if (n == nullptr || out == nullptr || tcp_out.empty() || max == 0)
     {
         if (n != nullptr)
         {
@@ -200,11 +200,11 @@ bool tcp_stream::pull_tcp(uint8_t* out, size_t max, size_t* n)
         }
         return false;
     }
-    size_t c = tcp_out_.size() < max ? tcp_out_.size() : max;
+    size_t c = tcp_out.size() < max ? tcp_out.size() : max;
     for (size_t i = 0; i < c; i++)
     {
-        out[i] = tcp_out_.front();
-        tcp_out_.pop_front();
+        out[i] = tcp_out.front();
+        tcp_out.pop_front();
     }
     *n = c;
     return true;
@@ -212,18 +212,18 @@ bool tcp_stream::pull_tcp(uint8_t* out, size_t max, size_t* n)
 
 void tcp_stream::apply_ack(uint16_t ack)
 {
-    const uint16_t delta = static_cast<uint16_t>(ack - tx_acked_);
-    if (delta == 0 || delta > unacked_.size() || delta > k_window)
+    const uint16_t delta = static_cast<uint16_t>(ack - tx_acked);
+    if (delta == 0 || delta > unacked.size() || delta > k_window)
     {
         return;
     }
     for (uint16_t i = 0; i < delta; i++)
     {
-        unacked_.pop_front();
-        tx_acked_ = static_cast<uint16_t>(tx_acked_ + 1);
+        unacked.pop_front();
+        tx_acked = static_cast<uint16_t>(tx_acked + 1);
     }
-    last_ack_progress_ = std::chrono::steady_clock::now();
-    data_stall_give_up_ = false;
+    last_ack_progress = std::chrono::steady_clock::now();
+    data_stall_give_up = false;
 }
 
 void tcp_stream::apply_sack(const uint8_t* data, size_t len)
@@ -239,7 +239,7 @@ void tcp_stream::apply_sack(const uint8_t* data, size_t len)
         for (uint16_t i = 0; i < count; i++)
         {
             const uint16_t s = static_cast<uint16_t>(sn + i);
-            for (auto& p : unacked_)
+            for (auto& p : unacked)
             {
                 if (p.seq == s)
                 {
@@ -253,13 +253,13 @@ void tcp_stream::apply_sack(const uint8_t* data, size_t len)
 
 size_t tcp_stream::fill_sack_payload(uint8_t* out, size_t max) const
 {
-    if (out == nullptr || max < k_sack_block_size || reorder_.empty())
+    if (out == nullptr || max < k_sack_block_size || reorder.empty())
     {
         return 0;
     }
     size_t nblocks = 0;
     size_t off = 0;
-    for (auto it = reorder_.begin(); it != reorder_.end() && nblocks < k_max_sack_blocks;)
+    for (auto it = reorder.begin(); it != reorder.end() && nblocks < k_max_sack_blocks;)
     {
         if (off + k_sack_block_size > max)
         {
@@ -268,7 +268,7 @@ size_t tcp_stream::fill_sack_payload(uint8_t* out, size_t max) const
         const uint16_t sn = it->first;
         uint16_t count = 1;
         auto jt = std::next(it);
-        while (jt != reorder_.end() &&
+        while (jt != reorder.end() &&
                jt->first == static_cast<uint16_t>(sn + count))
         {
             count++;
@@ -285,43 +285,43 @@ size_t tcp_stream::fill_sack_payload(uint8_t* out, size_t max) const
 
 void tcp_stream::deliver_data(uint16_t seq, const uint8_t* payload, size_t plen)
 {
-    // Buffer as soon as the peer CONNECT is seen. Requiring local_ (full
+    // Buffer as soon as the peer CONNECT is seen. Requiring local (full
     // established) drops seq 0 while TCP_CLIENT is still connecting to gst.
-    if (payload == nullptr || !peer_connect_ || peer_close_)
+    if (payload == nullptr || !peer_connect || peer_close)
     {
         return;
     }
-    const uint16_t dist = static_cast<uint16_t>(seq - rx_seq_);
+    const uint16_t dist = static_cast<uint16_t>(seq - rx_seq);
     if (dist >= k_window)
     {
         // Outside window (duplicate behind or too far ahead).
-        ack_pending_ = true;
+        ack_pending = true;
         return;
     }
-    if (seq == rx_seq_)
+    if (seq == rx_seq)
     {
         if (plen > 0)
         {
-            tcp_out_.insert(tcp_out_.end(), payload, payload + plen);
+            tcp_out.insert(tcp_out.end(), payload, payload + plen);
         }
-        rx_seq_ = static_cast<uint16_t>(rx_seq_ + 1);
+        rx_seq = static_cast<uint16_t>(rx_seq + 1);
         while (true)
         {
-            auto it = reorder_.find(rx_seq_);
-            if (it == reorder_.end())
+            auto it = reorder.find(rx_seq);
+            if (it == reorder.end())
             {
                 break;
             }
-            tcp_out_.insert(tcp_out_.end(), it->second.begin(), it->second.end());
-            reorder_.erase(it);
-            rx_seq_ = static_cast<uint16_t>(rx_seq_ + 1);
+            tcp_out.insert(tcp_out.end(), it->second.begin(), it->second.end());
+            reorder.erase(it);
+            rx_seq = static_cast<uint16_t>(rx_seq + 1);
         }
     }
-    else if (reorder_.find(seq) == reorder_.end())
+    else if (reorder.find(seq) == reorder.end())
     {
-        reorder_.emplace(seq, std::vector<uint8_t>(payload, payload + plen));
+        reorder.emplace(seq, std::vector<uint8_t>(payload, payload + plen));
     }
-    ack_pending_ = true;
+    ack_pending = true;
 }
 
 void tcp_stream::parse_radio(const uint8_t* data, size_t len)
@@ -347,15 +347,15 @@ void tcp_stream::parse_radio(const uint8_t* data, size_t len)
 
     if (type == k_type_connect)
     {
-        if (!peer_connect_)
+        if (!peer_connect)
         {
-            rx_seq_ = 0;
-            tcp_out_.clear();
-            reorder_.clear();
+            rx_seq = 0;
+            tcp_out.clear();
+            reorder.clear();
         }
-        peer_connect_ = true;
-        peer_close_ = false;
-        ack_pending_ = true;
+        peer_connect = true;
+        peer_close = false;
+        ack_pending = true;
         return;
     }
     if (type == k_type_close || type == k_type_abort)
@@ -363,11 +363,11 @@ void tcp_stream::parse_radio(const uint8_t* data, size_t len)
         // Handshake still in progress: keep CONNECT retries until timeout.
         if (!established())
         {
-            ack_pending_ = true;
+            ack_pending = true;
             return;
         }
-        peer_close_ = true;
-        peer_connect_ = false;
+        peer_close = true;
+        peer_connect = false;
         return;
     }
     if (type == k_type_ack)
@@ -388,7 +388,7 @@ void tcp_stream::on_radio_rx(const uint8_t* data, size_t len)
 
 bool tcp_stream::has_ack() const
 {
-    return ack_pending_ || !ctrlq_.empty();
+    return ack_pending || !ctrlq.empty();
 }
 
 bool tcp_stream::has_tx() const
@@ -397,7 +397,7 @@ bool tcp_stream::has_tx() const
     {
         return true;
     }
-    for (const auto& p : unacked_)
+    for (const auto& p : unacked)
     {
         if (!p.in_flight && !p.sacked)
         {
@@ -413,36 +413,36 @@ size_t tcp_stream::pull_tx(uint8_t* out, size_t max, bool* is_ack)
     {
         return 0;
     }
-    if (!ctrlq_.empty())
+    if (!ctrlq.empty())
     {
-        auto& f = ctrlq_.front();
+        auto& f = ctrlq.front();
         if (f.size() > max)
         {
             return 0;
         }
-        write_hdr(out, f[0], read_u16(f.data() + 2), rx_seq_, 0);
+        write_hdr(out, f[0], read_u16(f.data() + 2), rx_seq, 0);
         if (is_ack != nullptr)
         {
             *is_ack = true;
         }
-        ctrlq_.pop_front();
+        ctrlq.pop_front();
         return k_header_size;
     }
-    if (ack_pending_)
+    if (ack_pending)
     {
         const size_t sack_room =
             max > k_header_size ? max - k_header_size : 0;
         const size_t sack_n = fill_sack_payload(out + k_header_size, sack_room);
-        write_hdr(out, k_type_ack, tx_seq_, rx_seq_,
+        write_hdr(out, k_type_ack, tx_seq, rx_seq,
                   static_cast<uint16_t>(sack_n));
-        ack_pending_ = false;
+        ack_pending = false;
         if (is_ack != nullptr)
         {
             *is_ack = true;
         }
         return k_header_size + sack_n;
     }
-    for (auto& p : unacked_)
+    for (auto& p : unacked)
     {
         if (p.sacked)
         {
@@ -450,7 +450,7 @@ size_t tcp_stream::pull_tx(uint8_t* out, size_t max, bool* is_ack)
         }
         if (!p.in_flight && p.frame.size() <= max)
         {
-            write_hdr(p.frame.data(), k_type_data, p.seq, rx_seq_,
+            write_hdr(p.frame.data(), k_type_data, p.seq, rx_seq,
                       static_cast<uint16_t>(p.frame.size() - k_header_size));
             memcpy(out, p.frame.data(), p.frame.size());
             p.in_flight = true;
@@ -470,7 +470,7 @@ void tcp_stream::on_tick()
     const auto now = std::chrono::steady_clock::now();
     // Selective Repeat: retx every timed-out hole that was not SACKed.
     // Do not invalidate later in-flight segments (that was GBN).
-    for (auto& p : unacked_)
+    for (auto& p : unacked)
     {
         if (p.sacked)
         {
@@ -481,23 +481,23 @@ void tcp_stream::on_tick()
             p.in_flight = false;
         }
     }
-    if (local_ && !peer_connect_ && !peer_close_)
+    if (local && !peer_connect && !peer_close)
     {
-        if (now - connect_started_ >= k_connect_timeout)
+        if (now - connect_started >= k_connect_timeout)
         {
-            connect_give_up_ = true;
+            connect_give_up = true;
             return;
         }
-        if (now - last_connect_ >= k_rexmit && !has_pending_connect())
+        if (now - last_connect >= k_rexmit && !has_pending_connect())
         {
-            last_connect_ = now;
+            last_connect = now;
             queue_ctrl(k_type_connect);
         }
     }
-    if (established() && !unacked_.empty() &&
-        now - last_ack_progress_ >= k_data_stall_timeout)
+    if (established() && !unacked.empty() &&
+        now - last_ack_progress >= k_data_stall_timeout)
     {
-        data_stall_give_up_ = true;
+        data_stall_give_up = true;
         return;
     }
     queue_data();

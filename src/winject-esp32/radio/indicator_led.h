@@ -30,7 +30,7 @@ public:
 
     bool init()
     {
-        if (ready_)
+        if (ready)
         {
             return true;
         }
@@ -51,7 +51,7 @@ public:
         }
 
         gpio_set_level(static_cast<gpio_num_t>(gpio_), WIFI_LED_OFF);
-        ready_ = true;
+        ready = true;
         if (s_count < k_max_leds)
         {
             s_leds[s_count++] = this;
@@ -61,7 +61,7 @@ public:
 
     void pulse()
     {
-        until_.store(esp_timer_get_time() + WIFI_LED_STRETCH_US,
+        until.store(esp_timer_get_time() + WIFI_LED_STRETCH_US,
                      std::memory_order_relaxed);
     }
 
@@ -105,19 +105,19 @@ private:
 
     void update(int64_t now)
     {
-        if (!ready_)
+        if (!ready)
         {
             return;
         }
         gpio_set_level(static_cast<gpio_num_t>(gpio_),
-                       now < until_.load(std::memory_order_relaxed)
+                       now < until.load(std::memory_order_relaxed)
                            ? WIFI_LED_ON
                            : WIFI_LED_OFF);
     }
 
     const int gpio_;
-    bool ready_ = false;
-    std::atomic<int64_t> until_{0};
+    bool ready = false;
+    std::atomic<int64_t> until{0};
 
     inline static indicator_led* s_leds[k_max_leds] = {};
     inline static size_t s_count = 0;

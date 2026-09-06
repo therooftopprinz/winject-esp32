@@ -50,9 +50,9 @@ private:
     int find_exact(bus_t bus, ip_port_t dest) const;
     int find_free() const;
 
-    entry_s ep_[WIFI_AIRPORT_MAX];
-    bfc::socket send_sock_;
-    bfc::semaphore lock_;
+    entry_s ep[WIFI_AIRPORT_MAX];
+    bfc::socket send_sock;
+    bfc::semaphore lock;
 };
 
 #endif  // WINJECT_LC_RX_ENDPOINT_H_

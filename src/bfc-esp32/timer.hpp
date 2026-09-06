@@ -22,14 +22,14 @@ public:
 
     timer()
     {
-        lock_ = xSemaphoreCreateMutex();
+        lock = xSemaphoreCreateMutex();
     }
 
     ~timer()
     {
-        if (lock_ != nullptr)
+        if (lock != nullptr)
         {
-            vSemaphoreDelete(lock_);
+            vSemaphoreDelete(lock);
         }
     }
 
@@ -41,13 +41,13 @@ public:
     {
         const int64_t next_us = now_us + for_us;
         timer_id_t id{next_us, 0};
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return id;
         }
-        id.second = timer_ctr_++;
-        cb_map_.emplace(id, std::move(cb));
-        xSemaphoreGive(lock_);
+        id.second = timer_ctr++;
+        cb_map.emplace(id, std::move(cb));
+        xSemaphoreGive(lock);
         return id;
     }
 
@@ -59,16 +59,16 @@ public:
 
     bool get_next_deadline_us(int64_t& deadline_us) const
     {
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return false;
         }
-        const bool ok = !cb_map_.empty();
+        const bool ok = !cb_map.empty();
         if (ok)
         {
-            deadline_us = cb_map_.begin()->first.first;
+            deadline_us = cb_map.begin()->first.first;
         }
-        xSemaphoreGive(lock_);
+        xSemaphoreGive(lock);
         return ok;
     }
 
@@ -79,12 +79,12 @@ public:
 
     bool cancel(timer_id_t id)
     {
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return false;
         }
-        const bool erased = cb_map_.erase(id) != 0;
-        xSemaphoreGive(lock_);
+        const bool erased = cb_map.erase(id) != 0;
+        xSemaphoreGive(lock);
         return erased;
     }
 
@@ -92,24 +92,24 @@ public:
     {
         using node_type = typename std::map<timer_id_t, cb_t>::node_type;
         std::list<node_type> extracted;
-        if (lock_ == nullptr || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE)
+        if (lock == nullptr || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE)
         {
             return;
         }
-        auto it = cb_map_.begin();
-        while (it != cb_map_.end())
+        auto it = cb_map.begin();
+        while (it != cb_map.end())
         {
             auto next = it;
             ++next;
             if (now_us >= it->first.first)
             {
-                extracted.emplace_back(cb_map_.extract(it));
+                extracted.emplace_back(cb_map.extract(it));
                 it = next;
                 continue;
             }
             break;
         }
-        xSemaphoreGive(lock_);
+        xSemaphoreGive(lock);
 
         for (auto& node : extracted)
         {
@@ -134,9 +134,9 @@ public:
     }
 
 private:
-    uint64_t timer_ctr_ = 0;
-    mutable SemaphoreHandle_t lock_ = nullptr;
-    std::map<timer_id_t, cb_t> cb_map_;
+    uint64_t timer_ctr = 0;
+    mutable SemaphoreHandle_t lock = nullptr;
+    std::map<timer_id_t, cb_t> cb_map;
 };
 
 }  // namespace bfc

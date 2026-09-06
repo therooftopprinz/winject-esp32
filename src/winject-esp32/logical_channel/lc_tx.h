@@ -47,8 +47,8 @@ private:
         std::optional<packet> pkt;
     };
 
-    bfc::wait_free_queue<slot_s, k_queue_cap> q_;
-    channel_info_endpoint* ci_ = nullptr;
+    bfc::wait_free_queue<slot_s, k_queue_cap> q;
+    channel_info_endpoint* ci = nullptr;
     std::atomic<uint32_t> drop_count_{0};
 };
 

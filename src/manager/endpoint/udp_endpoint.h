@@ -17,7 +17,7 @@ class udp_endpoint : public stream
 public:
     udp_endpoint() = default;
     ~udp_endpoint() override;
-    bool open(reactor& reactor, const upstream_config_s& cfg);
+    bool open(::reactor& reactor, const upstream_config_s& cfg);
     void close();
 
     void on_radio_rx(const uint8_t* data, size_t len) override;
@@ -32,20 +32,20 @@ private:
     void on_app();
     void enqueue_air(std::vector<uint8_t> pkt);
 
-    reactor* reactor_ = nullptr;
-    bfc::socket sock_;
-    upstream_mode_e mode_ = upstream_mode_e::udp_generic;
-    sockaddr_in dest_{};
-    bool dest_valid_ = false;
-    std::deque<std::vector<uint8_t>> txq_;
-    uint8_t buf_[2048]{};
-    uint64_t radio_rx_pkt_interval_ = 0;
-    uint64_t radio_rx_bytes_interval_ = 0;
-    uint64_t air_tx_bytes_interval_ = 0;
-    uint64_t air_rx_bytes_interval_ = 0;
-    uint64_t app_rx_pkt_interval_ = 0;
-    uint64_t app_rx_bytes_interval_ = 0;
-    rs_block_erasure fec_;
+    ::reactor* reactor = nullptr;
+    bfc::socket sock;
+    upstream_mode_e mode = upstream_mode_e::udp_generic;
+    sockaddr_in dest{};
+    bool dest_valid = false;
+    std::deque<std::vector<uint8_t>> txq;
+    uint8_t buf[2048]{};
+    uint64_t radio_rx_pkt_interval = 0;
+    uint64_t radio_rx_bytes_interval = 0;
+    uint64_t air_tx_bytes_interval = 0;
+    uint64_t air_rx_bytes_interval = 0;
+    uint64_t app_rx_pkt_interval = 0;
+    uint64_t app_rx_bytes_interval = 0;
+    rs_block_erasure fec;
 };
 
 #endif  // WINJECT_MANAGER_UDP_ENDPOINT_H_

@@ -41,6 +41,9 @@ TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
 # Manager ARQ can stop reading when the window fills and reverse ACKs starve;
 # without a send timeout, sendall blocks forever and phase() never returns.
 TCP_SEND_TIMEOUT_S = 3.0
+# Wait until recv==sent after a TCP phase so leftover DATA does not occupy the
+# air during the reverse leg. Manager data-stall abort is 5s; keep headroom.
+TCP_DRAIN_TIMEOUT_S = 10.0
 MAX_PAYLOAD = 1476
 FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
 FEC_ENC_A = 19100  # host -> encode -> radio A inject
@@ -585,7 +588,8 @@ def send_exact_tcp(
         for seq in range(count):
             try:
                 send_tcp_record(sock, make_payload(tag, seq, size))
-            except (TimeoutError, socket.timeout) as err:
+            except (TimeoutError, socket.timeout, ConnectionResetError,
+                    BrokenPipeError, ConnectionError) as err:
                 raise TcpSendStall(
                     f"tcp send stall to {dest[0]}:{dest[1]} after {sent}/{count}",
                     sent=sent,
@@ -607,6 +611,7 @@ def send_window_tcp(
     kbps: float,
     start: float,
     sock: socket.socket | None = None,
+    progress: list[int] | None = None,
 ) -> int:
     own = sock is None
     if own:
@@ -624,13 +629,16 @@ def send_window_tcp(
                 continue
             try:
                 send_tcp_record(sock, make_payload(tag, seq, size))
-            except (TimeoutError, socket.timeout) as err:
+            except (TimeoutError, socket.timeout, ConnectionResetError,
+                    BrokenPipeError, ConnectionError) as err:
                 raise TcpSendStall(
                     f"tcp send stall to {dest[0]}:{dest[1]} after {sent} pkts "
                     f"(ARQ window full / ACKs starved?)",
                     sent=sent,
                 ) from err
             sent += 1
+            if progress is not None:
+                progress[0] = sent
             seq += 1
             if interval > 0:
                 next_t += interval
@@ -837,6 +845,7 @@ def send_window(
     duration: float,
     kbps: float,
     start: float,
+    progress: list[int] | None = None,
 ) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sent = 0
@@ -851,6 +860,8 @@ def send_window(
                 continue
             sock.sendto(make_payload(tag, seq, size), dest)
             sent += 1
+            if progress is not None:
+                progress[0] = sent
             seq += 1
             if interval > 0:
                 next_t += interval
@@ -865,6 +876,12 @@ def goodput_kbps(stats: RecvStats, duration: float) -> float:
     if duration <= 0:
         return 0.0
     return (stats.nbytes * 8.0) / duration / 1000.0
+
+
+def live_kbps(nbytes: int, dt: float) -> float:
+    if dt <= 0.0 or nbytes <= 0:
+        return 0.0
+    return (nbytes * 8.0) / dt / 1000.0
 
 
 def to_phase(sent: int, stats: RecvStats, duration: float) -> PhaseResult:
@@ -935,7 +952,16 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--size", type=int, default=1400, help="UDP payload bytes (max 1476)")
     p.add_argument("--duration", type=float, default=5.0, help="seconds per bandwidth phase")
-    p.add_argument("--drain", type=float, default=1.0, help="seconds to wait after sending")
+    p.add_argument(
+        "--drain",
+        type=float,
+        default=1.0,
+        help=(
+            "seconds to wait after sending (UDP). TCP waits until every sent "
+            "record arrives, then this settle so last ACKs can clear; timeout "
+            f"is max(drain, {TCP_DRAIN_TIMEOUT_S:.0f}s)"
+        ),
+    )
     p.add_argument(
         "--kbps",
         type=float,
@@ -953,7 +979,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--tcp",
         action="store_true",
-        help="host path via winject-manager TCP forwarding (implies --skip-config)",
+        help=(
+            "host path via winject-manager TCP forwarding (skips console upstream "
+            "binds; still applies channel/modulation/cca unless --skip-config)"
+        ),
     )
     p.add_argument(
         "--tcp-send-a",
@@ -1039,8 +1068,10 @@ def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
 
 def main() -> int:
     args = parse_args()
-    if args.tcp:
-        args.skip_config = True
+    # --tcp: managers / prepare_radios own sut/sur binds. Still apply PHY knobs
+    # unless the caller also passed --skip-config.
+    skip_upstream = args.skip_config or args.tcp
+    skip_phy = args.skip_config
     if args.fec_intra:
         args.fec = True
     if args.size < 16 or args.size > MAX_PAYLOAD:
@@ -1102,11 +1133,24 @@ def main() -> int:
             raise SystemExit("could not read existing modulation; pass --modulation or --all")
         mods = [current]
 
-    if args.skip_config and not args.tcp:
+    if skip_upstream and not args.tcp:
         for label, text in (("A", status_a), ("B", status_b)):
             mode = parse_status_mode(text)
             if mode and mode != "BFC_TUNNEL_DEVICE":
                 print(f"warning: {label} mode is {mode} (want BFC_TUNNEL_DEVICE)")
+        dom_a = parse_status_domain(status_a)
+        dom_b = parse_status_domain(status_b)
+        if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
+            print("warning: domain unset on one or both radios")
+        elif dom_a != dom_b:
+            print(f"warning: A domain {dom_a}, B domain {dom_b}")
+        elif dom_a != domain.upper():
+            print(f"warning: radios domain {dom_a}, test --domain {domain}")
+    elif args.tcp:
+        for label, text in (("A", status_a), ("B", status_b)):
+            mode = parse_status_mode(text)
+            if mode and mode != "STANDALONE":
+                print(f"warning: {label} mode is {mode} (want STANDALONE for manager TCP)")
         dom_a = parse_status_domain(status_a)
         dom_b = parse_status_domain(status_b)
         if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
@@ -1122,7 +1166,13 @@ def main() -> int:
     mod_label_suffix = " (unchanged)" if not apply_modulation else ""
     print(f"\nA {args.a}  B {args.b}  channel {channel_label}  cca {cca_label}")
     print(f"modulations ({len(mods)}): {' '.join(mods)}{mod_label_suffix}")
-    print(f"payload {args.size} B  duration {args.duration}s  drain {args.drain}s")
+    drain_note = f"{args.drain}s"
+    if args.tcp:
+        drain_note = (
+            f"until recv==sent then {args.drain}s "
+            f"(timeout {max(args.drain, TCP_DRAIN_TIMEOUT_S):.0f}s)"
+        )
+    print(f"payload {args.size} B  duration {args.duration}s  drain {drain_note}")
     print(f"fec {fec_label(args)}")
     if args.tcp:
         print(
@@ -1130,7 +1180,7 @@ def main() -> int:
             f"listen B->A {HOST_PORT_A}  listen A->B {HOST_PORT_B}"
         )
 
-    if not args.skip_config:
+    if not skip_upstream:
         print("\n=== configure upstream ===")
         if not configure_upstream(
             args.a,
@@ -1229,15 +1279,17 @@ def main() -> int:
                 return send_exact_tcp(dest, tag, count, size, gap, sock)
         return send_exact(dest, tag, count, size, gap)
 
-    def send_window_fn(dest, tag, size, duration, kbps, start):
+    def send_window_fn(dest, tag, size, duration, kbps, start, progress=None):
         if args.tcp:
             sock = tcp_sock_for(dest)
             try:
-                return send_window_tcp(dest, tag, size, duration, kbps, start, sock)
+                return send_window_tcp(
+                    dest, tag, size, duration, kbps, start, sock, progress
+                )
             except TcpSendStall:
                 reconnect_tcp(dest)
                 raise
-        return send_window(dest, tag, size, duration, kbps, start)
+        return send_window(dest, tag, size, duration, kbps, start, progress)
 
     def reset() -> None:
         listen_a.stats.clear()
@@ -1264,14 +1316,23 @@ def main() -> int:
         results = [0] * len(senders)
         stalls: list[TcpSendStall | None] = [None] * len(senders)
         threads: list[threading.Thread] = []
+        sent_live = [[0] for _ in senders]
         join_timeout = args.duration + TCP_SEND_TIMEOUT_S + 2.0
+
+        def dir_label(dest: tuple[str, int]) -> str:
+            if dest == dest_a:
+                return "A->B"
+            if dest == dest_b:
+                return "B->A"
+            return f"{dest[0]}:{dest[1]}"
 
         def run_one(idx: int, dest: tuple[str, int], tag: bytes) -> None:
             try:
                 results[idx] = send_window_fn(
-                    dest, tag, args.size, args.duration, kbps, start
+                    dest, tag, args.size, args.duration, kbps, start, sent_live[idx]
                 )
             except TcpSendStall as err:
+                sent_live[idx][0] = err.sent
                 results[idx] = err.sent
                 stalls[idx] = err
 
@@ -1279,8 +1340,54 @@ def main() -> int:
             t = threading.Thread(target=run_one, args=(i, dest, tag))
             threads.append(t)
             t.start()
+
+        use_cr = sys.stdout.isatty()
+        print_interval = 0.25 if use_cr else 1.0
+        deadline = start + join_timeout
+        prev_t = start
+        prev_sent = [0] * len(senders)
+        prev_nbytes = [0] * len(senders)
+        last_print = start
+
+        def progress_line() -> str:
+            now = time.monotonic()
+            elapsed = max(0.0, now - start)
+            dt = max(now - prev_t, 1e-6)
+            parts = [f"{elapsed:4.1f}/{args.duration:.0f}s"]
+            for i, (dest, _tag, lis) in enumerate(senders):
+                sent_n = sent_live[i][0]
+                recv_b = lis.stats.nbytes
+                send_rate = live_kbps((sent_n - prev_sent[i]) * args.size, dt)
+                recv_rate = live_kbps(recv_b - prev_nbytes[i], dt)
+                parts.append(
+                    f"{dir_label(dest)} send {send_rate:7.1f} recv {recv_rate:7.1f}"
+                )
+            return "  ".join(parts) + " kbps"
+
+        while True:
+            alive = [t for t in threads if t.is_alive()]
+            now = time.monotonic()
+            due = now - last_print >= print_interval
+            finished = not alive and now - last_print >= 0.05
+            if due or finished:
+                line = progress_line()
+                if use_cr:
+                    print(f"\r{line:<120}", end="", flush=True)
+                else:
+                    print(line, flush=True)
+                last_print = now
+                prev_t = now
+                prev_sent = [cell[0] for cell in sent_live]
+                prev_nbytes = [lis.stats.nbytes for _dest, _tag, lis in senders]
+            if not alive or now >= deadline:
+                break
+            wait = min(print_interval, max(0.0, deadline - now))
+            alive[0].join(timeout=wait)
+
+        if use_cr:
+            print(flush=True)
+
         for t in threads:
-            t.join(timeout=join_timeout)
             if t.is_alive():
                 print(
                     f"warning: sender thread still blocked after {join_timeout:.1f}s; "
@@ -1300,10 +1407,63 @@ def main() -> int:
                 tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
             if tcp_sock_b is None:
                 tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
+        # TCP kbps is send-window goodput. Drain bytes still count toward recv
+        # so loss is "never delivered", not "still in ARQ when the next leg starts".
+        kbps_bytes = (
+            [lis.stats.nbytes for _dest, _tag, lis in senders] if args.tcp else None
+        )
+        if args.tcp:
+            timeout = max(args.drain, TCP_DRAIN_TIMEOUT_S)
+            t0 = time.monotonic()
+            deadline_d = t0 + timeout
+            last_dprint = 0.0
+            drained = False
+            while time.monotonic() < deadline_d:
+                drained = True
+                for i, (_dest, _tag, lis) in enumerate(senders):
+                    if results[i] > 0 and lis.stats.packets < results[i]:
+                        drained = False
+                        break
+                if drained:
+                    break
+                now = time.monotonic()
+                if now - last_dprint >= print_interval:
+                    parts = [f"drain {now - t0:4.1f}/{timeout:.0f}s"]
+                    for i, (dest, _tag, lis) in enumerate(senders):
+                        parts.append(
+                            f"{dir_label(dest)} {lis.stats.packets}/{results[i]}"
+                        )
+                    line = "  ".join(parts)
+                    if use_cr:
+                        print(f"\r{line:<120}", end="", flush=True)
+                    else:
+                        print(line, flush=True)
+                    last_dprint = now
+                time.sleep(0.05)
+            if use_cr and last_dprint > 0.0:
+                parts = [f"drain {time.monotonic() - t0:4.1f}/{timeout:.0f}s"]
+                for i, (dest, _tag, lis) in enumerate(senders):
+                    parts.append(
+                        f"{dir_label(dest)} {lis.stats.packets}/{results[i]}"
+                    )
+                print(f"\r{'  '.join(parts):<120}", flush=True)
+            if not drained:
+                for i, (dest, _tag, lis) in enumerate(senders):
+                    if results[i] > 0 and lis.stats.packets < results[i]:
+                        print(
+                            f"warning: {dir_label(dest)} drain incomplete "
+                            f"{lis.stats.packets}/{results[i]} after {timeout:.1f}s"
+                        )
         time.sleep(args.drain)
         out: list[PhaseResult] = []
         for i, (_dest, _tag, lis) in enumerate(senders):
-            out.append(to_phase(results[i], lis.stats, args.duration))
+            nbytes = kbps_bytes[i] if kbps_bytes is not None else lis.stats.nbytes
+            kbps = (
+                (nbytes * 8.0) / args.duration / 1000.0 if args.duration > 0 else 0.0
+            )
+            out.append(
+                PhaseResult(sent=results[i], recv=lis.stats.packets, kbps=kbps)
+            )
         return out
 
     all_results: list[ModResult] = []
@@ -1327,7 +1487,7 @@ def main() -> int:
         )
         result = ModResult(modulation=mod, channel=display_channel, offer=offer)
 
-        if not args.skip_config:
+        if not skip_phy:
             set_mod = mod if apply_modulation else None
             try:
                 ok_a = configure_radio(args.a, args.channel, set_mod, args.cca, quiet)

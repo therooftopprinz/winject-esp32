@@ -67,19 +67,19 @@ bool rs_block_erasure::init(int k, int n, int timeout_ms)
     }
     k_ = k;
     n_ = n;
-    p_ = n - k;
-    timeout_ms_ = timeout_ms;
-    encode_matrix_.assign(static_cast<size_t>(n_) * static_cast<size_t>(k_), 0);
-    g_tbls_.assign(static_cast<size_t>(k_) * static_cast<size_t>(p_) * 32, 0);
-    gf_gen_cauchy1_matrix(encode_matrix_.data(), n_, k_);
-    ec_init_tables_base(k_, p_, encode_matrix_.data() + k_ * k_,
-                        g_tbls_.data());
-    pending_.clear();
-    deadline_set_ = false;
-    block_id_ = 0;
-    rx_blocks_.clear();
-    done_order_.clear();
-    done_.clear();
+    p = n - k;
+    this->timeout_ms = timeout_ms;
+    encode_matrix.assign(static_cast<size_t>(n_) * static_cast<size_t>(k_), 0);
+    g_tbls.assign(static_cast<size_t>(k_) * static_cast<size_t>(p) * 32, 0);
+    gf_gen_cauchy1_matrix(encode_matrix.data(), n_, k_);
+    ec_init_tables_base(k_, p, encode_matrix.data() + k_ * k_,
+                        g_tbls.data());
+    pending.clear();
+    deadline_set = false;
+    block_id = 0;
+    rx_blocks.clear();
+    done_order.clear();
+    done.clear();
     recovered_ = 0;
     blocks_ = 0;
     decode_fail_ = 0;
@@ -168,22 +168,22 @@ bool rs_block_erasure::encode_block(
     {
         data_shards[static_cast<size_t>(i)].resize(shard_len, 0);
     }
-    std::vector<std::vector<uint8_t>> parity(static_cast<size_t>(p_));
+    std::vector<std::vector<uint8_t>> parity(static_cast<size_t>(p));
     std::vector<unsigned char*> data_ptrs(static_cast<size_t>(k_));
-    std::vector<unsigned char*> coding_ptrs(static_cast<size_t>(p_));
+    std::vector<unsigned char*> coding_ptrs(static_cast<size_t>(p));
     for (int i = 0; i < k_; i++)
     {
         data_ptrs[static_cast<size_t>(i)] =
             data_shards[static_cast<size_t>(i)].data();
     }
-    for (int i = 0; i < p_; i++)
+    for (int i = 0; i < p; i++)
     {
         parity[static_cast<size_t>(i)].assign(shard_len, 0);
         coding_ptrs[static_cast<size_t>(i)] =
             parity[static_cast<size_t>(i)].data();
     }
-    WINJECT_EC_ENCODE(static_cast<int>(shard_len), k_, p_,
-                      const_cast<unsigned char*>(g_tbls_.data()),
+    WINJECT_EC_ENCODE(static_cast<int>(shard_len), k_, p,
+                      const_cast<unsigned char*>(g_tbls.data()),
                       data_ptrs.data(), coding_ptrs.data());
 
     out->clear();
@@ -230,7 +230,7 @@ int rs_block_erasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
             return -1;
         }
         memcpy(b.data() + static_cast<size_t>(k_) * static_cast<size_t>(i),
-               encode_matrix_.data() +
+               encode_matrix.data() +
                    static_cast<size_t>(k_) * static_cast<size_t>(r),
                static_cast<size_t>(k_));
         decode_index[i] = static_cast<uint8_t>(r);
@@ -259,7 +259,7 @@ int rs_block_erasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
                 s ^= gf_mul(
                     invert[static_cast<size_t>(j) * static_cast<size_t>(k_) +
                            static_cast<size_t>(i)],
-                    encode_matrix_[static_cast<size_t>(k_) *
+                    encode_matrix[static_cast<size_t>(k_) *
                                        static_cast<size_t>(idx) +
                                    static_cast<size_t>(j)]);
             }
@@ -325,7 +325,7 @@ bool rs_block_erasure::decode_block(
                 err_list[nerrs++] = static_cast<uint8_t>(i);
             }
         }
-        if (nerrs > p_)
+        if (nerrs > p)
         {
             return false;
         }
@@ -417,14 +417,14 @@ void rs_block_erasure::push_app(const uint8_t* data, size_t len,
         oversized_++;
         return;
     }
-    pending_.emplace_back(data, data + len);
-    if (!deadline_set_)
+    pending.emplace_back(data, data + len);
+    if (!deadline_set)
     {
-        deadline_ = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(timeout_ms_);
-        deadline_set_ = true;
+        deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+        deadline_set = true;
     }
-    if (static_cast<int>(pending_.size()) >= k_)
+    if (static_cast<int>(pending.size()) >= k_)
     {
         flush(out);
     }
@@ -436,21 +436,21 @@ void rs_block_erasure::flush(std::vector<std::vector<uint8_t>>* out)
     {
         out->clear();
     }
-    if (!enabled_ || out == nullptr || pending_.empty())
+    if (!enabled_ || out == nullptr || pending.empty())
     {
         return;
     }
-    if (!encode_block(pending_, block_id_, out))
+    if (!encode_block(pending, block_id, out))
     {
         oversized_++;
         out->clear();
-        pending_.clear();
-        deadline_set_ = false;
+        pending.clear();
+        deadline_set = false;
         return;
     }
-    block_id_ = static_cast<uint16_t>(block_id_ + 1);
-    pending_.clear();
-    deadline_set_ = false;
+    block_id = static_cast<uint16_t>(block_id + 1);
+    pending.clear();
+    deadline_set = false;
     blocks_++;
 }
 
@@ -461,11 +461,11 @@ void rs_block_erasure::on_tick(std::vector<std::vector<uint8_t>>* out)
         out->clear();
     }
     expire_rx();
-    if (!enabled_ || !deadline_set_ || timeout_ms_ <= 0)
+    if (!enabled_ || !deadline_set || timeout_ms <= 0)
     {
         return;
     }
-    if (std::chrono::steady_clock::now() < deadline_)
+    if (std::chrono::steady_clock::now() < deadline)
     {
         return;
     }
@@ -474,19 +474,19 @@ void rs_block_erasure::on_tick(std::vector<std::vector<uint8_t>>* out)
 
 void rs_block_erasure::expire_rx()
 {
-    if (rx_blocks_.empty())
+    if (rx_blocks.empty())
     {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
-    const int hold_ms = std::max(timeout_ms_ * 5, 100);
+    const int hold_ms = std::max(timeout_ms * 5, 100);
     const auto hold = std::chrono::milliseconds(hold_ms);
-    for (auto it = rx_blocks_.begin(); it != rx_blocks_.end();)
+    for (auto it = rx_blocks.begin(); it != rx_blocks.end();)
     {
         if (now - it->second.first_seen > hold)
         {
             decode_fail_++;
-            it = rx_blocks_.erase(it);
+            it = rx_blocks.erase(it);
         }
         else
         {
@@ -497,14 +497,14 @@ void rs_block_erasure::expire_rx()
 
 void rs_block_erasure::mark_done(uint16_t block_id)
 {
-    if (done_.insert(block_id).second)
+    if (done.insert(block_id).second)
     {
-        done_order_.push_back(block_id);
+        done_order.push_back(block_id);
     }
-    while (done_order_.size() > k_done_max)
+    while (done_order.size() > k_done_max)
     {
-        done_.erase(done_order_.front());
-        done_order_.pop_front();
+        done.erase(done_order.front());
+        done_order.pop_front();
     }
 }
 
@@ -539,18 +539,18 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
         decode_fail_++;
         return;
     }
-    if (done_.count(block_id) != 0)
+    if (done.count(block_id) != 0)
     {
         return;
     }
     rx_block_s* buf = nullptr;
-    auto it = rx_blocks_.find(block_id);
-    if (it == rx_blocks_.end())
+    auto it = rx_blocks.find(block_id);
+    if (it == rx_blocks.end())
     {
-        while (rx_blocks_.size() >= k_block_max)
+        while (rx_blocks.size() >= k_block_max)
         {
-            auto oldest = rx_blocks_.begin();
-            for (auto j = rx_blocks_.begin(); j != rx_blocks_.end(); ++j)
+            auto oldest = rx_blocks.begin();
+            for (auto j = rx_blocks.begin(); j != rx_blocks.end(); ++j)
             {
                 if (j->second.first_seen < oldest->second.first_seen)
                 {
@@ -558,13 +558,13 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
                 }
             }
             decode_fail_++;
-            rx_blocks_.erase(oldest);
+            rx_blocks.erase(oldest);
         }
         rx_block_s nb;
         nb.k = k;
         nb.n = n;
         nb.first_seen = std::chrono::steady_clock::now();
-        it = rx_blocks_.emplace(block_id, std::move(nb)).first;
+        it = rx_blocks.emplace(block_id, std::move(nb)).first;
     }
     buf = &it->second;
     if (buf->frags.count(index) != 0)
@@ -579,7 +579,7 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
     }
     int rec = 0;
     const bool ok = decode_block(buf->frags, out, &rec);
-    rx_blocks_.erase(block_id);
+    rx_blocks.erase(block_id);
     mark_done(block_id);
     if (!ok)
     {

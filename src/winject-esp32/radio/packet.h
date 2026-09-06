@@ -69,8 +69,8 @@ private:
     void steal_from(packet& other) noexcept;
     void clear() noexcept;
 
-    packet_allocator* alloc_ = nullptr;
-    uint8_t* buf_ = nullptr;
+    packet_allocator* alloc = nullptr;
+    uint8_t* buf = nullptr;
     size_t capacity_ = 0;
     size_t offset_ = 0;
     size_t size_ = 0;
@@ -102,11 +102,11 @@ private:
     void release(uint8_t* buf);
     bool index_of(const uint8_t* buf, uint8_t* idx) const;
 
-    uint8_t storage_[k_max_count * k_buf_size]{};
-    std::atomic<uint8_t> refs_[k_max_count]{};
-    size_t count_ = 0;
-    void* free_ = nullptr;  // QueueHandle_t
-    bfc::light_function<void()> on_space_;
+    uint8_t storage[k_max_count * k_buf_size]{};
+    std::atomic<uint8_t> refs[k_max_count]{};
+    size_t count = 0;
+    void* free = nullptr;  // QueueHandle_t
+    bfc::light_function<void()> on_space;
 };
 
 #endif  // WINJECT_PACKET_H_

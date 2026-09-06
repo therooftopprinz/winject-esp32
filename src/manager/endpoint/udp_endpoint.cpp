@@ -15,54 +15,54 @@ udp_endpoint::~udp_endpoint()
     close();
 }
 
-bool udp_endpoint::open(reactor& reactor, const upstream_config_s& cfg)
+bool udp_endpoint::open(::reactor& reactor, const upstream_config_s& cfg)
 {
-    reactor_ = &reactor;
-    mode_ = cfg.mode;
-    sock_ = make_udp4();
-    if (sock_.fd() < 0)
+    this->reactor = &reactor;
+    mode = cfg.mode;
+    sock = make_udp4();
+    if (sock.fd() < 0)
     {
         LOG_ERR("udp socket: %s", strerror(errno));
         return false;
     }
 
-    if (mode_ == upstream_mode_e::udp_generic)
+    if (mode == upstream_mode_e::udp_generic)
     {
         sockaddr_in bind_addr = {};
-        if (!parse_host_port(cfg.rx, &bind_addr) || sock_.bind(bind_addr) < 0)
+        if (!parse_host_port(cfg.rx, &bind_addr) || sock.bind(bind_addr) < 0)
         {
             LOG_ERR("udp bind %s: %s", cfg.rx.c_str(), strerror(errno));
             return false;
         }
-        dest_valid_ = parse_host_port(cfg.tx, &dest_);
-        if (!dest_valid_)
+        dest_valid = parse_host_port(cfg.tx, &dest);
+        if (!dest_valid)
         {
             LOG_ERR("udp tx %s invalid", cfg.tx.c_str());
             return false;
         }
     }
-    else if (mode_ == upstream_mode_e::udp_server)
+    else if (mode == upstream_mode_e::udp_server)
     {
         sockaddr_in bind_addr = {};
         if (!parse_host_port(cfg.bind_address, &bind_addr) ||
-            sock_.bind(bind_addr) < 0)
+            sock.bind(bind_addr) < 0)
         {
             LOG_ERR("udp bind %s: %s", cfg.bind_address.c_str(),
                     strerror(errno));
             return false;
         }
     }
-    else if (mode_ == upstream_mode_e::udp_client)
+    else if (mode == upstream_mode_e::udp_client)
     {
-        if (!parse_host_port(cfg.connect_address, &dest_))
+        if (!parse_host_port(cfg.connect_address, &dest))
         {
             LOG_ERR("udp connect_address %s invalid",
                     cfg.connect_address.c_str());
             return false;
         }
-        dest_valid_ = true;
+        dest_valid = true;
         uint16_t local_port = 0;
-        if (!bind_udp_any(sock_.fd(), &local_port))
+        if (!bind_udp_any(sock.fd(), &local_port))
         {
             LOG_ERR("udp client bind: %s", strerror(errno));
             return false;
@@ -71,16 +71,16 @@ bool udp_endpoint::open(reactor& reactor, const upstream_config_s& cfg)
 
     if (cfg.fec_type == fec_type_e::rs_block_erasure)
     {
-        if (!fec_.init(cfg.fec_k, cfg.fec_n, cfg.fec_timeout_ms))
+        if (!fec.init(cfg.fec_k, cfg.fec_n, cfg.fec_timeout_ms))
         {
             LOG_ERR("udp fec init k=%d n=%d failed", cfg.fec_k, cfg.fec_n);
             return false;
         }
         LOG_INF("udp fec RS_BLOCK_ERASURE k=%d n=%d timeout=%d ms (%s)",
-                cfg.fec_k, cfg.fec_n, cfg.fec_timeout_ms, fec_.impl_name());
+                cfg.fec_k, cfg.fec_n, cfg.fec_timeout_ms, fec.impl_name());
     }
 
-    return reactor.add_read_rdy(sock_.fd(),
+    return reactor.add_read_rdy(sock.fd(),
                                 [this]()
                                 {
                                     on_app();
@@ -89,13 +89,13 @@ bool udp_endpoint::open(reactor& reactor, const upstream_config_s& cfg)
 
 void udp_endpoint::close()
 {
-    if (sock_.fd() >= 0)
+    if (sock.fd() >= 0)
     {
-        if (reactor_ != nullptr)
+        if (reactor != nullptr)
         {
-            reactor_->rem_read_rdy(sock_.fd());
+            reactor->rem_read_rdy(sock.fd());
         }
-        close_socket(&sock_);
+        close_socket(&sock);
     }
 }
 
@@ -105,11 +105,11 @@ void udp_endpoint::enqueue_air(std::vector<uint8_t> pkt)
     {
         return;
     }
-    if (txq_.size() >= k_max_udp_queue)
+    if (txq.size() >= k_max_udp_queue)
     {
-        txq_.pop_front();
+        txq.pop_front();
     }
-    txq_.push_back(std::move(pkt));
+    txq.push_back(std::move(pkt));
 }
 
 void udp_endpoint::on_app()
@@ -117,7 +117,7 @@ void udp_endpoint::on_app()
     while (true)
     {
         sockaddr_in from = {};
-        const ssize_t n = udp_recv_from(sock_.fd(), buf_, sizeof(buf_), &from);
+        const ssize_t n = udp_recv_from(sock.fd(), buf, sizeof(buf), &from);
         if (n < 0)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK ||
@@ -132,17 +132,17 @@ void udp_endpoint::on_app()
         {
             return;
         }
-        if (mode_ == upstream_mode_e::udp_server)
+        if (mode == upstream_mode_e::udp_server)
         {
-            dest_ = from;
-            dest_valid_ = true;
+            dest = from;
+            dest_valid = true;
         }
-        app_rx_pkt_interval_++;
-        app_rx_bytes_interval_ += static_cast<uint64_t>(n);
-        if (fec_.enabled())
+        app_rx_pkt_interval++;
+        app_rx_bytes_interval += static_cast<uint64_t>(n);
+        if (fec.enabled())
         {
             std::vector<std::vector<uint8_t>> encoded;
-            fec_.push_app(buf_, static_cast<size_t>(n), &encoded);
+            fec.push_app(buf, static_cast<size_t>(n), &encoded);
             for (auto& pkt : encoded)
             {
                 enqueue_air(std::move(pkt));
@@ -154,7 +154,7 @@ void udp_endpoint::on_app()
             LOG_WRN("drop oversized udp %zd", n);
             continue;
         }
-        enqueue_air(std::vector<uint8_t>(buf_, buf_ + n));
+        enqueue_air(std::vector<uint8_t>(buf, buf + n));
     }
 }
 
@@ -164,36 +164,36 @@ void udp_endpoint::on_radio_rx(const uint8_t* data, size_t len)
     {
         return;
     }
-    air_rx_bytes_interval_ += len;
-    if (sock_.fd() < 0 || !dest_valid_)
+    air_rx_bytes_interval += len;
+    if (sock.fd() < 0 || !dest_valid)
     {
         return;
     }
-    if (fec_.enabled())
+    if (fec.enabled())
     {
         std::vector<std::vector<uint8_t>> payloads;
-        fec_.push_air(data, len, &payloads);
+        fec.push_air(data, len, &payloads);
         for (const auto& p : payloads)
         {
-            radio_rx_pkt_interval_++;
-            radio_rx_bytes_interval_ += p.size();
-            udp_send_to(sock_.fd(), dest_, p.data(), p.size());
+            radio_rx_pkt_interval++;
+            radio_rx_bytes_interval += p.size();
+            udp_send_to(sock.fd(), dest, p.data(), p.size());
         }
         return;
     }
-    radio_rx_pkt_interval_++;
-    radio_rx_bytes_interval_ += len;
-    udp_send_to(sock_.fd(), dest_, data, len);
+    radio_rx_pkt_interval++;
+    radio_rx_bytes_interval += len;
+    udp_send_to(sock.fd(), dest, data, len);
 }
 
 void udp_endpoint::on_tick()
 {
-    if (!fec_.enabled())
+    if (!fec.enabled())
     {
         return;
     }
     std::vector<std::vector<uint8_t>> encoded;
-    fec_.on_tick(&encoded);
+    fec.on_tick(&encoded);
     for (auto& pkt : encoded)
     {
         enqueue_air(std::move(pkt));
@@ -202,12 +202,12 @@ void udp_endpoint::on_tick()
 
 void udp_endpoint::announce_down()
 {
-    if (!fec_.enabled())
+    if (!fec.enabled())
     {
         return;
     }
     std::vector<std::vector<uint8_t>> encoded;
-    fec_.flush(&encoded);
+    fec.flush(&encoded);
     for (auto& pkt : encoded)
     {
         enqueue_air(std::move(pkt));
@@ -216,35 +216,35 @@ void udp_endpoint::announce_down()
 
 uint64_t udp_endpoint::take_rx_bytes()
 {
-    const uint64_t n = radio_rx_bytes_interval_;
-    radio_rx_bytes_interval_ = 0;
+    const uint64_t n = radio_rx_bytes_interval;
+    radio_rx_bytes_interval = 0;
     return n;
 }
 
 stream_stats_s udp_endpoint::take_stats()
 {
     stream_stats_s s;
-    s.proto = fec_.enabled() ? "UDP+RS" : "UDP";
-    s.tx_bytes = app_rx_bytes_interval_;
+    s.proto = fec.enabled() ? "UDP+RS" : "UDP";
+    s.tx_bytes = app_rx_bytes_interval;
     s.rx_bytes = take_rx_bytes();
-    s.air_tx_bytes = air_tx_bytes_interval_;
-    s.air_rx_bytes = air_rx_bytes_interval_;
-    if (fec_.enabled())
+    s.air_tx_bytes = air_tx_bytes_interval;
+    s.air_rx_bytes = air_rx_bytes_interval;
+    if (fec.enabled())
     {
-        s.fec_recovered = fec_.take_recovered();
-        s.fec_fail = fec_.take_decode_fail();
+        s.fec_recovered = fec.take_recovered();
+        s.fec_fail = fec.take_decode_fail();
     }
-    air_tx_bytes_interval_ = 0;
-    air_rx_bytes_interval_ = 0;
-    app_rx_pkt_interval_ = 0;
-    app_rx_bytes_interval_ = 0;
-    radio_rx_pkt_interval_ = 0;
+    air_tx_bytes_interval = 0;
+    air_rx_bytes_interval = 0;
+    app_rx_pkt_interval = 0;
+    app_rx_bytes_interval = 0;
+    radio_rx_pkt_interval = 0;
     return s;
 }
 
 bool udp_endpoint::has_tx() const
 {
-    return !txq_.empty();
+    return !txq.empty();
 }
 
 size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
@@ -253,18 +253,18 @@ size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
     {
         *is_ack = false;
     }
-    if (txq_.empty() || out == nullptr || max == 0)
+    if (txq.empty() || out == nullptr || max == 0)
     {
         return 0;
     }
-    auto& pkt = txq_.front();
+    auto& pkt = txq.front();
     if (pkt.size() > max)
     {
         return 0;
     }
     memcpy(out, pkt.data(), pkt.size());
     const size_t n = pkt.size();
-    txq_.pop_front();
-    air_tx_bytes_interval_ += n;
+    txq.pop_front();
+    air_tx_bytes_interval += n;
     return n;
 }

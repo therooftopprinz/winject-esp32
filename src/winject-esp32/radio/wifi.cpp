@@ -97,33 +97,28 @@ wifi& wifi::instance()
 wifi::wifi()
     : tx_(*this),
       rx_(*this),
-      rx_led_(WIFI_RX_LED_GPIO),
-      tx_led_(WIFI_TX_LED_GPIO)
+      rx_led(WIFI_RX_LED_GPIO),
+      tx_led(WIFI_TX_LED_GPIO)
 {
-}
-
-bfc::semaphore& wifi::lock()
-{
-    return lock_;
 }
 
 void wifi::pulse_tx_led()
 {
-    tx_led_.pulse();
+    tx_led.pulse();
 }
 
 void wifi::pulse_rx_led()
 {
-    rx_led_.pulse();
+    rx_led.pulse();
 }
 
 void wifi::init_activity_leds()
 {
-    const bool rx = rx_led_.init();
-    const bool tx = tx_led_.init();
+    const bool rx = rx_led.init();
+    const bool tx = tx_led.init();
     if (!rx && !tx)
     {
-        if (rx_led_.enabled() || tx_led_.enabled())
+        if (rx_led.enabled() || tx_led.enabled())
         {
             ESP_LOGW(TAG, "activity LED gpio_config failed");
         }
@@ -138,15 +133,15 @@ void wifi::init_activity_leds()
     if (rx && tx)
     {
         ESP_LOGI(TAG, "activity LEDs RX=IO%d TX=IO%d (active-low, %u us)",
-                 rx_led_.gpio(), tx_led_.gpio(), WIFI_LED_STRETCH_US);
+                 rx_led.gpio(), tx_led.gpio(), WIFI_LED_STRETCH_US);
     }
     else if (rx)
     {
-        ESP_LOGI(TAG, "activity LED RX=IO%d; TX LED disabled", rx_led_.gpio());
+        ESP_LOGI(TAG, "activity LED RX=IO%d; TX LED disabled", rx_led.gpio());
     }
     else
     {
-        ESP_LOGI(TAG, "activity LED TX=IO%d; RX LED disabled", tx_led_.gpio());
+        ESP_LOGI(TAG, "activity LED TX=IO%d; RX LED disabled", tx_led.gpio());
     }
 }
 
@@ -163,10 +158,10 @@ esp_err_t wifi::apply_country()
 
 bool wifi::apply_channel()
 {
-    const esp_err_t err = esp_wifi_set_channel(channel_, WIFI_SECOND_CHAN_NONE);
+    const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "set_channel %u failed: %s", channel_,
+        ESP_LOGE(TAG, "set_channel %u failed: %s", channel,
                  esp_err_to_name(err));
         return false;
     }
@@ -176,7 +171,7 @@ bool wifi::apply_channel()
 
 bool wifi::apply_modulation()
 {
-    const uint8_t proto = protocol_for_rate(modulation_rate_);
+    const uint8_t proto = protocol_for_rate(modulation_rate);
     esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, proto);
     if (err != ESP_OK)
     {
@@ -184,7 +179,7 @@ bool wifi::apply_modulation()
         return false;
     }
 
-    err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, modulation_rate_);
+    err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, modulation_rate);
     if (err == ESP_OK)
     {
         return true;
@@ -197,7 +192,7 @@ bool wifi::apply_modulation()
         return false;
     }
 
-    err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, modulation_rate_);
+    err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, modulation_rate);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "config_80211_tx_rate failed: %s", esp_err_to_name(err));
@@ -223,13 +218,13 @@ bool wifi::initialize()
     const modulation_entry_s* def = find_modulation(WIFI_DEFAULT_MODULATION);
     if (def != nullptr)
     {
-        modulation_name_ = def->name;
-        modulation_rate_ = def->rate;
+        modulation_name = def->name;
+        modulation_rate = def->rate;
     }
 
     init_activity_leds();
 
-    if (!lock_.init())
+    if (!lock.init())
     {
         ESP_LOGE(TAG, "radio lock alloc failed");
         return false;
@@ -272,7 +267,7 @@ bool wifi::initialize()
 
     ready_.store(true, std::memory_order_release);
     ESP_LOGI(TAG, "monitor/inject on channel %u rate %s (core %d) AMPDU off",
-             channel_, modulation_name_, WIFI_RADIO_TASK_CORE);
+             channel, modulation_name, WIFI_RADIO_TASK_CORE);
     return true;
 }
 
@@ -293,18 +288,18 @@ bool wifi::set_channel(uint8_t channel)
         return false;
     }
 
-    bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(1000));
+    bfc::semaphore::lock guard(lock, pdMS_TO_TICKS(1000));
     if (!guard)
     {
         return false;
     }
 
-    const uint8_t previous = channel_;
-    channel_ = channel;
+    const uint8_t previous = this->channel;
+    this->channel = channel;
     const bool ok = apply_channel();
     if (!ok)
     {
-        channel_ = previous;
+        this->channel = previous;
     }
 
     return ok;
@@ -323,21 +318,21 @@ bool wifi::set_modulation(const char* name)
         return false;
     }
 
-    bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(2000));
+    bfc::semaphore::lock guard(lock, pdMS_TO_TICKS(2000));
     if (!guard)
     {
         return false;
     }
 
-    const char* previous_name = modulation_name_;
-    const wifi_phy_rate_t previous_rate = modulation_rate_;
-    modulation_name_ = entry->name;
-    modulation_rate_ = entry->rate;
+    const char* previous_name = modulation_name;
+    const wifi_phy_rate_t previous_rate = modulation_rate;
+    modulation_name = entry->name;
+    modulation_rate = entry->rate;
     bool ok = apply_modulation() && apply_channel() && rx_.apply_monitor();
     if (!ok)
     {
-        modulation_name_ = previous_name;
-        modulation_rate_ = previous_rate;
+        modulation_name = previous_name;
+        modulation_rate = previous_rate;
         apply_modulation();
         apply_channel();
         rx_.apply_monitor();
@@ -354,9 +349,9 @@ void wifi::get_status(wifi_status_s* status)
     }
 
     {
-        bfc::semaphore::lock guard(lock_, pdMS_TO_TICKS(50));
-        status->channel = channel_;
-        status->modulation = modulation_name_;
+        bfc::semaphore::lock guard(lock, pdMS_TO_TICKS(50));
+        status->channel = channel;
+        status->modulation = modulation_name;
         tx_.fill_status(status);
     }
 

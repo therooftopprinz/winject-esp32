@@ -29,64 +29,64 @@ public:
     task_reactor(const task_reactor&) = delete;
     task_reactor& operator=(const task_reactor&) = delete;
 
-    explicit task_reactor(uint64_t timeout_ms = 100) : timeout_ms_(timeout_ms)
+    explicit task_reactor(uint64_t timeout_ms = 100) : timeout_ms(timeout_ms)
     {
-        ctx_lock_ = xSemaphoreCreateMutex();
-        wake_lock_ = xSemaphoreCreateMutex();
+        ctx_lock = xSemaphoreCreateMutex();
+        wake_lock = xSemaphoreCreateMutex();
     }
 
     ~task_reactor()
     {
         stop();
-        if (ctx_lock_ != nullptr)
+        if (ctx_lock != nullptr)
         {
-            vSemaphoreDelete(ctx_lock_);
+            vSemaphoreDelete(ctx_lock);
         }
-        if (wake_lock_ != nullptr)
+        if (wake_lock != nullptr)
         {
-            vSemaphoreDelete(wake_lock_);
+            vSemaphoreDelete(wake_lock);
         }
     }
 
     timer_t& get_timer()
     {
-        return timer_;
+        return timer;
     }
 
     bool add_read_rdy(context& ctx, cb_t cb)
     {
         ctx.set_callback(std::move(cb));
-        if (ctx_lock_ == nullptr ||
-            xSemaphoreTake(ctx_lock_, portMAX_DELAY) != pdTRUE)
+        if (ctx_lock == nullptr ||
+            xSemaphoreTake(ctx_lock, portMAX_DELAY) != pdTRUE)
         {
             return false;
         }
-        if (std::find(contexts_.begin(), contexts_.end(), &ctx) ==
-            contexts_.end())
+        if (std::find(contexts.begin(), contexts.end(), &ctx) ==
+            contexts.end())
         {
-            contexts_.push_back(&ctx);
+            contexts.push_back(&ctx);
         }
-        xSemaphoreGive(ctx_lock_);
+        xSemaphoreGive(ctx_lock);
         return true;
     }
 
     bool remove_read_rdy(context& ctx)
     {
         ctx.set_callback(nullptr);
-        if (ctx_lock_ == nullptr ||
-            xSemaphoreTake(ctx_lock_, portMAX_DELAY) != pdTRUE)
+        if (ctx_lock == nullptr ||
+            xSemaphoreTake(ctx_lock, portMAX_DELAY) != pdTRUE)
         {
             return false;
         }
-        contexts_.erase(std::remove(contexts_.begin(), contexts_.end(), &ctx),
-                        contexts_.end());
-        xSemaphoreGive(ctx_lock_);
+        contexts.erase(std::remove(contexts.begin(), contexts.end(), &ctx),
+                        contexts.end());
+        xSemaphoreGive(ctx_lock);
         return true;
     }
 
     bool is_reactor_thread() const
     {
-        const TaskHandle_t task = task_.load(std::memory_order_acquire);
+        const TaskHandle_t task = task.load(std::memory_order_acquire);
         return task != nullptr && xTaskGetCurrentTaskHandle() == task;
     }
 
@@ -94,7 +94,7 @@ public:
                       uint32_t stack_bytes = 6144)
     {
         bool expected = false;
-        if (!pinned_.compare_exchange_strong(expected, true,
+        if (!pinned.compare_exchange_strong(expected, true,
                                              std::memory_order_acq_rel))
         {
             return true;
@@ -105,7 +105,7 @@ public:
         if (xTaskCreatePinnedToCore(pinned_task, task_name, stack_bytes, this,
                                     prio, nullptr, core) != pdPASS)
         {
-            pinned_.store(false, std::memory_order_release);
+            pinned.store(false, std::memory_order_release);
             return false;
         }
         return true;
@@ -113,13 +113,13 @@ public:
 
     void run()
     {
-        task_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
-        running_.store(true, std::memory_order_release);
-        while (running_.load(std::memory_order_acquire))
+        task.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+        running.store(true, std::memory_order_release);
+        while (running.load(std::memory_order_acquire))
         {
-            TickType_t ticks = pdMS_TO_TICKS(timeout_ms_);
+            TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
             int64_t next_deadline_us = 0;
-            if (timer_.get_next_deadline_us(next_deadline_us))
+            if (timer.get_next_deadline_us(next_deadline_us))
             {
                 const int64_t diff =
                     next_deadline_us - timer_t::current_time_us();
@@ -130,7 +130,7 @@ public:
                 else
                 {
                     const uint64_t diff_ms = static_cast<uint64_t>(diff) / 1000;
-                    if (diff_ms < timeout_ms_)
+                    if (diff_ms < timeout_ms)
                     {
                         ticks = pdMS_TO_TICKS(diff_ms);
                     }
@@ -138,7 +138,7 @@ public:
             }
 
             const bool pending =
-                pending_wake_.exchange(false, std::memory_order_acq_rel);
+                pending_wake.exchange(false, std::memory_order_acq_rel);
             uint32_t n = 0;
             if (!pending)
             {
@@ -151,11 +151,11 @@ public:
             }
 
             std::vector<cb_t> cbs;
-            if (wake_lock_ != nullptr &&
-                xSemaphoreTake(wake_lock_, portMAX_DELAY) == pdTRUE)
+            if (wake_lock != nullptr &&
+                xSemaphoreTake(wake_lock, portMAX_DELAY) == pdTRUE)
             {
-                cbs.swap(wake_cbs_);
-                xSemaphoreGive(wake_lock_);
+                cbs.swap(wake_cbs);
+                xSemaphoreGive(wake_lock);
             }
 
             const bool woken = pending || n > 0 || !cbs.empty();
@@ -167,14 +167,14 @@ public:
                 }
             }
 
-            if (woken && running_.load(std::memory_order_acquire))
+            if (woken && running.load(std::memory_order_acquire))
             {
                 std::vector<context*> ctxs;
-                if (ctx_lock_ != nullptr &&
-                    xSemaphoreTake(ctx_lock_, portMAX_DELAY) == pdTRUE)
+                if (ctx_lock != nullptr &&
+                    xSemaphoreTake(ctx_lock, portMAX_DELAY) == pdTRUE)
                 {
-                    ctxs = contexts_;
-                    xSemaphoreGive(ctx_lock_);
+                    ctxs = contexts;
+                    xSemaphoreGive(ctx_lock);
                 }
                 for (context* ctx : ctxs)
                 {
@@ -185,37 +185,37 @@ public:
                 }
             }
 
-            timer_.schedule(timer_t::current_time_us());
+            timer.schedule(timer_t::current_time_us());
         }
-        task_.store(nullptr, std::memory_order_release);
+        task.store(nullptr, std::memory_order_release);
     }
 
     void wake_up(cb_t cb = nullptr)
     {
         if (cb)
         {
-            if (wake_lock_ != nullptr &&
-                xSemaphoreTake(wake_lock_, portMAX_DELAY) == pdTRUE)
+            if (wake_lock != nullptr &&
+                xSemaphoreTake(wake_lock, portMAX_DELAY) == pdTRUE)
             {
-                wake_cbs_.push_back(std::move(cb));
-                xSemaphoreGive(wake_lock_);
+                wake_cbs.push_back(std::move(cb));
+                xSemaphoreGive(wake_lock);
             }
         }
 
-        const TaskHandle_t task = task_.load(std::memory_order_acquire);
+        const TaskHandle_t task = task.load(std::memory_order_acquire);
         if (task != nullptr)
         {
             xTaskNotifyGive(task);
         }
         else
         {
-            pending_wake_.store(true, std::memory_order_release);
+            pending_wake.store(true, std::memory_order_release);
         }
     }
 
     void stop()
     {
-        running_.store(false, std::memory_order_release);
+        running.store(false, std::memory_order_release);
         wake_up();
     }
 
@@ -226,16 +226,16 @@ private:
         vTaskDelete(nullptr);
     }
 
-    uint64_t timeout_ms_ = 100;
-    timer_t timer_;
-    SemaphoreHandle_t ctx_lock_ = nullptr;
-    SemaphoreHandle_t wake_lock_ = nullptr;
-    std::vector<context*> contexts_;
-    std::vector<cb_t> wake_cbs_;
-    std::atomic<bool> running_{false};
-    std::atomic<bool> pending_wake_{false};
-    std::atomic<bool> pinned_{false};
-    std::atomic<TaskHandle_t> task_{nullptr};
+    uint64_t timeout_ms = 100;
+    timer_t timer;
+    SemaphoreHandle_t ctx_lock = nullptr;
+    SemaphoreHandle_t wake_lock = nullptr;
+    std::vector<context*> contexts;
+    std::vector<cb_t> wake_cbs;
+    std::atomic<bool> running{false};
+    std::atomic<bool> pending_wake{false};
+    std::atomic<bool> pinned{false};
+    std::atomic<TaskHandle_t> task{nullptr};
 };
 
 }  // namespace bfc

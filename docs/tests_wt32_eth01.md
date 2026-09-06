@@ -1,6 +1,6 @@
 # WT32-ETH01 tests
 
-Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [refactor.md](refactor.md) (current) and [winject.md](winject.md) (pre-refactor).
+Two-radio checks against WInject-ESP32 firmware. Ethernet UDP in, raw 802.11 in the air, UDP out the other board. Frame format and console commands are in [winject.md](winject.md).
 
 The runner **sets CCA on both radios** over TCP `2323` (`set_cca_enabled`) before each rate. Channel and modulation are left as already configured unless `--channel`, `--modulation`, or `--all` is given. `--all` sweeps every firmware modulation.
 
@@ -28,7 +28,29 @@ The host must be on the same IPv4 subnet as both Ethernet ports. The runner send
 
 `STANDALONE` uses Addr3 prefix `CA:FE:BA:BE` plus the same domain octets. For that mode use `python3 scripts/stand_alone_test.py` (same flags as this runner, plus `--dual` / `--inject-port` / `--restore-tunnel`). `--dual` binds a second bus pair (`c3`/`d4` by default) on inject `9010` and host `9011`/`9012` and checks that pair-1 and pair-2 do not leak.
 
-`tools/bw_test.py --tcp` is the manager TCP path and is unchanged here; see [manager.md](manager.md).
+# Manager TCP path
+
+Host apps talk to `winject-manager` over TCP; managers bridge onto two STANDALONE bus pairs. Use `scripts/manager_tcp_bw_test.sh` (or `tools/bw_test.py --tcp` after radios are prepared). Details and configs: [manager.md](manager.md).
+
+```
+host TCP :29000 → manager A → radio A sut bus=b2 → air → radio B sur bus=b2 → manager B → host TCP :9002
+host TCP :9001  ← manager A ← radio A sur bus=d4 ← air ← radio B sut bus=d4 ← manager B ← host TCP :29001
+```
+
+| Item | Value |
+|------|--------|
+| Mode / domain | `STANDALONE` / `1234` (`scripts/prepare_radios_for_manager.py`) |
+| Pair 1 (A→B) | A `bus_tx=b2` `bus_rx=a1`; B swapped |
+| Pair 2 (B→A) | A `bus_tx=c3` `bus_rx=d4`; B swapped |
+| Inject / forward | A `9000`/`9010` → host `9210`/`9211`; B → `9220`/`9221` |
+| Configs | `configuration/winject-tests/bw_a.cfg` / `bw_b.cfg` |
+
+`--tcp` skips rebinding `sut`/`sur` (prepare + managers own those) but still applies `--channel` / `--modulation` / CCA unless `--skip-config` is also set.
+
+```bash
+./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M
+./scripts/manager_tcp_bw_test.sh --a 192.168.127.181 --b 192.168.128.119 --modulation OFDM_MCS4_LGI --kbps 8000
+```
 
 # Runner
 

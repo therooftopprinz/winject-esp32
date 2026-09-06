@@ -23,15 +23,15 @@ public:
 
     ~wait_free_queue()
     {
-        if (free_ != nullptr)
+        if (free != nullptr)
         {
-            vQueueDelete(free_);
-            free_ = nullptr;
+            vQueueDelete(free);
+            free = nullptr;
         }
-        if (filled_ != nullptr)
+        if (filled != nullptr)
         {
-            vQueueDelete(filled_);
-            filled_ = nullptr;
+            vQueueDelete(filled);
+            filled = nullptr;
         }
     }
 
@@ -40,7 +40,7 @@ public:
 
     bool init()
     {
-        if (free_ != nullptr && filled_ != nullptr)
+        if (free != nullptr && filled != nullptr)
         {
             return true;
         }
@@ -67,14 +67,14 @@ public:
                 return false;
             }
         }
-        free_ = free_q;
-        filled_ = filled_q;
+        free = free_q;
+        filled = filled_q;
         return true;
     }
 
     bool ready() const
     {
-        return free_ != nullptr && filled_ != nullptr;
+        return free != nullptr && filled != nullptr;
     }
 
     // Non-blocking. Moves into a free slot only after one is claimed.
@@ -87,7 +87,7 @@ public:
             return false;
         }
         uint8_t idx = 0;
-        if (xQueueReceive(free_, &idx, 0) != pdTRUE)
+        if (xQueueReceive(free, &idx, 0) != pdTRUE)
         {
             return false;
         }
@@ -95,11 +95,11 @@ public:
         {
             return false;
         }
-        slots_[idx] = std::move(item);
-        if (xQueueSend(filled_, &idx, 0) != pdTRUE)
+        slots[idx] = std::move(item);
+        if (xQueueSend(filled, &idx, 0) != pdTRUE)
         {
-            slots_[idx] = T{};
-            xQueueSend(free_, &idx, 0);
+            slots[idx] = T{};
+            xQueueSend(free, &idx, 0);
             return false;
         }
         return true;
@@ -113,11 +113,11 @@ public:
             return nullptr;
         }
         uint8_t idx = 0;
-        if (xQueuePeek(filled_, &idx, 0) != pdTRUE || idx >= Cap)
+        if (xQueuePeek(filled, &idx, 0) != pdTRUE || idx >= Cap)
         {
             return nullptr;
         }
-        return &slots_[idx];
+        return &slots[idx];
     }
 
     T* peek()
@@ -135,16 +135,16 @@ public:
             return false;
         }
         uint8_t idx = 0;
-        if (xQueueReceive(filled_, &idx, wait) != pdTRUE)
+        if (xQueueReceive(filled, &idx, wait) != pdTRUE)
         {
             return false;
         }
         if (idx < Cap)
         {
-            *out = std::move(slots_[idx]);
-            slots_[idx] = T{};
+            *out = std::move(slots[idx]);
+            slots[idx] = T{};
         }
-        xQueueSend(free_, &idx, 0);
+        xQueueSend(free, &idx, 0);
         return true;
     }
 
@@ -155,11 +155,11 @@ public:
 
     uint8_t size() const
     {
-        if (filled_ == nullptr)
+        if (filled == nullptr)
         {
             return 0;
         }
-        return static_cast<uint8_t>(uxQueueMessagesWaiting(filled_));
+        return static_cast<uint8_t>(uxQueueMessagesWaiting(filled));
     }
 
     static constexpr uint8_t capacity()
@@ -168,9 +168,9 @@ public:
     }
 
 private:
-    T slots_[Cap]{};
-    mutable QueueHandle_t free_ = nullptr;
-    mutable QueueHandle_t filled_ = nullptr;
+    T slots[Cap]{};
+    mutable QueueHandle_t free = nullptr;
+    mutable QueueHandle_t filled = nullptr;
 };
 
 }  // namespace bfc

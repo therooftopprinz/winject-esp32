@@ -9,7 +9,7 @@
 #include "freertos/queue.h"
 
 packet::packet(packet_allocator& alloc, uint8_t* buf, size_t capacity)
-    : alloc_(&alloc), buf_(buf), capacity_(capacity)
+    : alloc(&alloc), buf(buf), capacity_(capacity)
 {
 }
 
@@ -35,8 +35,8 @@ packet::~packet()
 
 void packet::steal_from(packet& other) noexcept
 {
-    alloc_ = other.alloc_;
-    buf_ = other.buf_;
+    alloc = other.alloc;
+    buf = other.buf;
     capacity_ = other.capacity_;
     offset_ = other.offset_;
     size_ = other.size_;
@@ -45,8 +45,8 @@ void packet::steal_from(packet& other) noexcept
 
 void packet::clear() noexcept
 {
-    alloc_ = nullptr;
-    buf_ = nullptr;
+    alloc = nullptr;
+    buf = nullptr;
     capacity_ = 0;
     offset_ = 0;
     size_ = 0;
@@ -55,13 +55,13 @@ void packet::clear() noexcept
 packet packet::share() const
 {
     packet out;
-    if (buf_ == nullptr || alloc_ == nullptr)
+    if (buf == nullptr || alloc == nullptr)
     {
         return out;
     }
-    alloc_->add_ref(buf_);
-    out.alloc_ = alloc_;
-    out.buf_ = buf_;
+    alloc->add_ref(buf);
+    out.alloc = alloc;
+    out.buf = buf;
     out.capacity_ = capacity_;
     out.offset_ = offset_;
     out.size_ = size_;
@@ -80,26 +80,26 @@ void packet::set_packet_size(size_t size)
 
 void packet::reset()
 {
-    if (alloc_ != nullptr && buf_ != nullptr)
+    if (alloc != nullptr && buf != nullptr)
     {
-        alloc_->release(buf_);
+        alloc->release(buf);
     }
     clear();
 }
 
 bool packet::is_valid() const
 {
-    return buf_ != nullptr && offset_ + size_ <= capacity_;
+    return buf != nullptr && offset_ + size_ <= capacity_;
 }
 
 uint8_t* packet::data()
 {
-    return buf_ == nullptr ? nullptr : buf_ + offset_;
+    return buf == nullptr ? nullptr : buf + offset_;
 }
 
 const uint8_t* packet::data() const
 {
-    return buf_ == nullptr ? nullptr : buf_ + offset_;
+    return buf == nullptr ? nullptr : buf + offset_;
 }
 
 size_t packet::size() const
@@ -114,7 +114,7 @@ size_t packet::offset() const
 
 size_t packet::capacity() const
 {
-    return buf_ == nullptr ? 0 : capacity_;
+    return buf == nullptr ? 0 : capacity_;
 }
 
 packet_allocator& packet_allocator::tx()
@@ -131,7 +131,7 @@ packet_allocator& packet_allocator::rx()
 
 bool packet_allocator::init(size_t count)
 {
-    if (free_ != nullptr)
+    if (free != nullptr)
     {
         return true;
     }
@@ -145,58 +145,58 @@ bool packet_allocator::init(size_t count)
     {
         return false;
     }
-    count_ = count;
+    this->count = count;
     for (size_t i = 0; i < k_max_count; i++)
     {
-        refs_[i].store(0, std::memory_order_relaxed);
+        refs[i].store(0, std::memory_order_relaxed);
     }
-    for (uint8_t i = 0; i < count_; i++)
+    for (uint8_t i = 0; i < count; i++)
     {
         if (xQueueSend(q, &i, 0) != pdTRUE)
         {
             vQueueDelete(q);
-            free_ = nullptr;
-            count_ = 0;
+            free = nullptr;
+            count = 0;
             return false;
         }
     }
-    free_ = q;
+    free = q;
     return true;
 }
 
 packet packet_allocator::allocate()
 {
     packet out;
-    if (free_ == nullptr)
+    if (free == nullptr)
     {
         return out;
     }
     uint8_t idx = 0;
-    if (xQueueReceive(static_cast<QueueHandle_t>(free_), &idx, 0) != pdTRUE)
+    if (xQueueReceive(static_cast<QueueHandle_t>(free), &idx, 0) != pdTRUE)
     {
         return out;
     }
-    if (idx >= count_)
+    if (idx >= count)
     {
         return out;
     }
-    refs_[idx].store(1, std::memory_order_relaxed);
-    return packet(*this, storage_ + static_cast<size_t>(idx) * k_buf_size,
+    refs[idx].store(1, std::memory_order_relaxed);
+    return packet(*this, storage + static_cast<size_t>(idx) * k_buf_size,
                   k_buf_size);
 }
 
 size_t packet_allocator::available() const
 {
-    if (free_ == nullptr)
+    if (free == nullptr)
     {
         return 0;
     }
-    return uxQueueMessagesWaiting(static_cast<QueueHandle_t>(free_));
+    return uxQueueMessagesWaiting(static_cast<QueueHandle_t>(free));
 }
 
 void packet_allocator::set_on_space(bfc::light_function<void()> cb)
 {
-    on_space_ = std::move(cb);
+    on_space = std::move(cb);
 }
 
 void packet_allocator::add_ref(uint8_t* buf)
@@ -206,7 +206,7 @@ void packet_allocator::add_ref(uint8_t* buf)
     {
         return;
     }
-    refs_[idx].fetch_add(1, std::memory_order_relaxed);
+    refs[idx].fetch_add(1, std::memory_order_relaxed);
 }
 
 void packet_allocator::release(uint8_t* buf)
@@ -216,34 +216,34 @@ void packet_allocator::release(uint8_t* buf)
     {
         return;
     }
-    const uint8_t prev = refs_[idx].fetch_sub(1, std::memory_order_acq_rel);
+    const uint8_t prev = refs[idx].fetch_sub(1, std::memory_order_acq_rel);
     if (prev != 1)
     {
         return;
     }
-    if (free_ != nullptr)
+    if (free != nullptr)
     {
-        xQueueSend(static_cast<QueueHandle_t>(free_), &idx, 0);
+        xQueueSend(static_cast<QueueHandle_t>(free), &idx, 0);
     }
-    if (on_space_)
+    if (on_space)
     {
-        on_space_();
+        on_space();
     }
 }
 
 bool packet_allocator::index_of(const uint8_t* buf, uint8_t* idx) const
 {
-    if (buf == nullptr || idx == nullptr || count_ == 0)
+    if (buf == nullptr || idx == nullptr || count == 0)
     {
         return false;
     }
-    const ptrdiff_t off = buf - storage_;
+    const ptrdiff_t off = buf - storage;
     if (off < 0 || (off % static_cast<ptrdiff_t>(k_buf_size)) != 0)
     {
         return false;
     }
     const ptrdiff_t i = off / static_cast<ptrdiff_t>(k_buf_size);
-    if (i < 0 || i >= static_cast<ptrdiff_t>(count_))
+    if (i < 0 || i >= static_cast<ptrdiff_t>(count))
     {
         return false;
     }

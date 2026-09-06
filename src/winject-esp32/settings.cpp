@@ -20,10 +20,10 @@ settings& settings::instance()
 }
 
 settings::settings()
-    : sut_(lc_tx_endpoint::instance()),
-      sur_(lc_rx_endpoint::instance()),
-      ci_(channel_info_endpoint::instance()),
-      netmgr_(manager::instance())
+    : sut(lc_tx_endpoint::instance()),
+      sur(lc_rx_endpoint::instance()),
+      ci(channel_info_endpoint::instance()),
+      netmgr(manager::instance())
 {
 }
 
@@ -84,17 +84,17 @@ bool settings::capture_live(snapshot_s* snap)
     }
 
     uint32_t fallback = 0;
-    if (netmgr_.static_ipv4(&fallback))
+    if (netmgr.static_ipv4(&fallback))
     {
         snap->fallback_ip = fallback;
     }
-    snap->network_mode = netmgr_.network_mode();
-    snap->dhcp_server_enabled = netmgr_.dhcp_server_enabled();
+    snap->network_mode = netmgr.network_mode();
+    snap->dhcp_server_enabled = netmgr.dhcp_server_enabled();
 
     snap->sut_count = WIFI_AIRPORT_MAX;
-    sut_.get_status(snap->sut, &snap->sut_count);
-    sur_.fill_status(snap->sur, &snap->sur_count);
-    ci_.fill_status(snap->ci, &snap->ci_count);
+    sut.get_status(snap->sut, &snap->sut_count);
+    sur.fill_status(snap->sur, &snap->sur_count);
+    ci.fill_status(snap->ci, &snap->ci_count);
     for (uint8_t i = 0; i < snap->sut_count; i++)
     {
         snap->sut[i].socket_open = false;
@@ -331,20 +331,20 @@ bool settings::read_blob(uint8_t slot, snapshot_s* snap)
     {
         return false;
     }
-    size_t len = sizeof(blob_);
-    const esp_err_t err = nvs_get_blob(handle, key, blob_, &len);
+    size_t len = sizeof(blob);
+    const esp_err_t err = nvs_get_blob(handle, key, blob, &len);
     nvs_close(handle);
     if (err != ESP_OK)
     {
         return false;
     }
-    return unpack_blob(blob_, len, snap);
+    return unpack_blob(blob, len, snap);
 }
 
 bool settings::write_blob(uint8_t slot, const snapshot_s& snap)
 {
     size_t len = 0;
-    if (!pack_blob(snap, blob_, &len))
+    if (!pack_blob(snap, blob, &len))
     {
         return false;
     }
@@ -356,7 +356,7 @@ bool settings::write_blob(uint8_t slot, const snapshot_s& snap)
         ESP_LOGE(TAG, "nvs open failed");
         return false;
     }
-    bool ok = nvs_set_blob(handle, key, blob_, len) == ESP_OK;
+    bool ok = nvs_set_blob(handle, key, blob, len) == ESP_OK;
     if (ok)
     {
         ok = nvs_set_u8(handle, k_current_key, slot) == ESP_OK;
@@ -377,10 +377,10 @@ bool settings::apply_snapshot(const snapshot_s& snap)
     }
     if (snap.fallback_ip != 0)
     {
-        netmgr_.set_ip(snap.fallback_ip);
+        netmgr.set_ip(snap.fallback_ip);
     }
-    netmgr_.set_dhcp_server_enabled(snap.dhcp_server_enabled);
-    if (!netmgr_.set_network_mode(snap.network_mode))
+    netmgr.set_dhcp_server_enabled(snap.dhcp_server_enabled);
+    if (!netmgr.set_network_mode(snap.network_mode))
     {
         ESP_LOGE(TAG, "network apply failed");
         return false;
@@ -404,21 +404,21 @@ bool settings::apply_snapshot(const snapshot_s& snap)
             return false;
         }
     }
-    if (!sut_.clear())
+    if (!sut.clear())
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;
     }
     for (uint8_t i = 0; i < snap.sut_count; i++)
     {
-        if (!sut_.add_endpoint(snap.sut[i].bus, snap.sut[i].udp_port))
+        if (!sut.add_endpoint(snap.sut[i].bus, snap.sut[i].udp_port))
         {
             ESP_LOGE(TAG, "endpoint apply failed");
             return false;
         }
     }
-    if (!sur_.load(snap.sur, snap.sur_count) ||
-        !ci_.load(snap.ci, snap.ci_count))
+    if (!sur.load(snap.sur, snap.sur_count) ||
+        !ci.load(snap.ci, snap.ci_count))
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;
@@ -433,7 +433,7 @@ uint8_t settings::current_slot() const
 
 WinjectMode settings::configured_mode() const
 {
-    return loaded_.mode;
+    return loaded.mode;
 }
 
 bool settings::persist_mode(WinjectMode mode)
@@ -446,23 +446,23 @@ bool settings::persist_mode(WinjectMode mode)
     if (configured_mode() != WINJECT_MODE_OTA && wifi::instance().ready())
     {
         // Snapshot live radio/endpoints before flipping into OTA.
-        if (!capture_live(&scratch_))
+        if (!capture_live(&scratch))
         {
             return false;
         }
-        loaded_ = scratch_;
+        loaded = scratch;
     }
     if (!frameSetMode(mode))
     {
         return false;
     }
-    loaded_.mode = mode;
-    if (!write_blob(current_slot_, loaded_))
+    loaded.mode = mode;
+    if (!write_blob(current_slot_, loaded))
     {
         ESP_LOGE(TAG, "persist mode failed");
         return false;
     }
-    has_loaded_ = true;
+    has_loaded = true;
     ESP_LOGI(TAG, "persisted mode %s slot %u", frameModeName(mode),
              current_slot_);
     return true;
@@ -477,28 +477,28 @@ bool settings::save(uint8_t slot)
     if (configured_mode() == WINJECT_MODE_OTA)
     {
         // Keep radio/endpoint tables from the last full-mode snapshot.
-        scratch_ = loaded_;
-        scratch_.mode = WINJECT_MODE_OTA;
+        scratch = loaded;
+        scratch.mode = WINJECT_MODE_OTA;
         uint32_t fallback = 0;
-        if (netmgr_.static_ipv4(&fallback))
+        if (netmgr.static_ipv4(&fallback))
         {
-            scratch_.fallback_ip = fallback;
+            scratch.fallback_ip = fallback;
         }
-        scratch_.network_mode = netmgr_.network_mode();
-        scratch_.dhcp_server_enabled = netmgr_.dhcp_server_enabled();
+        scratch.network_mode = netmgr.network_mode();
+        scratch.dhcp_server_enabled = netmgr.dhcp_server_enabled();
     }
-    else if (!capture_live(&scratch_))
+    else if (!capture_live(&scratch))
     {
         return false;
     }
-    if (!write_blob(slot, scratch_))
+    if (!write_blob(slot, scratch))
     {
         ESP_LOGE(TAG, "save slot %u failed", slot);
         return false;
     }
     current_slot_ = slot;
-    loaded_ = scratch_;
-    has_loaded_ = true;
+    loaded = scratch;
+    has_loaded = true;
     ESP_LOGI(TAG, "saved slot %u", slot);
     return true;
 }
@@ -509,12 +509,12 @@ bool settings::use(uint8_t slot)
     {
         return false;
     }
-    if (!read_blob(slot, &scratch_))
+    if (!read_blob(slot, &scratch))
     {
         return false;
     }
     const WinjectMode from = configured_mode();
-    const WinjectMode to = scratch_.mode;
+    const WinjectMode to = scratch.mode;
     nvs_handle_t handle = open_nvs(true);
     if (handle != 0)
     {
@@ -523,8 +523,8 @@ bool settings::use(uint8_t slot)
         nvs_close(handle);
     }
     current_slot_ = slot;
-    loaded_ = scratch_;
-    has_loaded_ = true;
+    loaded = scratch;
+    has_loaded = true;
     if (from == WINJECT_MODE_OTA || to == WINJECT_MODE_OTA)
     {
         // Entering/leaving OTA needs a reboot to (un)load WiFi and LCs.
@@ -532,7 +532,7 @@ bool settings::use(uint8_t slot)
                  frameModeName(to));
         return true;
     }
-    if (!apply_snapshot(scratch_))
+    if (!apply_snapshot(scratch))
     {
         return false;
     }
@@ -542,8 +542,8 @@ bool settings::use(uint8_t slot)
 
 bool settings::load_current()
 {
-    snapshot_defaults(&loaded_);
-    has_loaded_ = false;
+    snapshot_defaults(&loaded);
+    has_loaded = false;
     current_slot_ = 0;
 
     nvs_handle_t handle = open_nvs(false);
@@ -557,15 +557,15 @@ bool settings::load_current()
         nvs_close(handle);
     }
 
-    if (read_blob(current_slot_, &loaded_))
+    if (read_blob(current_slot_, &loaded))
     {
-        has_loaded_ = true;
-        if (loaded_.fallback_ip != 0)
+        has_loaded = true;
+        if (loaded.fallback_ip != 0)
         {
-            netmgr_.set_ip(loaded_.fallback_ip);
+            netmgr.set_ip(loaded.fallback_ip);
         }
-        netmgr_.set_dhcp_server_enabled(loaded_.dhcp_server_enabled);
-        netmgr_.set_network_mode(loaded_.network_mode);
+        netmgr.set_dhcp_server_enabled(loaded.dhcp_server_enabled);
+        netmgr.set_network_mode(loaded.network_mode);
         ESP_LOGI(TAG, "loaded slot %u", current_slot_);
     }
     else
@@ -577,9 +577,9 @@ bool settings::load_current()
 
 bool settings::apply_live()
 {
-    if (!has_loaded_)
+    if (!has_loaded)
     {
         return true;
     }
-    return apply_snapshot(loaded_);
+    return apply_snapshot(loaded);
 }

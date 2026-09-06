@@ -25,8 +25,8 @@ public:
     {
         if (other)
         {
-            other.copier_(static_cast<void*>(object_),
-                          static_cast<const void*>(other.object_));
+            other.copier(static_cast<void*>(object),
+                          static_cast<const void*>(other.object));
             copy_meta_from(other);
         }
         else
@@ -39,8 +39,8 @@ public:
     {
         if (other)
         {
-            other.mover_(static_cast<void*>(object_),
-                         static_cast<void*>(other.object_));
+            other.mover(static_cast<void*>(object),
+                         static_cast<void*>(other.object));
             copy_meta_from(other);
             other.reset();
         }
@@ -75,8 +75,8 @@ public:
             reset();
             if (other)
             {
-                other.mover_(static_cast<void*>(object_),
-                             static_cast<void*>(other.object_));
+                other.mover(static_cast<void*>(object),
+                             static_cast<void*>(other.object));
                 copy_meta_from(other);
                 other.reset();
             }
@@ -106,31 +106,31 @@ public:
 
     ~function()
     {
-        if (fn_ != nullptr)
+        if (fn != nullptr)
         {
-            destroyer_(object_);
+            destroyer(object);
         }
     }
 
     explicit operator bool() const
     {
-        return fn_ != nullptr;
+        return fn != nullptr;
     }
 
     void reset()
     {
-        if (fn_ != nullptr)
+        if (fn != nullptr)
         {
-            destroyer_(object_);
+            destroyer(object);
         }
         clear();
     }
 
     return_t operator()(args_t... args) const
     {
-        if (fn_ != nullptr)
+        if (fn != nullptr)
         {
-            return fn_(const_cast<void*>(static_cast<const void*>(object_)),
+            return fn(const_cast<void*>(static_cast<const void*>(object)),
                        std::forward<args_t>(args)...);
         }
         abort();
@@ -143,13 +143,13 @@ public:
             return;
         }
         using std::swap;
-        swap(fn_, other.fn_);
-        swap(destroyer_, other.destroyer_);
-        swap(copier_, other.copier_);
-        swap(mover_, other.mover_);
+        swap(fn, other.fn);
+        swap(destroyer, other.destroyer);
+        swap(copier, other.copier);
+        swap(mover, other.mover);
         for (size_t i = 0; i < N; ++i)
         {
-            swap(object_[i], other.object_[i]);
+            swap(object[i], other.object[i]);
         }
     }
 
@@ -171,21 +171,21 @@ private:
             alignof(std::max_align_t) % alignof(stored_t) == 0,
             "bfc::function storage not properly aligned for callable");
 
-        new (static_cast<void*>(object_))
+        new (static_cast<void*>(object))
             stored_t(std::forward<callable_t>(obj));
-        destroyer_ = [](void* p)
+        destroyer = [](void* p)
         {
             static_cast<stored_t*>(p)->~stored_t();
         };
-        copier_ = [](void* p, const void* other)
+        copier = [](void* p, const void* other)
         {
             new (p) stored_t(*static_cast<const stored_t*>(other));
         };
-        mover_ = [](void* p, void* other)
+        mover = [](void* p, void* other)
         {
             new (p) stored_t(std::move(*static_cast<stored_t*>(other)));
         };
-        fn_ = [](void* p, args_t... args) -> return_t
+        fn = [](void* p, args_t... args) -> return_t
         {
             return (*static_cast<stored_t*>(p))(std::forward<args_t>(args)...);
         };
@@ -193,22 +193,22 @@ private:
 
     void copy_meta_from(const function& other)
     {
-        fn_ = other.fn_;
-        destroyer_ = other.destroyer_;
-        copier_ = other.copier_;
-        mover_ = other.mover_;
+        fn = other.fn;
+        destroyer = other.destroyer;
+        copier = other.copier;
+        mover = other.mover;
     }
 
     void clear()
     {
-        fn_ = nullptr;
+        fn = nullptr;
     }
 
-    alignas(std::max_align_t) std::byte object_[N]{};
-    return_t (*fn_)(void*, args_t...) = nullptr;
-    void (*destroyer_)(void*) = nullptr;
-    void (*copier_)(void*, const void*) = nullptr;
-    void (*mover_)(void*, void*) = nullptr;
+    alignas(std::max_align_t) std::byte object[N]{};
+    return_t (*fn)(void*, args_t...) = nullptr;
+    void (*destroyer)(void*) = nullptr;
+    void (*copier)(void*, const void*) = nullptr;
+    void (*mover)(void*, void*) = nullptr;
 };
 
 template <size_t N, typename T>

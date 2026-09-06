@@ -33,20 +33,20 @@ public:
     bool established() const;
     bool ended_by_peer() const
     {
-        return peer_close_;
+        return peer_close;
     }
 
     bool peer_connected() const
     {
-        return peer_connect_ && !peer_close_;
+        return peer_connect && !peer_close;
     }
     bool wants_connect() const
     {
-        return peer_connect_ && !local_ && !peer_close_;
+        return peer_connect && !local && !peer_close;
     }
     size_t tcp_in_size() const
     {
-        return tcp_in_.size() - tcp_in_off_;
+        return tcp_in.size() - tcp_in_off;
     }
     size_t tcp_in_room() const
     {
@@ -55,7 +55,7 @@ public:
     }
     size_t unacked_count() const
     {
-        return unacked_.size();
+        return unacked.size();
     }
     bool accepts_tcp() const
     {
@@ -71,20 +71,20 @@ public:
     void on_tick();
     bool should_give_up() const
     {
-        return connect_give_up_ || data_stall_give_up_;
+        return connect_give_up || data_stall_give_up;
     }
     void clear_give_up()
     {
-        connect_give_up_ = false;
-        data_stall_give_up_ = false;
+        connect_give_up = false;
+        data_stall_give_up = false;
     }
     bool connect_timed_out() const
     {
-        return connect_give_up_;
+        return connect_give_up;
     }
     bool data_stalled() const
     {
-        return data_stall_give_up_;
+        return data_stall_give_up;
     }
 
 private:
@@ -109,25 +109,25 @@ private:
     size_t fill_sack_payload(uint8_t* out, size_t max) const;
     bool has_pending_connect() const;
 
-    bool local_ = false;
-    bool peer_connect_ = false;
-    bool peer_close_ = false;
-    bool ack_pending_ = false;
-    bool connect_give_up_ = false;
-    bool data_stall_give_up_ = false;
-    uint16_t tx_seq_ = 0;
-    uint16_t rx_seq_ = 0;
-    uint16_t tx_acked_ = 0;
-    size_t tcp_in_off_ = 0;
-    std::chrono::steady_clock::time_point connect_started_{};
-    std::chrono::steady_clock::time_point last_connect_{};
-    std::chrono::steady_clock::time_point last_ack_progress_{};
-    std::vector<uint8_t> tcp_in_;
-    std::deque<uint8_t> tcp_out_;
-    std::deque<pending_s> unacked_;
-    std::deque<std::vector<uint8_t>> ctrlq_;
+    bool local = false;
+    bool peer_connect = false;
+    bool peer_close = false;
+    bool ack_pending = false;
+    bool connect_give_up = false;
+    bool data_stall_give_up = false;
+    uint16_t tx_seq = 0;
+    uint16_t rx_seq = 0;
+    uint16_t tx_acked = 0;
+    size_t tcp_in_off = 0;
+    std::chrono::steady_clock::time_point connect_started{};
+    std::chrono::steady_clock::time_point last_connect{};
+    std::chrono::steady_clock::time_point last_ack_progress{};
+    std::vector<uint8_t> tcp_in;
+    std::deque<uint8_t> tcp_out;
+    std::deque<pending_s> unacked;
+    std::deque<std::vector<uint8_t>> ctrlq;
     // Out-of-order RX buffer: seq -> payload (selective repeat).
-    std::map<uint16_t, std::vector<uint8_t>> reorder_;
+    std::map<uint16_t, std::vector<uint8_t>> reorder;
 };
 
 #endif  // WINJECT_MANAGER_TCP_STREAM_H_

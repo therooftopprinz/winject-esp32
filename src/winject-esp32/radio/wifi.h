@@ -82,7 +82,6 @@ public:
 private:
     wifi();
 
-    bfc::semaphore& lock();
     void pulse_tx_led();
     void pulse_rx_led();
     esp_err_t apply_country();
@@ -92,13 +91,13 @@ private:
 
     wifi_tx tx_;
     wifi_rx rx_;
-    bfc::semaphore lock_;
-    uint8_t channel_ = WIFI_DEFAULT_CHANNEL;
-    const char* modulation_name_ = WIFI_DEFAULT_MODULATION;
-    wifi_phy_rate_t modulation_rate_ = WIFI_PHY_RATE_1M_L;
+    bfc::semaphore lock;
+    uint8_t channel = WIFI_DEFAULT_CHANNEL;
+    const char* modulation_name = WIFI_DEFAULT_MODULATION;
+    wifi_phy_rate_t modulation_rate = WIFI_PHY_RATE_1M_L;
     std::atomic<bool> ready_{false};
-    indicator_led rx_led_;
-    indicator_led tx_led_;
+    indicator_led rx_led;
+    indicator_led tx_led;
 };
 
 #endif  // WINJECT_WIFI_H_

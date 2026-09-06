@@ -4,13 +4,15 @@ winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
 winject.mode          = STANDALONE
+winject.domain        = 1234
 # Optional; omit/0 → 10000 kbps.
 # winject.max_rate_kbps = 10000
 
 upstream.size = 2
 
 upstream-0.mode             = UDP_GENERIC_FORWARDING
-upstream-0.airport          = 00:00:00:AA:BB:CC
+upstream-0.bus_tx           = b2
+upstream-0.bus_rx           = a1
 upstream-0.scheduler_budget = 100
 upstream-0.rx               = 0.0.0.0:22081
 upstream-0.tx               = 127.0.0.1:21082
@@ -20,7 +22,8 @@ upstream-0.tx               = 127.0.0.1:21082
 # upstream-0.fec.n            = 15
 
 upstream-1.mode             = TCP_SERVER_FORWARDING
-upstream-1.airport          = 02:02:03:04:05:06
+upstream-1.bus_tx           = c3
+upstream-1.bus_rx           = d4
 upstream-1.scheduler_budget = 1024
 upstream-1.rcv_buffer_size  = 16384
 upstream-1.snd_buffer_size  = 16384

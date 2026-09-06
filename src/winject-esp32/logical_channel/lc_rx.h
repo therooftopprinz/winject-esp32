@@ -50,8 +50,8 @@ private:
     void handle_mpdu(packet&& mpdu);
     packet pop(TickType_t wait);
 
-    bfc::wait_free_queue<std::optional<packet>, k_queue_cap> q_;
-    lc_rx_endpoint* ep_ = nullptr;
+    bfc::wait_free_queue<std::optional<packet>, k_queue_cap> q;
+    lc_rx_endpoint* ep = nullptr;
     std::atomic<uint32_t> drop_count_{0};
     std::atomic<uint32_t> bad_mpdu_count_{0};
 };

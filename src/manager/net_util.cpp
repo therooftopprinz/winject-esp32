@@ -66,110 +66,64 @@ bool parse_host_port(const std::string& text, sockaddr_in* out)
     return true;
 }
 
-static int hex_nibble(char c)
+bool parse_bus(const std::string& text, uint8_t* bus)
 {
-    if (c >= '0' && c <= '9')
-    {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f')
-    {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F')
-    {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-static bool parse_packed_mac(const std::string& text, uint8_t mac[6])
-{
-    if (text.size() != 12)
+    if (bus == nullptr || text.empty())
     {
         return false;
     }
-    for (int i = 0; i < 6; i++)
-    {
-        const int hi = hex_nibble(text[static_cast<size_t>(i) * 2]);
-        const int lo = hex_nibble(text[static_cast<size_t>(i) * 2 + 1]);
-        if (hi < 0 || lo < 0)
-        {
-            return false;
-        }
-        mac[i] = static_cast<uint8_t>((hi << 4) | lo);
-    }
-    return true;
-}
-
-static bool parse_colon_mac(const std::string& text, uint8_t mac[6])
-{
     const char* p = text.c_str();
-    for (int i = 0; i < 6; i++)
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
     {
-        char* end = nullptr;
-        const long value = std::strtol(p, &end, 16);
-        if (end == p || value < 0 || value > 255)
-        {
-            return false;
-        }
-        const size_t digits = static_cast<size_t>(end - p);
-        if (digits == 0 || digits > 2)
-        {
-            return false;
-        }
-        mac[i] = static_cast<uint8_t>(value);
-        if (i < 5)
-        {
-            if (*end != ':')
-            {
-                return false;
-            }
-            p = end + 1;
-        }
-        else if (*end != '\0')
-        {
-            return false;
-        }
+        p += 2;
     }
-    return true;
-}
-
-bool parse_airport(const std::string& text, uint8_t mac[6])
-{
-    if (mac == nullptr || text.empty())
+    const size_t n = strlen(p);
+    if (n < 1 || n > 2)
     {
         return false;
     }
-    if (text == "0")
+    char* end = nullptr;
+    const long v = std::strtol(p, &end, 16);
+    if (end != p + n || v < 0 || v > 255)
     {
-        memset(mac, 0, 6);
-        return true;
+        return false;
     }
-    if (text.find(':') != std::string::npos)
-    {
-        return parse_colon_mac(text, mac);
-    }
-    return parse_packed_mac(text, mac);
-}
-
-bool airport_is_zero(const uint8_t mac[6])
-{
-    for (int i = 0; i < 6; i++)
-    {
-        if (mac[i] != 0)
-        {
-            return false;
-        }
-    }
+    *bus = static_cast<uint8_t>(v);
     return true;
 }
 
-std::string airport_to_string(const uint8_t mac[6])
+bool parse_domain(const std::string& text, uint16_t* domain)
 {
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1],
-             mac[2], mac[3], mac[4], mac[5]);
+    if (domain == nullptr || text.empty())
+    {
+        return false;
+    }
+    const char* p = text.c_str();
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+    {
+        p += 2;
+    }
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(p, &end, 16);
+    if (end == p || *end != '\0' || v < 1 || v > 65535)
+    {
+        return false;
+    }
+    *domain = static_cast<uint16_t>(v);
+    return true;
+}
+
+std::string bus_to_string(uint8_t bus)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%x", bus);
+    return buf;
+}
+
+std::string domain_to_string(uint16_t domain)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%x", domain);
     return buf;
 }
 

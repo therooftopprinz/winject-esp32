@@ -48,15 +48,15 @@ private:
     bool destroy_netif();
     bool attach_and_start();
 
-    dhcp_client& dhcp_client_;
-    dhcp_server& dhcp_server_;
+    class dhcp_client& dhcp_client;
+    class dhcp_server& dhcp_server;
     std::atomic<bool> connected_{false};
     std::atomic<bool> using_static_{false};
     std::atomic<bool> ready_{false};
-    bfc::semaphore netif_lock_;
-    esp_eth_handle_t eth_handle_ = nullptr;
-    esp_eth_netif_glue_handle_t eth_glue_ = nullptr;
-    esp_netif_t* eth_netif_ = nullptr;
+    bfc::semaphore netif_lock;
+    esp_eth_handle_t eth_handle = nullptr;
+    esp_eth_netif_glue_handle_t eth_glue = nullptr;
+    esp_netif_t* eth_netif = nullptr;
     bool netif_is_dhcp_server_ = false;
 };
 

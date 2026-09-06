@@ -2,18 +2,32 @@
 
 #include <gtest/gtest.h>
 
-TEST(NetUtilTest, ParseAirport)
+TEST(NetUtilTest, ParseBus)
 {
-    uint8_t mac[6] = {1, 1, 1, 1, 1, 1};
-    ASSERT_TRUE(parse_airport("0", mac));
-    EXPECT_TRUE(airport_is_zero(mac));
-    ASSERT_TRUE(parse_airport("02:02:03:04:05:06", mac));
-    EXPECT_EQ(airport_to_string(mac), "02:02:03:04:05:06");
-    ASSERT_TRUE(parse_airport("AABBCCDDEEFF", mac));
-    EXPECT_EQ(mac[0], 0xAA);
-    EXPECT_EQ(mac[5], 0xFF);
-    EXPECT_FALSE(parse_airport("", mac));
-    EXPECT_FALSE(parse_airport("zz", mac));
+    uint8_t bus = 0;
+    ASSERT_TRUE(parse_bus("b2", &bus));
+    EXPECT_EQ(bus, 0xb2);
+    ASSERT_TRUE(parse_bus("0xA1", &bus));
+    EXPECT_EQ(bus, 0xa1);
+    ASSERT_TRUE(parse_bus("0", &bus));
+    EXPECT_EQ(bus, 0);
+    EXPECT_EQ(bus_to_string(0xb2), "b2");
+    EXPECT_FALSE(parse_bus("", &bus));
+    EXPECT_FALSE(parse_bus("zzz", &bus));
+    EXPECT_FALSE(parse_bus("100", &bus));
+}
+
+TEST(NetUtilTest, ParseDomain)
+{
+    uint16_t domain = 0;
+    ASSERT_TRUE(parse_domain("1234", &domain));
+    EXPECT_EQ(domain, 0x1234);
+    ASSERT_TRUE(parse_domain("0xab", &domain));
+    EXPECT_EQ(domain, 0xab);
+    EXPECT_EQ(domain_to_string(0x1234), "1234");
+    EXPECT_FALSE(parse_domain("0", &domain));
+    EXPECT_FALSE(parse_domain("", &domain));
+    EXPECT_FALSE(parse_domain("10000", &domain));
 }
 
 TEST(NetUtilTest, ParseHostPort)

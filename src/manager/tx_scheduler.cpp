@@ -15,57 +15,57 @@ constexpr size_t k_max_data_per_tick = 8;
 
 void tx_scheduler::configure(uint32_t max_rate_kbps)
 {
-    rate_kbps_ = max_rate_kbps < 64 ? 64 : max_rate_kbps;
+    rate_kbps = max_rate_kbps < 64 ? 64 : max_rate_kbps;
     // ~32 wifi frames, or ~8 ms of rate, whichever is larger.
-    burst_ = std::max<uint64_t>(k_wifi_payload_max * 32,
-                                static_cast<uint64_t>(rate_kbps_) / 8 * 8);
-    tokens_ = burst_;
-    last_refill_ = std::chrono::steady_clock::now();
+    burst = std::max<uint64_t>(k_wifi_payload_max * 32,
+                                static_cast<uint64_t>(rate_kbps) / 8 * 8);
+    tokens = burst;
+    last_refill = std::chrono::steady_clock::now();
 }
 
 void tx_scheduler::add(stream* up, wifi_udp* radio, size_t budget)
 {
-    slots_.push_back(slot_s{up, radio, budget});
+    slots.push_back(slot_s{up, radio, budget});
 }
 
 void tx_scheduler::refill()
 {
     const auto now = std::chrono::steady_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  now - last_refill_)
+                  now - last_refill)
                   .count();
     if (us < 0)
     {
         us = 0;
     }
-    last_refill_ = now;
-    tokens_ +=
-        (static_cast<uint64_t>(rate_kbps_) * static_cast<uint64_t>(us)) / 8000;
-    if (tokens_ > burst_)
+    last_refill = now;
+    tokens +=
+        (static_cast<uint64_t>(rate_kbps) * static_cast<uint64_t>(us)) / 8000;
+    if (tokens > burst)
     {
-        tokens_ = burst_;
+        tokens = burst;
     }
 }
 
 void tx_scheduler::tick()
 {
-    if (slots_.empty())
+    if (slots.empty())
     {
         return;
     }
     // Radio on_idle and TCP kick can nest; coalesce into one follow-up pass.
-    if (ticking_)
+    if (ticking)
     {
-        tick_again_ = true;
+        tick_again = true;
         return;
     }
-    ticking_ = true;
+    ticking = true;
     unsigned passes = 0;
     do
     {
-        tick_again_ = false;
+        tick_again = false;
         refill();
-        for (auto& s : slots_)
+        for (auto& s : slots)
         {
             if (s.up != nullptr)
             {
@@ -73,17 +73,17 @@ void tx_scheduler::tick()
             }
         }
 
-        std::vector<size_t> remain(slots_.size());
-        for (size_t i = 0; i < slots_.size(); i++)
+        std::vector<size_t> remain(slots.size());
+        for (size_t i = 0; i < slots.size(); i++)
         {
-            remain[i] = slots_[i].budget;
+            remain[i] = slots[i].budget;
         }
 
         size_t data_sent = 0;
 
         auto send_one = [&](size_t i, bool acks_only) -> bool
         {
-            auto& s = slots_[i];
+            auto& s = slots[i];
             if (s.up == nullptr || s.radio == nullptr)
             {
                 return false;
@@ -97,7 +97,7 @@ void tx_scheduler::tick()
             }
             else
             {
-                if (remain[i] == 0 || tokens_ == 0 ||
+                if (remain[i] == 0 || tokens == 0 ||
                     data_sent >= k_max_data_per_tick)
                 {
                     return false;
@@ -111,8 +111,8 @@ void tx_scheduler::tick()
             size_t max = k_wifi_payload_max;
             if (!acks_only)
             {
-                max = remain[i] < tokens_ ? remain[i]
-                                          : static_cast<size_t>(tokens_);
+                max = remain[i] < tokens ? remain[i]
+                                          : static_cast<size_t>(tokens);
                 if (max > k_wifi_payload_max)
                 {
                     max = k_wifi_payload_max;
@@ -124,16 +124,16 @@ void tx_scheduler::tick()
             }
 
             bool is_ack = false;
-            const size_t n = s.up->pull_tx(buf_, max, &is_ack);
+            const size_t n = s.up->pull_tx(buf, max, &is_ack);
             if (n == 0)
             {
                 return false;
             }
-            if (!s.radio->send(buf_, n))
+            if (!s.radio->send(buf, n))
             {
                 return false;
             }
-            air_bytes_interval_ += n;
+            air_bytes_interval += n;
             // ACKs/ctrl are exempt from the data rate bucket.
             if (!is_ack)
             {
@@ -145,13 +145,13 @@ void tx_scheduler::tick()
                 {
                     remain[i] = 0;
                 }
-                if (n <= tokens_)
+                if (n <= tokens)
                 {
-                    tokens_ -= n;
+                    tokens -= n;
                 }
                 else
                 {
-                    tokens_ = 0;
+                    tokens = 0;
                 }
                 data_sent++;
             }
@@ -162,7 +162,7 @@ void tx_scheduler::tick()
         while (ack_progress)
         {
             ack_progress = false;
-            for (size_t i = 0; i < slots_.size(); i++)
+            for (size_t i = 0; i < slots.size(); i++)
             {
                 if (send_one(i, true))
                 {
@@ -172,31 +172,31 @@ void tx_scheduler::tick()
         }
 
         bool progress = true;
-        while (progress && tokens_ > 0 && data_sent < k_max_data_per_tick)
+        while (progress && tokens > 0 && data_sent < k_max_data_per_tick)
         {
             progress = false;
-            for (size_t n = 0; n < slots_.size() && tokens_ > 0 &&
+            for (size_t n = 0; n < slots.size() && tokens > 0 &&
                                data_sent < k_max_data_per_tick;
                  n++)
             {
-                const size_t i = (next_ + n) % slots_.size();
+                const size_t i = (next + n) % slots.size();
                 if (send_one(i, false))
                 {
                     progress = true;
-                    next_ = (i + 1) % slots_.size();
+                    next = (i + 1) % slots.size();
                 }
             }
         }
         passes++;
-    } while (tick_again_ && passes < 2);
-    tick_again_ = false;
-    ticking_ = false;
+    } while (tick_again && passes < 2);
+    tick_again = false;
+    ticking = false;
 }
 
 uint64_t tx_scheduler::take_air_bytes()
 {
-    const uint64_t n = air_bytes_interval_;
-    air_bytes_interval_ = 0;
+    const uint64_t n = air_bytes_interval;
+    air_bytes_interval = 0;
     return n;
 }
 

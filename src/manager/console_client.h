@@ -20,7 +20,7 @@ public:
     void close();
     int fd() const
     {
-        return sock_.fd();
+        return sock.fd();
     }
     in_addr local_ip() const
     {
@@ -38,12 +38,12 @@ private:
     bool send_cmd(const std::string& cmd, std::string* error);
     bool read_line(std::string* line, std::string* error);
     bool query_status(std::vector<std::string>* lines, std::string* error);
-    bool release_inject_port(uint16_t port, const std::string& keep_airport,
+    bool release_inject_port(uint16_t port, uint8_t keep_bus,
                              std::string* error);
 
-    bfc::socket sock_;
+    bfc::socket sock;
     in_addr local_ip_{};
-    std::string pending_;
+    std::string pending;
 };
 
 #endif  // WINJECT_MANAGER_CONSOLE_CLIENT_H_

@@ -104,19 +104,19 @@ private:
     bool enabled_ = false;
     int k_ = 0;
     int n_ = 0;
-    int p_ = 0;
-    int timeout_ms_ = k_default_timeout_ms;
-    std::vector<uint8_t> encode_matrix_;
-    std::vector<uint8_t> g_tbls_;
+    int p = 0;
+    int timeout_ms = k_default_timeout_ms;
+    std::vector<uint8_t> encode_matrix;
+    std::vector<uint8_t> g_tbls;
 
-    std::vector<std::vector<uint8_t>> pending_;
-    std::chrono::steady_clock::time_point deadline_{};
-    bool deadline_set_ = false;
-    uint16_t block_id_ = 0;
+    std::vector<std::vector<uint8_t>> pending;
+    std::chrono::steady_clock::time_point deadline{};
+    bool deadline_set = false;
+    uint16_t block_id = 0;
 
-    std::unordered_map<uint16_t, rx_block_s> rx_blocks_;
-    std::deque<uint16_t> done_order_;
-    std::unordered_set<uint16_t> done_;
+    std::unordered_map<uint16_t, rx_block_s> rx_blocks;
+    std::deque<uint16_t> done_order;
+    std::unordered_set<uint16_t> done;
 
     uint64_t recovered_ = 0;
     uint64_t blocks_ = 0;

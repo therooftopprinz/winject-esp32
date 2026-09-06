@@ -30,8 +30,8 @@ ethernet_rmii& ethernet_rmii::instance()
 }
 
 ethernet_rmii::ethernet_rmii()
-    : dhcp_client_(dhcp_client::instance()),
-      dhcp_server_(dhcp_server::instance())
+    : dhcp_client(dhcp_client::instance()),
+      dhcp_server(dhcp_server::instance())
 {
 }
 
@@ -45,30 +45,30 @@ void ethernet_rmii::fill_static_ip(esp_netif_ip_info_t* info, uint32_t ip)
 
 bool ethernet_rmii::destroy_netif()
 {
-    if (eth_handle_ == nullptr)
+    if (eth_handle == nullptr)
     {
         return false;
     }
-    dhcp_server_.mark_inactive();
-    dhcp_server_.bind_netif(nullptr);
-    if (esp_eth_stop(eth_handle_) != ESP_OK)
+    dhcp_server.mark_inactive();
+    dhcp_server.bind_netif(nullptr);
+    if (esp_eth_stop(eth_handle) != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH stop failed");
         return false;
     }
-    if (eth_glue_ != nullptr)
+    if (eth_glue != nullptr)
     {
-        if (esp_eth_del_netif_glue(eth_glue_) != ESP_OK)
+        if (esp_eth_del_netif_glue(eth_glue) != ESP_OK)
         {
             ESP_LOGE(TAG, "ETH glue delete failed");
             return false;
         }
-        eth_glue_ = nullptr;
+        eth_glue = nullptr;
     }
-    if (eth_netif_ != nullptr)
+    if (eth_netif != nullptr)
     {
-        esp_netif_destroy(eth_netif_);
-        eth_netif_ = nullptr;
+        esp_netif_destroy(eth_netif);
+        eth_netif = nullptr;
     }
     netif_is_dhcp_server_ = false;
     return true;
@@ -76,27 +76,27 @@ bool ethernet_rmii::destroy_netif()
 
 bool ethernet_rmii::attach_and_start()
 {
-    if (eth_netif_ == nullptr || eth_handle_ == nullptr)
+    if (eth_netif == nullptr || eth_handle == nullptr)
     {
         return false;
     }
-    if (esp_netif_set_hostname(eth_netif_, DEVICE_HOSTNAME) != ESP_OK)
+    if (esp_netif_set_hostname(eth_netif, DEVICE_HOSTNAME) != ESP_OK)
     {
         ESP_LOGW(TAG, "ETH hostname set failed");
     }
-    eth_glue_ = esp_eth_new_netif_glue(eth_handle_);
-    if (eth_glue_ == nullptr)
+    eth_glue = esp_eth_new_netif_glue(eth_handle);
+    if (eth_glue == nullptr)
     {
         ESP_LOGE(TAG, "ETH glue alloc failed");
         return false;
     }
-    if (esp_netif_attach(eth_netif_, eth_glue_) != ESP_OK)
+    if (esp_netif_attach(eth_netif, eth_glue) != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH attach failed");
         return false;
     }
-    dhcp_server_.bind_netif(eth_netif_);
-    if (esp_eth_start(eth_handle_) != ESP_OK)
+    dhcp_server.bind_netif(eth_netif);
+    if (esp_eth_start(eth_handle) != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH start failed");
         return false;
@@ -121,18 +121,18 @@ void ethernet_rmii::eth_event_handler(void* arg, esp_event_base_t event_base,
             break;
         case ETHERNET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "ETH link up");
-            if (self->netif_is_dhcp_server_ && self->eth_netif_ != nullptr)
+            if (self->netif_is_dhcp_server_ && self->eth_netif != nullptr)
             {
                 self->connected_.store(true, std::memory_order_relaxed);
                 esp_netif_ip_info_t info = {};
                 uint32_t ip = 0;
-                if (esp_netif_get_ip_info(self->eth_netif_, &info) == ESP_OK)
+                if (esp_netif_get_ip_info(self->eth_netif, &info) == ESP_OK)
                 {
                     ip = info.ip.addr;
                 }
                 if (ip != 0)
                 {
-                    self->dhcp_server_.start(self->eth_netif_, ip);
+                    self->dhcp_server.start(self->eth_netif, ip);
                 }
             }
             break;
@@ -165,7 +165,7 @@ void ethernet_rmii::got_ip_event_handler(void* arg, esp_event_base_t event_base,
     auto* self = static_cast<ethernet_rmii*>(arg);
     const auto* event = static_cast<ip_event_got_ip_t*>(event_data);
     if (self == nullptr || event == nullptr ||
-        event->esp_netif != self->eth_netif_)
+        event->esp_netif != self->eth_netif)
     {
         return;
     }
@@ -180,7 +180,7 @@ void ethernet_rmii::got_ip_event_handler(void* arg, esp_event_base_t event_base,
 
 void ethernet_rmii::begin()
 {
-    netif_lock_.init();
+    netif_lock.init();
     uint8_t base_mac[6] = {};
     if (esp_read_mac(base_mac, ESP_MAC_WIFI_STA) == ESP_OK)
     {
@@ -197,14 +197,14 @@ void ethernet_rmii::begin()
     vTaskDelay(pdMS_TO_TICKS(50));
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif_ = esp_netif_new(&netif_cfg);
-    if (eth_netif_ == nullptr)
+    eth_netif = esp_netif_new(&netif_cfg);
+    if (eth_netif == nullptr)
     {
         ESP_LOGE(TAG, "ETH netif alloc failed");
         return;
     }
-    ESP_ERROR_CHECK(esp_netif_set_hostname(eth_netif_, DEVICE_HOSTNAME));
-    dhcp_server_.bind_netif(eth_netif_);
+    ESP_ERROR_CHECK(esp_netif_set_hostname(eth_netif, DEVICE_HOSTNAME));
+    dhcp_server.bind_netif(eth_netif);
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
@@ -237,31 +237,31 @@ void ethernet_rmii::begin()
     }
 
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(eth_mac, phy);
-    if (esp_eth_driver_install(&eth_config, &eth_handle_) != ESP_OK)
+    if (esp_eth_driver_install(&eth_config, &eth_handle) != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH driver install failed");
         return;
     }
 
-    eth_glue_ = esp_eth_new_netif_glue(eth_handle_);
-    if (eth_glue_ == nullptr)
+    eth_glue = esp_eth_new_netif_glue(eth_handle);
+    if (eth_glue == nullptr)
     {
         ESP_LOGE(TAG, "ETH glue alloc failed");
         return;
     }
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif_, eth_glue_));
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, eth_glue));
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
                                                &eth_event_handler, this));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                &got_ip_event_handler, this));
-    ESP_ERROR_CHECK(esp_eth_start(eth_handle_));
+    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
     ready_.store(true, std::memory_order_relaxed);
 }
 
 bool ethernet_rmii::ready() const
 {
-    return ready_.load(std::memory_order_relaxed) && eth_handle_ != nullptr &&
-           eth_netif_ != nullptr;
+    return ready_.load(std::memory_order_relaxed) && eth_handle != nullptr &&
+           eth_netif != nullptr;
 }
 
 bool ethernet_rmii::connected() const
@@ -291,22 +291,22 @@ bool ethernet_rmii::netif_is_dhcp_server() const
 
 esp_netif_t* ethernet_rmii::netif()
 {
-    return eth_netif_;
+    return eth_netif;
 }
 
 bfc::semaphore& ethernet_rmii::mutex()
 {
-    return netif_lock_;
+    return netif_lock;
 }
 
 bool ethernet_rmii::has_ipv4() const
 {
-    if (eth_netif_ == nullptr)
+    if (eth_netif == nullptr)
     {
         return false;
     }
     esp_netif_ip_info_t info = {};
-    if (esp_netif_get_ip_info(eth_netif_, &info) != ESP_OK || info.ip.addr == 0)
+    if (esp_netif_get_ip_info(eth_netif, &info) != ESP_OK || info.ip.addr == 0)
     {
         return false;
     }
@@ -315,17 +315,17 @@ bool ethernet_rmii::has_ipv4() const
 
 bool ethernet_rmii::apply_static_ip(uint32_t ip)
 {
-    if (eth_netif_ == nullptr)
+    if (eth_netif == nullptr)
     {
         return false;
     }
-    if (!netif_is_dhcp_server_ && !dhcp_client_.stop(eth_netif_))
+    if (!netif_is_dhcp_server_ && !dhcp_client.stop(eth_netif))
     {
         return false;
     }
     esp_netif_ip_info_t info = {};
     fill_static_ip(&info, ip);
-    if (esp_netif_set_ip_info(eth_netif_, &info) != ESP_OK)
+    if (esp_netif_set_ip_info(eth_netif, &info) != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH static IP set failed");
         return false;
@@ -343,8 +343,8 @@ bool ethernet_rmii::rebuild_dhcp_client()
         return false;
     }
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif_ = esp_netif_new(&netif_cfg);
-    if (eth_netif_ == nullptr)
+    eth_netif = esp_netif_new(&netif_cfg);
+    if (eth_netif == nullptr)
     {
         ESP_LOGE(TAG, "ETH netif alloc failed");
         return false;
@@ -373,8 +373,8 @@ bool ethernet_rmii::rebuild_dhcp_server(uint32_t ip)
         .driver = nullptr,
         .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH,
     };
-    eth_netif_ = esp_netif_new(&netif_cfg);
-    if (eth_netif_ == nullptr)
+    eth_netif = esp_netif_new(&netif_cfg);
+    if (eth_netif == nullptr)
     {
         ESP_LOGE(TAG, "ETH dhcps netif alloc failed");
         return false;
@@ -386,7 +386,7 @@ bool ethernet_rmii::rebuild_dhcp_server(uint32_t ip)
     }
     using_static_.store(true, std::memory_order_relaxed);
     connected_.store(true, std::memory_order_relaxed);
-    return dhcp_server_.start(eth_netif_, ip);
+    return dhcp_server.start(eth_netif, ip);
 }
 
 bool ethernet_rmii::local_ipv4(uint32_t* out)
@@ -395,18 +395,18 @@ bool ethernet_rmii::local_ipv4(uint32_t* out)
     {
         return false;
     }
-    bfc::semaphore::lock lock(netif_lock_);
+    bfc::semaphore::lock lock(netif_lock);
     if (!lock)
     {
         return false;
     }
-    if (eth_netif_ == nullptr)
+    if (eth_netif == nullptr)
     {
         return false;
     }
     esp_netif_ip_info_t info = {};
     const bool ok =
-        esp_netif_get_ip_info(eth_netif_, &info) == ESP_OK && info.ip.addr != 0;
+        esp_netif_get_ip_info(eth_netif, &info) == ESP_OK && info.ip.addr != 0;
     if (ok)
     {
         *out = info.ip.addr;
@@ -421,12 +421,12 @@ bool ethernet_rmii::mac(uint8_t mac[6])
         return false;
     }
     {
-        bfc::semaphore::lock lock(netif_lock_);
+        bfc::semaphore::lock lock(netif_lock);
         if (lock)
         {
             const bool ok =
-                eth_handle_ != nullptr &&
-                esp_eth_ioctl(eth_handle_, ETH_CMD_G_MAC_ADDR, mac) == ESP_OK;
+                eth_handle != nullptr &&
+                esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac) == ESP_OK;
             if (ok)
             {
                 return true;
@@ -442,18 +442,18 @@ bool ethernet_rmii::link_speed_mbps(uint32_t* mbps)
     {
         return false;
     }
-    bfc::semaphore::lock lock(netif_lock_);
+    bfc::semaphore::lock lock(netif_lock);
     if (!lock)
     {
         return false;
     }
-    if (eth_handle_ == nullptr)
+    if (eth_handle == nullptr)
     {
         return false;
     }
     eth_speed_t speed = ETH_SPEED_10M;
     const bool ok =
-        esp_eth_ioctl(eth_handle_, ETH_CMD_G_SPEED, &speed) == ESP_OK;
+        esp_eth_ioctl(eth_handle, ETH_CMD_G_SPEED, &speed) == ESP_OK;
     if (ok)
     {
         *mbps = (speed == ETH_SPEED_100M) ? 100 : 10;

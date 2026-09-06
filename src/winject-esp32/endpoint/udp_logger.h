@@ -55,14 +55,14 @@ private:
     static constexpr uint32_t k_min_interval_us = 20000;  // 50 Hz cap
     static constexpr size_t k_line_max = 192;
 
-    bfc::semaphore lock_;
-    bfc::socket sock_;
-    ip_port_t dest_{};
-    log_level_e level_ = log_level_e::warn;
-    bool set_ = false;
-    uint32_t emitted_ = 0;
-    uint32_t dropped_ = 0;
-    uint64_t last_emit_us_ = 0;
+    bfc::semaphore lock;
+    bfc::socket sock;
+    ip_port_t dest{};
+    log_level_e level = log_level_e::warn;
+    bool configured = false;
+    uint32_t emitted = 0;
+    uint32_t dropped = 0;
+    uint64_t last_emit_us = 0;
 };
 
 #endif  // WINJECT_UDP_LOGGER_H_

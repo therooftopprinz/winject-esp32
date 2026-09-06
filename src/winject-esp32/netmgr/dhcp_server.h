@@ -36,7 +36,7 @@ private:
     bool apply_pool(esp_netif_t* netif, uint32_t device_ip);
 
     std::atomic<bool> active_{false};
-    std::atomic<esp_netif_t*> netif_{nullptr};
+    std::atomic<esp_netif_t*> netif{nullptr};
 };
 
 #endif  // WINJECT_DHCP_SERVER_H_

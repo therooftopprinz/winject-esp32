@@ -331,7 +331,7 @@ console::tcp_client_s* console::client_by_fd(int fd)
     {
         return nullptr;
     }
-    for (tcp_client_s& client : clients_)
+    for (tcp_client_s& client : clients)
     {
         if (client.fd == fd)
         {
@@ -344,7 +344,7 @@ console::tcp_client_s* console::client_by_fd(int fd)
 size_t console::client_count() const
 {
     size_t n = 0;
-    for (const tcp_client_s& client : clients_)
+    for (const tcp_client_s& client : clients)
     {
         if (client.fd >= 0)
         {
@@ -361,9 +361,9 @@ void console::close_client(int fd)
     {
         return;
     }
-    if (reactor_ != nullptr)
+    if (reactor != nullptr)
     {
-        reactor_->rem_read_rdy(fd);
+        reactor->rem_read_rdy(fd);
     }
     close_fd(&client->fd);
     client->len = 0;
@@ -371,7 +371,7 @@ void console::close_client(int fd)
 
 void console::close_all_clients()
 {
-    for (tcp_client_s& client : clients_)
+    for (tcp_client_s& client : clients)
     {
         if (client.fd >= 0)
         {
@@ -383,12 +383,12 @@ void console::close_all_clients()
 
 void console::stop_tcp()
 {
-    if (listen_fd_ >= 0 && reactor_ != nullptr)
+    if (listen_fd >= 0 && reactor != nullptr)
     {
-        reactor_->rem_read_rdy(listen_fd_);
+        reactor->rem_read_rdy(listen_fd);
     }
     close_all_clients();
-    close_fd(&listen_fd_);
+    close_fd(&listen_fd);
 }
 
 void console::write(const out_s& out, const char* text)
@@ -559,7 +559,7 @@ void console::print_channel_metrics(const out_s& out,
 
 bool console::radio_ready() const
 {
-    return tx_ep_ != nullptr && rx_ep_ != nullptr && ci_ != nullptr;
+    return tx_ep != nullptr && rx_ep != nullptr && ci != nullptr;
 }
 
 bool console::require_radio(const out_s& out)
@@ -594,9 +594,9 @@ void console::print_status(const out_s& out)
     {
         sut_count = WIFI_AIRPORT_MAX;
         wifi::instance().get_status(&radio);
-        tx_ep_->get_status(sut, &sut_count);
-        rx_ep_->fill_status(sur, &sur_count);
-        ci_->fill_status(ci, &ci_count);
+        tx_ep->get_status(sut, &sut_count);
+        rx_ep->fill_status(sur, &sur_count);
+        ci->fill_status(ci, &ci_count);
     }
 
     write(out, "# device\n");
@@ -618,7 +618,7 @@ void console::print_status(const out_s& out)
 
     write(out, "# network\n");
     uint32_t eth_ip = 0;
-    const bool have_ip = netmgr_->local_ipv4(&eth_ip);
+    const bool have_ip = netmgr->local_ipv4(&eth_ip);
     char ip_str[16] = "-";
     if (have_ip)
     {
@@ -629,8 +629,8 @@ void console::print_status(const out_s& out)
     uint32_t static_ip = 0;
     uint32_t pool_start = 0;
     uint32_t pool_end = 0;
-    if (netmgr_->static_ipv4(&static_ip) &&
-        netmgr_->dhcp_pool(&pool_start, &pool_end))
+    if (netmgr->static_ipv4(&static_ip) &&
+        netmgr->dhcp_pool(&pool_start, &pool_end))
     {
         char static_str[16];
         char pool_str[16];
@@ -638,24 +638,24 @@ void console::print_status(const out_s& out)
         ipv4_to_string(pool_start, pool_str, sizeof(pool_str));
         const uint8_t* net = reinterpret_cast<const uint8_t*>(&static_ip);
         const uint8_t* pool_hi = reinterpret_cast<const uint8_t*>(&pool_end);
-        const bool auto_mode = netmgr_->network_mode() == NETMGR_MODE_AUTO;
+        const bool auto_mode = netmgr->network_mode() == NETMGR_MODE_AUTO;
         const char* dhcps = "off";
         if (auto_mode)
         {
-            dhcps = netmgr_->dhcp_server_enabled() ? "blocked" : "off";
+            dhcps = netmgr->dhcp_server_enabled() ? "blocked" : "off";
         }
-        else if (netmgr_->dhcp_server_active())
+        else if (netmgr->dhcp_server_active())
         {
             dhcps = "active";
         }
-        else if (netmgr_->dhcp_server_enabled())
+        else if (netmgr->dhcp_server_enabled())
         {
             dhcps = "enabled";
         }
         print(out,
               "dhcp mode=%s static_ip=%s dhcps=%s pool=%s-%u "
               "netmask=%u.%u.%u.0/24\n",
-              manager::network_mode_name(netmgr_->network_mode()), static_str,
+              manager::network_mode_name(netmgr->network_mode()), static_str,
               dhcps, pool_str, pool_hi[3], net[0], net[1], net[2]);
     }
 
@@ -861,7 +861,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage unset_upstream_rx bus=<lcid>\n");
             return;
         }
-        if (!rx_ep_->rem_endpoint(bus))
+        if (!rx_ep->rem_endpoint(bus))
         {
             write(out, "error: failed to unset upstream rx\n");
             return;
@@ -882,7 +882,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage unset_upstream_tx bus=<lcid>\n");
             return;
         }
-        if (!tx_ep_->rem_endpoint(bus))
+        if (!tx_ep->rem_endpoint(bus))
         {
             write(out, "error: failed to unset upstream tx\n");
             return;
@@ -908,7 +908,7 @@ void console::handle_line(const char* line, const out_s& out)
             return;
         }
         ip_port_t dest = {host, port};
-        if (!rx_ep_->add_endpoint(bus, dest))
+        if (!rx_ep->add_endpoint(bus, dest))
         {
             write(out, "error: failed to set upstream rx\n");
             return;
@@ -931,7 +931,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage set_upstream_tx bus=<lcid> <udp_port>\n");
             return;
         }
-        if (!tx_ep_->add_endpoint(bus, port))
+        if (!tx_ep->add_endpoint(bus, port))
         {
             write(out, "error: failed to bind udp port\n");
             return;
@@ -952,7 +952,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage set_upstream_ci to=<host>:<port>\n");
             return;
         }
-        if (!ci_->add_subscriber(dest))
+        if (!ci->add_subscriber(dest))
         {
             write(out, "error: failed to add ci subscriber\n");
             return;
@@ -973,7 +973,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage unset_upstream_ci to=<host>:<port>\n");
             return;
         }
-        if (!ci_->rem_subscriber(dest))
+        if (!ci->rem_subscriber(dest))
         {
             write(out, "error: ci subscriber not found\n");
             return;
@@ -1154,7 +1154,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage set_network <STATIC|AUTO>\n");
             return;
         }
-        if (!netmgr_->set_network_mode(mode))
+        if (!netmgr->set_network_mode(mode))
         {
             write(out, "error: failed to set network mode\n");
             return;
@@ -1171,12 +1171,12 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage set_enable_dhcp_server <0|1>\n");
             return;
         }
-        if (!netmgr_->set_dhcp_server_enabled(enabled))
+        if (!netmgr->set_dhcp_server_enabled(enabled))
         {
             write(out, "error: failed to set dhcp server\n");
             return;
         }
-        if (enabled && netmgr_->network_mode() == NETMGR_MODE_AUTO)
+        if (enabled && netmgr->network_mode() == NETMGR_MODE_AUTO)
         {
             write(out, "ok (blocked in AUTO)\n");
             return;
@@ -1194,7 +1194,7 @@ void console::handle_line(const char* line, const out_s& out)
             write(out, "error: usage set_ip <a.b.c.d>\n");
             return;
         }
-        if (!netmgr_->set_ip(addr.s_addr))
+        if (!netmgr->set_ip(addr.s_addr))
         {
             write(out, "error: host must be 1-254 on a unicast /24\n");
             return;
@@ -1294,7 +1294,7 @@ void console::feed_char(char c, char* line, size_t* len, size_t max_len,
 
 void console::start_tcp()
 {
-    if (listen_fd_ >= 0)
+    if (listen_fd >= 0)
     {
         return;
     }
@@ -1327,10 +1327,10 @@ void console::start_tcp()
         return;
     }
 
-    listen_fd_ = fd;
-    if (reactor_ != nullptr)
+    listen_fd = fd;
+    if (reactor != nullptr)
     {
-        reactor_->add_read_rdy(listen_fd_,
+        reactor->add_read_rdy(listen_fd,
                                [this]()
                                {
                                    accept_clients();
@@ -1338,7 +1338,7 @@ void console::start_tcp()
     }
 
     uint32_t ip = 0;
-    if (netmgr_->local_ipv4(&ip))
+    if (netmgr->local_ipv4(&ip))
     {
         char ip_str[16];
         ipv4_to_string(ip, ip_str, sizeof(ip_str));
@@ -1352,7 +1352,7 @@ bool console::attach_client(int fd)
     {
         return false;
     }
-    for (tcp_client_s& client : clients_)
+    for (tcp_client_s& client : clients)
     {
         if (client.fd < 0)
         {
@@ -1371,7 +1371,7 @@ void console::accept_clients()
         struct sockaddr_in peer = {};
         socklen_t peer_len = sizeof(peer);
         const int fd = accept(
-            listen_fd_, reinterpret_cast<struct sockaddr*>(&peer), &peer_len);
+            listen_fd, reinterpret_cast<struct sockaddr*>(&peer), &peer_len);
         if (fd < 0)
         {
             return;
@@ -1400,11 +1400,11 @@ void console::accept_clients()
 
 void console::watch_client(int fd)
 {
-    if (reactor_ == nullptr || fd < 0)
+    if (reactor == nullptr || fd < 0)
     {
         return;
     }
-    reactor_->add_read_rdy(fd,
+    reactor->add_read_rdy(fd,
                            [this, fd]()
                            {
                                poll_client(fd);
@@ -1449,11 +1449,11 @@ void console::poll_client(int fd)
 
 void console::sync_tcp()
 {
-    if (netmgr_ == nullptr)
+    if (netmgr == nullptr)
     {
         return;
     }
-    if (netmgr_->connected())
+    if (netmgr->connected())
     {
         start_tcp();
     }
@@ -1465,11 +1465,11 @@ void console::sync_tcp()
 
 void console::schedule_sync()
 {
-    if (reactor_ == nullptr)
+    if (reactor == nullptr)
     {
         return;
     }
-    reactor_->get_timer().wait_ms(k_sync_ms,
+    reactor->get_timer().wait_ms(k_sync_ms,
                                   [this]()
                                   {
                                       sync_tcp();
@@ -1485,45 +1485,45 @@ void console::attach_reactor()
 
 bool console::init(manager& netmgr)
 {
-    if (ready_)
+    if (ready)
     {
         return true;
     }
 
-    tx_ep_ = nullptr;
-    rx_ep_ = nullptr;
-    ci_ = nullptr;
-    netmgr_ = &netmgr;
-    reactor_ = &netmgr.reactor();
-    reactor_->wake_up(
+    tx_ep = nullptr;
+    rx_ep = nullptr;
+    ci = nullptr;
+    this->netmgr = &netmgr;
+    reactor = &netmgr.reactor();
+    reactor->wake_up(
         [this]()
         {
             attach_reactor();
         });
 
-    ready_ = true;
+    ready = true;
     return true;
 }
 
 bool console::init(lc_tx_endpoint& tx_ep, lc_rx_endpoint& rx_ep,
                    channel_info_endpoint& ci, manager& netmgr)
 {
-    if (ready_)
+    if (ready)
     {
         return true;
     }
 
-    tx_ep_ = &tx_ep;
-    rx_ep_ = &rx_ep;
-    ci_ = &ci;
-    netmgr_ = &netmgr;
-    reactor_ = &netmgr.reactor();
-    reactor_->wake_up(
+    this->tx_ep = &tx_ep;
+    this->rx_ep = &rx_ep;
+    this->ci = &ci;
+    this->netmgr = &netmgr;
+    reactor = &netmgr.reactor();
+    reactor->wake_up(
         [this]()
         {
             attach_reactor();
         });
 
-    ready_ = true;
+    ready = true;
     return true;
 }

@@ -168,7 +168,7 @@ TEST(TcpStreamTest, PiggybackAckAtSendTime)
     const uint8_t from_b[] = {'x'};
     b.on_tcp_bytes(from_b, sizeof(from_b));
     exchange(&b, &a);
-    // A has received seq 0; next expected rx_seq_ == 1.
+    // A has received seq 0; next expected rx_seq == 1.
 
     const uint8_t from_a[] = {'y'};
     a.on_tcp_bytes(from_a, sizeof(from_a));

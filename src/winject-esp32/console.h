@@ -77,14 +77,14 @@ private:
     bool require_radio(const out_s& out);
     void reboot_after_ok(const out_s& out);
 
-    lc_tx_endpoint* tx_ep_ = nullptr;
-    lc_rx_endpoint* rx_ep_ = nullptr;
-    channel_info_endpoint* ci_ = nullptr;
-    manager* netmgr_ = nullptr;
-    reactor_t* reactor_ = nullptr;
-    bool ready_ = false;
-    int listen_fd_ = -1;
-    tcp_client_s clients_[k_max_tcp_clients];
+    lc_tx_endpoint* tx_ep = nullptr;
+    lc_rx_endpoint* rx_ep = nullptr;
+    channel_info_endpoint* ci = nullptr;
+    manager* netmgr = nullptr;
+    reactor_t* reactor = nullptr;
+    bool ready = false;
+    int listen_fd = -1;
+    tcp_client_s clients[k_max_tcp_clients];
 };
 
 #endif  // WINJECT_CONSOLE_H_

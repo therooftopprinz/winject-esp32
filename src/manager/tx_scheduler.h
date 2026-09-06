@@ -32,16 +32,16 @@ private:
         size_t budget = 0;
     };
 
-    uint32_t rate_kbps_ = 10000;
-    uint64_t tokens_ = 0;
-    uint64_t burst_ = 0;
-    size_t next_ = 0;
-    bool ticking_ = false;
-    bool tick_again_ = false;
-    std::chrono::steady_clock::time_point last_refill_{};
-    std::vector<slot_s> slots_;
-    uint8_t buf_[2048]{};
-    uint64_t air_bytes_interval_ = 0;
+    uint32_t rate_kbps = 10000;
+    uint64_t tokens = 0;
+    uint64_t burst = 0;
+    size_t next = 0;
+    bool ticking = false;
+    bool tick_again = false;
+    std::chrono::steady_clock::time_point last_refill{};
+    std::vector<slot_s> slots;
+    uint8_t buf[2048]{};
+    uint64_t air_bytes_interval = 0;
 };
 
 #endif  // WINJECT_MANAGER_TX_SCHEDULER_H_

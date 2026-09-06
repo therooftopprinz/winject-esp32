@@ -61,19 +61,19 @@ private:
     bool apply_network_locked();
     bool apply_network();
 
-    ethernet& eth_;
-    dhcp_client& dhcp_client_;
-    dhcp_server& dhcp_server_;
+    ethernet& eth;
+    class dhcp_client& dhcp_client;
+    class dhcp_server& dhcp_server;
     reactor_t reactor_;
-    std::atomic<bool> started_{false};
-    std::atomic<bool> init_ok_{false};
-    std::atomic<bool> dhcp_server_wanted_{false};
+    std::atomic<bool> started{false};
+    std::atomic<bool> init_ok{false};
+    std::atomic<bool> dhcp_server_wanted{false};
     mutable std::atomic<uint32_t> static_ip_{0};
-    std::atomic<uint32_t> auto_gen_{0};
+    std::atomic<uint32_t> auto_gen{0};
     std::atomic<NetmgrMode> network_mode_{NETMGR_MODE_AUTO};
-    timer_id_t fallback_timer_id_{};
-    bool fallback_timer_set_ = false;
-    SemaphoreHandle_t init_done_ = nullptr;
+    timer_id_t fallback_timer_id{};
+    bool fallback_timer_set = false;
+    SemaphoreHandle_t init_done = nullptr;
 };
 
 #endif  // WINJECT_NETMGR_MANAGER_H_

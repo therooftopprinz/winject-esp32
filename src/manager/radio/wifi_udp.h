@@ -20,7 +20,7 @@ public:
     wifi_udp(const wifi_udp&) = delete;
     wifi_udp& operator=(const wifi_udp&) = delete;
 
-    bool open(reactor& reactor, const sockaddr_in& inject, uint16_t forward_port,
+    bool open(::reactor& reactor, const sockaddr_in& inject, uint16_t forward_port,
               rx on_rx, idle on_idle = {});
     void close();
     bool send(const uint8_t* data, size_t len);
@@ -30,19 +30,19 @@ public:
     }
     uint16_t inject_port() const
     {
-        return ntohs(inject_.sin_port);
+        return ntohs(inject.sin_port);
     }
 
 private:
     void on_forward();
 
-    reactor* reactor_ = nullptr;
-    bfc::socket sock_;
+    ::reactor* reactor = nullptr;
+    bfc::socket sock;
     uint16_t forward_port_ = 0;
-    sockaddr_in inject_{};
-    rx on_rx_;
-    idle on_idle_;
-    uint8_t buf_[2048]{};
+    sockaddr_in inject{};
+    rx on_rx;
+    idle on_idle;
+    uint8_t buf[2048]{};
 };
 
 #endif  // WINJECT_MANAGER_WIFI_UDP_H_

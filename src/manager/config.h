@@ -31,7 +31,9 @@ struct upstream_config_s
 {
     size_t index = 0;
     upstream_mode_e mode = upstream_mode_e::udp_generic;
-    uint8_t airport[6]{};
+    // Host TX bus (UDP→air / sut) and RX bus (air→UDP / sur). Must differ.
+    uint8_t bus_tx = 0;
+    uint8_t bus_rx = 0;
     size_t scheduler_budget = 256;
     int rcv_buffer_size = 0;
     int snd_buffer_size = 0;
@@ -53,6 +55,8 @@ struct config
     std::string modulation = "DSS_1M_L";
     int8_t power_dbm = 20;
     radio_mode_e radio_mode = radio_mode_e::standalone;
+    // Shared air domain (Addr3); 0 = unset / invalid.
+    uint16_t domain = 0;
     uint32_t max_rate_kbps = 10000;
     std::string local_ip;
     uint16_t forward_base = 9210;
