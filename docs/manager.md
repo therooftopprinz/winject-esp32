@@ -149,6 +149,7 @@ chmod +x scripts/manager_tcp_bw_test.sh
 ./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M
 ./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M --kbps 1500 --no-cca
 ./scripts/manager_tcp_bw_test.sh 192.168.253.11 192.168.253.12 192.168.253.106 -- --bidir
+./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M --bidir-only
 ```
 
 Configs: `configuration/winject-tests/bw_a.cfg` (radio A) and `bw_b.cfg` (radio B). Host sends A→B via manager A `:29000`, receives on TCP `:9002`; B→A uses `:29001` and listen `:9001`. Managers use `winject.skip_console` so the script programs the radios first. `bw_test --tcp` does not rebind upstreams but still applies `--channel` / `--modulation` / CCA. Auto TCP offer is ~55% of the UDP estimate (original winject AM target). Prefer `--kbps 7000`–`8000` or `--no-cca` when measuring; if the air path is lossy, step down.

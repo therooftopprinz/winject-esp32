@@ -110,7 +110,12 @@ def parse_args() -> argparse.Namespace:
         help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
     )
     p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
-    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase")
+    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase after unidirectional")
+    p.add_argument(
+        "--bidir-only",
+        action="store_true",
+        help="run only the simultaneous A+B phase (skip unidirectional)",
+    )
     p.add_argument("--skip-mux", action="store_true", help="skip self-loop / dual isolation checks")
     p.add_argument(
         "--restore-tunnel",
@@ -301,6 +306,8 @@ def run_mux_checks(
 
 def main() -> int:
     args = parse_args()
+    if args.bidir_only:
+        args.bidir = True
     if args.size < 16 or args.size > bw.MAX_PAYLOAD:
         raise SystemExit(f"--size must be 16..{bw.MAX_PAYLOAD}")
     if args.channel is not None and (args.channel < 1 or args.channel > 13):
@@ -514,20 +521,23 @@ def main() -> int:
         result.integrity_ba = b_to_a
         result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
 
-        print("-- unidirectional")
-        result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
-        result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
-        print(
-            f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
-            f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
-        )
-        print(
-            f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
-            f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
-        )
-        result.uni_ok = bw.loss_ok(result.uni_ab, 5.0, paced) and bw.loss_ok(
-            result.uni_ba, 5.0, paced
-        )
+        if not args.bidir_only:
+            print("-- unidirectional")
+            result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
+            result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
+            print(
+                f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
+                f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
+            )
+            print(
+                f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
+                f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
+            )
+            result.uni_ok = bw.loss_ok(result.uni_ab, 5.0, paced) and bw.loss_ok(
+                result.uni_ba, 5.0, paced
+            )
+        else:
+            result.uni_ok = True
 
         if args.bidir:
             bidir_offer = (offer / 2.0) if paced else offer
@@ -568,7 +578,7 @@ def main() -> int:
 
     print("\n=== result ===")
     paced = args.kbps != 0
-    print(bw.fmt_summary(all_results, paced, args.bidir))
+    print(bw.fmt_summary(all_results, paced, args.bidir, uni=not args.bidir_only))
 
     passed = sum(1 for r in all_results if r.overall)
     print(f"\n{passed}/{len(all_results)} modulations PASS  channel {channel_label}")

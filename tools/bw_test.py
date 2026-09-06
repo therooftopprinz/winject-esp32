@@ -884,6 +884,12 @@ def live_kbps(nbytes: int, dt: float) -> float:
     return (nbytes * 8.0) / dt / 1000.0
 
 
+def fmt_loss_pct(sent: int, recv: int) -> str:
+    if sent <= 0:
+        return "n/a"
+    return f"{max(0.0, 100.0 * (sent - recv) / sent):.1f}%"
+
+
 def to_phase(sent: int, stats: RecvStats, duration: float) -> PhaseResult:
     return PhaseResult(sent=sent, recv=stats.packets, kbps=goodput_kbps(stats, duration))
 
@@ -996,7 +1002,12 @@ def parse_args() -> argparse.Namespace:
         default=TCP_SEND_B,
         help=f"manager B TCP_SERVER port for B->A send (default {TCP_SEND_B})",
     )
-    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase")
+    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase after unidirectional")
+    p.add_argument(
+        "--bidir-only",
+        action="store_true",
+        help="run only the simultaneous A+B phase (skip unidirectional)",
+    )
     p.add_argument("--verbose", action="store_true", help="print full console replies")
     p.add_argument(
         "--fec",
@@ -1021,20 +1032,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
+def fmt_summary(
+    results: list[ModResult], paced: bool, bidir: bool, uni: bool = True
+) -> str:
     header = (
         "| modulation      | ch | offer kbps |  int A->B |  int B->A |"
-        " A->B kbps | A->B loss | B->A kbps | B->A loss |"
     )
+    sep = (
+        "|-----------------|---:|-----------:|----------:|----------:|"
+    )
+    if uni:
+        header += " A->B kbps | A->B loss | B->A kbps | B->A loss |"
+        sep += "----------:|----------:|----------:|----------:|"
     if bidir:
         header += " A+B A kbps | A+B B kbps | A+B A loss | A+B B loss |"
-    header += " result |"
-    sep = (
-        "|-----------------|---:|-----------:|----------:|----------:"
-        "|----------:|----------:|----------:|----------:|"
-    )
-    if bidir:
         sep += "-----------:|-----------:|-----------:|-----------:|"
+    header += " result |"
     sep += "--------|"
     lines = [header, sep]
     for r in results:
@@ -1046,8 +1059,6 @@ def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
             loss = f"{phase.loss:.1f}" if paced else "n/a"
             return f"{phase.kbps:.1f}", loss
 
-        ab_k, ab_l = cell(r.uni_ab)
-        ba_k, ba_l = cell(r.uni_ba)
         verdict = "PASS" if r.overall else "FAIL"
         if r.note:
             verdict = r.note
@@ -1055,8 +1066,11 @@ def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
         line = (
             f"| {r.modulation:<15} | {ch:>2} | {r.offer:>10.0f} |"
             f" {int_ab:>9} | {int_ba:>9} |"
-            f" {ab_k:>9} | {ab_l:>9} | {ba_k:>9} | {ba_l:>9} |"
         )
+        if uni:
+            ab_k, ab_l = cell(r.uni_ab)
+            ba_k, ba_l = cell(r.uni_ba)
+            line += f" {ab_k:>9} | {ab_l:>9} | {ba_k:>9} | {ba_l:>9} |"
         if bidir:
             a_k, a_l = cell(r.bidir_ab)
             b_k, b_l = cell(r.bidir_ba)
@@ -1068,6 +1082,8 @@ def fmt_summary(results: list[ModResult], paced: bool, bidir: bool) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.bidir_only:
+        args.bidir = True
     # --tcp: managers / prepare_radios own sut/sur binds. Still apply PHY knobs
     # unless the caller also passed --skip-config.
     skip_upstream = args.skip_config or args.tcp
@@ -1356,13 +1372,22 @@ def main() -> int:
             parts = [f"{elapsed:4.1f}/{args.duration:.0f}s"]
             for i, (dest, _tag, lis) in enumerate(senders):
                 sent_n = sent_live[i][0]
+                recv_n = lis.stats.packets
                 recv_b = lis.stats.nbytes
                 send_rate = live_kbps((sent_n - prev_sent[i]) * args.size, dt)
                 recv_rate = live_kbps(recv_b - prev_nbytes[i], dt)
                 parts.append(
-                    f"{dir_label(dest)} send {send_rate:7.1f} recv {recv_rate:7.1f}"
+                    f"{dir_label(dest)} send {send_rate:7.1f} recv {recv_rate:7.1f} kbps "
+                    f"loss {fmt_loss_pct(sent_n, recv_n):>6}"
                 )
-            return "  ".join(parts) + " kbps"
+            return "  ".join(parts)
+
+        def emit_progress(line: str, *, newline: bool = False) -> None:
+            if use_cr:
+                end = "\n" if newline else ""
+                print(f"\r{line:<160}", end=end, flush=True)
+            else:
+                print(line, flush=True)
 
         while True:
             alive = [t for t in threads if t.is_alive()]
@@ -1370,11 +1395,7 @@ def main() -> int:
             due = now - last_print >= print_interval
             finished = not alive and now - last_print >= 0.05
             if due or finished:
-                line = progress_line()
-                if use_cr:
-                    print(f"\r{line:<120}", end="", flush=True)
-                else:
-                    print(line, flush=True)
+                emit_progress(progress_line())
                 last_print = now
                 prev_t = now
                 prev_sent = [cell[0] for cell in sent_live]
@@ -1386,6 +1407,15 @@ def main() -> int:
 
         if use_cr:
             print(flush=True)
+
+        def drain_line(elapsed: float, timeout: float) -> str:
+            parts = [f"drain {elapsed:4.1f}/{timeout:.0f}s"]
+            for i, (dest, _tag, lis) in enumerate(senders):
+                parts.append(
+                    f"{dir_label(dest)} {lis.stats.packets}/{results[i]} "
+                    f"loss {fmt_loss_pct(results[i], lis.stats.packets):>6}"
+                )
+            return "  ".join(parts)
 
         for t in threads:
             if t.is_alive():
@@ -1428,25 +1458,13 @@ def main() -> int:
                     break
                 now = time.monotonic()
                 if now - last_dprint >= print_interval:
-                    parts = [f"drain {now - t0:4.1f}/{timeout:.0f}s"]
-                    for i, (dest, _tag, lis) in enumerate(senders):
-                        parts.append(
-                            f"{dir_label(dest)} {lis.stats.packets}/{results[i]}"
-                        )
-                    line = "  ".join(parts)
-                    if use_cr:
-                        print(f"\r{line:<120}", end="", flush=True)
-                    else:
-                        print(line, flush=True)
+                    emit_progress(drain_line(now - t0, timeout))
                     last_dprint = now
                 time.sleep(0.05)
             if use_cr and last_dprint > 0.0:
-                parts = [f"drain {time.monotonic() - t0:4.1f}/{timeout:.0f}s"]
-                for i, (dest, _tag, lis) in enumerate(senders):
-                    parts.append(
-                        f"{dir_label(dest)} {lis.stats.packets}/{results[i]}"
-                    )
-                print(f"\r{'  '.join(parts):<120}", flush=True)
+                emit_progress(
+                    drain_line(time.monotonic() - t0, timeout), newline=True
+                )
             if not drained:
                 for i, (dest, _tag, lis) in enumerate(senders):
                     if results[i] > 0 and lis.stats.packets < results[i]:
@@ -1523,20 +1541,23 @@ def main() -> int:
         result.integrity_ba = b_to_a
         result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
 
-        print("-- unidirectional")
-        result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
-        result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
-        print(
-            f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
-            f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
-        )
-        print(
-            f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
-            f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
-        )
-        result.uni_ok = loss_ok(
-            result.uni_ab, 25.0 if args.tcp else 5.0, paced
-        ) and loss_ok(result.uni_ba, 25.0 if args.tcp else 5.0, paced)
+        if not args.bidir_only:
+            print("-- unidirectional")
+            result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
+            result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
+            print(
+                f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
+                f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
+            )
+            print(
+                f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
+                f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
+            )
+            result.uni_ok = loss_ok(
+                result.uni_ab, 25.0 if args.tcp else 5.0, paced
+            ) and loss_ok(result.uni_ba, 25.0 if args.tcp else 5.0, paced)
+        else:
+            result.uni_ok = True
 
         if args.bidir:
             bidir_offer = (offer / 2.0) if paced else offer
@@ -1574,7 +1595,7 @@ def main() -> int:
 
     print("\n=== result ===")
     paced = args.kbps != 0
-    print(fmt_summary(all_results, paced, args.bidir))
+    print(fmt_summary(all_results, paced, args.bidir, uni=not args.bidir_only))
 
     passed = sum(1 for r in all_results if r.overall)
     print(f"\n{passed}/{len(all_results)} modulations PASS  channel {channel_label}")

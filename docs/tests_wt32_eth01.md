@@ -58,6 +58,7 @@ host TCP :9001  ← manager A ← radio A sur bus=d4 ← air ← radio B sut bus
 python3 tools/bw_test.py
 python3 tools/bw_test.py --all
 python3 tools/bw_test.py --bidir --modulation DSS_1M_L
+python3 tools/bw_test.py --bidir-only --modulation OFDM_24M
 python3 tools/bw_test.py --modulation OFDM_6M,OFDM_24M,OFDM_54M --channel 6
 python3 tools/bw_test.py --kbps 400 --modulation CCK_11M_S
 python3 tools/bw_test.py --no-cca --modulation OFDM_24M
@@ -81,6 +82,7 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 | `--cca` / `--no-cca` | enabled | `set_cca_enabled` on both radios. `--no-cca` skips wait-for-idle |
 | `--skip-config` | off | Do not send console commands |
 | `--bidir` | off | Run the simultaneous A+B phase |
+| `--bidir-only` | off | Skip unidirectional; run only the simultaneous A+B phase |
 | `--verbose` | off | Print full console replies |
 
 Each rate step sends `set_cca_enabled <0|1>` on both radios. If `--modulation` or `--all` is given, `set_modulation <modulation>` is sent first. If `--channel` is given, `set_channel <channel>` is sent first.
@@ -101,7 +103,7 @@ Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP bef
 
 ## Simultaneous bidirectional bandwidth
 
-Only with `--bidir`. Both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit.
+Only with `--bidir` or `--bidir-only`. Both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit. `--bidir-only` skips the unidirectional phases.
 
 # Pass criteria (per modulation)
 
@@ -110,7 +112,7 @@ Only with `--bidir`. Both directions send at once. Each direction is offered **h
 | Config | `set_cca_enabled` returns `ok` on both radios (`set_channel` / `set_modulation` too if those flags were given) |
 | Integrity | 20/20 each way (after retry) |
 | Unidirectional | each direction `loss%` ≤ 5 at the auto/`--kbps` offer |
-| Simultaneous | `--bidir` only; each direction `loss%` ≤ 10 at half uni offer |
+| Simultaneous | `--bidir` / `--bidir-only`; each direction `loss%` ≤ 10 at half uni offer |
 
 Sweep exit status is 0 only if **every** listed modulation passes. High PHY rates can fail the loss limit because the ESP32 inject path cannot offer the estimated air goodput; the table still records delivered **goodput kbps**.
 

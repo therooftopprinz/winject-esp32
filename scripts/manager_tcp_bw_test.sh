@@ -11,6 +11,7 @@
 #   ./scripts/manager_tcp_bw_test.sh --a 192.168.127.181 --b 192.168.128.119 --modulation OFDM_24M
 #   ./scripts/manager_tcp_bw_test.sh 192.168.253.11 192.168.253.12 192.168.253.106
 #   ./scripts/manager_tcp_bw_test.sh -- --modulation OFDM_24M --bidir
+#   ./scripts/manager_tcp_bw_test.sh -- --modulation OFDM_24M --bidir-only
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
