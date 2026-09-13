@@ -99,6 +99,10 @@ Solo send skips step 3 (no copy). Domain unset → TX drops without inject.
 
 # Control Plane Console
 
+This TCP console configures the **radio**. It is not rover vehicle control
+(no servo, no motor, no drive-console proxy). Rover master/slave and the UART
+drive console are specified in the rover repo; see [rover.md](rover.md).
+
 Available on **TCP** `2323` after Ethernet has an IP (DHCP lease in `AUTO`, or the static address). Up to **4** concurrent clients. Banner: `WInject-ESP32  bus/domain radio`. UART0 is logs only (115200). Bool args accept `0|1|true|false|on|off|yes|no`. Radio commands need the radio path (unavailable in `OTA`). Upstream bind/forward tables hold up to **128** entries (`WIFI_AIRPORT_MAX`).
 
 Commands:
@@ -108,14 +112,14 @@ Commands:
 - `unset_domain|udom` - clear domain (`0`); air path invalid until set again.
 - `set_upstream_tx|sut bus=<lcid> <udp_port>` - bind this UDP port; each datagram is one LCP stamped with that bus on TX. Same bus replaces; same port on another bus steals the port. Bind is `0.0.0.0`.
 - `unset_upstream_tx|uut bus=<lcid>` - unbind the inject UDP socket for that bus.
-- `set_upstream_rx|sur bus=<lcid> <host> <udp_port>` - forward air PDUs matching that bus to this host. Same bus+dest is idempotent; multiple dests per bus are allowed. Exact bus match only (`bus=0` matches broadcast slots only).
+- `set_upstream_rx|sur bus=<lcid> <host> <udp_port>` - forward air PDUs matching that bus to this host. Same bus+dest is idempotent; same bus with a new dest terminates the old bind and creates a new one. Exact bus match only (`bus=0` matches broadcast slots only).
 - `unset_upstream_rx|uur bus=<lcid>` - remove all forward dests for that bus.
 - `set_upstream_ci|suc to=<host>:<port>` - subscribe to channel-info UDP (flow control + RX air metrics).
 - `unset_upstream_ci|usuc to=<host>:<port>` - remove a channel-info subscriber.
 - `set_logger|sl address=<host>:<port> level=<error|warn|info|debug>` - single UDP text logger (replaces any previous dest). Rate-limited (~50 Hz). Not persisted in NVS. Works in `OTA`.
 - `unset_logger|ul` - disable the UDP logger.
 - `set_allow_failed_crc|saf <allow>` - Forward failed-CRC air frames (bool). Default `0`.
-- `set_channel|sc <channel>` - Set WIFI channel (1–13)
+- `set_channel|sc <channel>` - Set WIFI channel (1–14). Channel 14 is 802.11b (DSSS/CCK) only.
 - `set_modulation|sd <modulation>` - Set WIFI modulation
 
 | Modulation Code | Modulation | Data Rate |
@@ -157,11 +161,12 @@ Commands:
     - `AUTO` (default) - DHCP client. If no lease in 5 s, apply `set_ip` as a static fallback. DHCP server is blocked.
 - `set_enable_dhcp_server|sed <enabled>` - Enable the DHCP server (bool). Default `0`. Takes effect only in `STATIC`; in `AUTO` the setting is stored but the server stays blocked.
 - `set_ip|sfi <ip>` / `set_fallback_ip|sfi <ip>` - Set the static / fallback address. In `STATIC`, the DHCP server (if enabled) serves that `/24`; pool is host `.1`–`.64` except the device if it is in that range. `.65`–`.254` are for static/external hosts.
-- `save|sv [0-9]` - save settings to NVS slot `0`–`9` (or the current slot if omitted) and make that slot current. Blob **v3**: mode, radio, network, domain, `sut`/`sur` tables, CI subscribers — **not** the UDP logger.
+- `save|sv [0-9]` - save settings to NVS slot `0`–`9` (or the current slot if omitted) and make that slot current. Blob **v5**: mode, radio, network/ethernet, domain, `sut`/`sur` tables, CI subscribers. **Not** persisted: the UDP logger. Applying a slot (boot / `use`) clears existing upstreams and recreates them from the blob. v3 blobs still load with upstreams; v4 blobs load with empty upstream tables.
 - `use|u <slot>` - load slot `0`–`9`, apply it, and make it current. Empty slot is an error.
 - `set_cca_enabled|sce <is_enabled>` - Enable or disable TX CCA / CSMA (bool). Disabling lets inject skip wait-for-idle.
 - `set_tx_power|stp <dbm>` - Maximum Wi-Fi TX power in dBm (`2`–`20`). Default `20`. ESP32 maps this to 0.25 dBm units internally.
 - `status|s` - device, network, wifi, upstreams, channel metrics, logger, channel_info
+- `ping` - client-initiated keepalive; response is `pong` (works in `OTA`)
 - `reset|r` - software-restart the ESP32 (`esp_restart`)
 
 Also: `help` / `?`.
@@ -276,7 +281,7 @@ dhcp mode=<STATIC|AUTO> static_ip=<ipv4> dhcps=<off|blocked|enabled|active> pool
 ota url=http://<ip>:80/update
   | ota waiting
 # wifi
-wifi channel=<1-13> modulation=<code> cca=<enabled|disabled> tx_power=<2-20> allow_failed_crc=<true|false>
+wifi channel=<1-14> modulation=<code> cca=<enabled|disabled> tx_power=<2-20> allow_failed_crc=<true|false>
 # radio
 radio rssi=<dBm|-> snr=<dB|->
 # upstreams

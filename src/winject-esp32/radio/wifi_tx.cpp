@@ -552,7 +552,7 @@ void wifi_tx::on_tx_done(const esp_80211_tx_info_t* info)
     {
         return;
     }
-    wifi::instance().tx.note_done(seq);
+    wifi::instance().tx().note_done(seq);
 }
 
 bool wifi_tx::apply_tx_done_cb()

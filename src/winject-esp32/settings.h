@@ -30,6 +30,7 @@ public:
     bool apply_live();
 
 private:
+    // Persisted: mode, radio, ethernet, domain, sut/sur/ci.
     struct snapshot_s
     {
         WinjectMode mode;
@@ -50,7 +51,9 @@ private:
         ip_port_t ci[WIFI_AIRPORT_MAX];
     };
 
-    static constexpr uint8_t k_blob_version = 3;
+    // v5 = v4 header + sut/sur/ci (same layout as v3 after domain).
+    // v4 loads with empty upstreams; v3 loads upstreams.
+    static constexpr uint8_t k_blob_version = 5;
     static constexpr uint8_t k_blob_version_min = 3;
     static constexpr size_t k_blob_max = 2600;
 

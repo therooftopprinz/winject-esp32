@@ -74,35 +74,39 @@ static bool require_arg(const bfc::configuration_parser& p,
 const char* config::radio_mode_name() const
 {
     return radio_mode == radio_mode_e::bfc_tunnel_device ? "BFC_TUNNEL_DEVICE"
-                                                    : "STANDALONE";
+                                                         : "STANDALONE";
 }
 
-uint32_t config::phy_rate_kbps(const std::string& modulation)
+namespace
 {
-    // Named rates from docs/winject.md (20 MHz MCS column).
-    struct entry_s
-    {
-        const char* name;
-        uint32_t kbps;
-    };
-    static constexpr entry_s k_table[] = {
-        {"DSS_1M_L", 1000},       {"DSS_2M_S", 2000},
-        {"DSS_2M_L", 2000},       {"CCK_5M_L", 5500},
-        {"CCK_5M_S", 5500},       {"CCK_11M_L", 11000},
-        {"CCK_11M_S", 11000},     {"OFDM_6M", 6000},
-        {"OFDM_9M", 9000},        {"OFDM_12M", 12000},
-        {"OFDM_18M", 18000},      {"OFDM_24M", 24000},
-        {"OFDM_36M", 36000},      {"OFDM_48M", 48000},
-        {"OFDM_54M", 54000},      {"OFDM_MCS0_LGI", 6500},
-        {"OFDM_MCS1_LGI", 13000}, {"OFDM_MCS2_LGI", 19500},
-        {"OFDM_MCS3_LGI", 26000}, {"OFDM_MCS4_LGI", 39000},
-        {"OFDM_MCS5_LGI", 52000}, {"OFDM_MCS6_LGI", 58500},
-        {"OFDM_MCS7_LGI", 65000}, {"OFDM_MCS0_SGI", 7200},
-        {"OFDM_MCS1_SGI", 14400}, {"OFDM_MCS2_SGI", 21700},
-        {"OFDM_MCS3_SGI", 28900}, {"OFDM_MCS4_SGI", 43300},
-        {"OFDM_MCS5_SGI", 57800}, {"OFDM_MCS6_SGI", 65000},
-        {"OFDM_MCS7_SGI", 72200},
-    };
+struct phy_entry_s
+{
+    const char* name;
+    uint32_t kbps;
+};
+
+// Named rates from docs/winject.md (20 MHz MCS column).
+static constexpr phy_entry_s k_phy_table[] = {
+    {"DSS_1M_L", 1000},       {"DSS_2M_S", 2000},
+    {"DSS_2M_L", 2000},       {"CCK_5M_L", 5500},
+    {"CCK_5M_S", 5500},       {"CCK_11M_L", 11000},
+    {"CCK_11M_S", 11000},     {"OFDM_6M", 6000},
+    {"OFDM_9M", 9000},        {"OFDM_12M", 12000},
+    {"OFDM_18M", 18000},      {"OFDM_24M", 24000},
+    {"OFDM_36M", 36000},      {"OFDM_48M", 48000},
+    {"OFDM_54M", 54000},      {"OFDM_MCS0_LGI", 6500},
+    {"OFDM_MCS1_LGI", 13000}, {"OFDM_MCS2_LGI", 19500},
+    {"OFDM_MCS3_LGI", 26000}, {"OFDM_MCS4_LGI", 39000},
+    {"OFDM_MCS5_LGI", 52000}, {"OFDM_MCS6_LGI", 58500},
+    {"OFDM_MCS7_LGI", 65000}, {"OFDM_MCS0_SGI", 7200},
+    {"OFDM_MCS1_SGI", 14400}, {"OFDM_MCS2_SGI", 21700},
+    {"OFDM_MCS3_SGI", 28900}, {"OFDM_MCS4_SGI", 43300},
+    {"OFDM_MCS5_SGI", 57800}, {"OFDM_MCS6_SGI", 65000},
+    {"OFDM_MCS7_SGI", 72200},
+};
+
+const phy_entry_s* find_phy(const std::string& modulation)
+{
     std::string upper;
     upper.reserve(modulation.size());
     for (char c : modulation)
@@ -110,14 +114,42 @@ uint32_t config::phy_rate_kbps(const std::string& modulation)
         upper.push_back(
             static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
     }
-    for (const auto& e : k_table)
+    for (const auto& e : k_phy_table)
     {
         if (upper == e.name)
         {
-            return e.kbps;
+            return &e;
         }
     }
-    return 0;
+    return nullptr;
+}
+}  // namespace
+
+uint32_t config::phy_rate_kbps(const std::string& modulation)
+{
+    const phy_entry_s* e = find_phy(modulation);
+    return e != nullptr ? e->kbps : 0;
+}
+
+std::string config::canonical_modulation(const std::string& modulation)
+{
+    const phy_entry_s* e = find_phy(modulation);
+    return e != nullptr ? e->name : "";
+}
+
+bool config::modulation_ok_for_channel(const std::string& modulation,
+                                       uint8_t channel)
+{
+    const std::string name = canonical_modulation(modulation);
+    if (name.empty())
+    {
+        return false;
+    }
+    if (channel != 14)
+    {
+        return true;
+    }
+    return name.rfind("DSS_", 0) == 0 || name.rfind("CCK_", 0) == 0;
 }
 
 uint32_t config::derive_max_rate_kbps(const std::string& modulation)
@@ -180,7 +212,7 @@ bool config::load(const std::string& path, std::string* error)
     console_port = static_cast<uint16_t>(*console);
 
     auto ch = parser.as<unsigned>("winject.channel");
-    if (!ch || *ch < 1 || *ch > 13)
+    if (!ch || *ch < 1 || *ch > 14)
     {
         *error = "invalid winject.channel";
         return false;
@@ -190,6 +222,17 @@ bool config::load(const std::string& path, std::string* error)
     if (!require_arg(parser, "winject.modulation", &modulation, error))
     {
         return false;
+    }
+    if (channel == 14)
+    {
+        // Match firmware: channel 14 is DSSS/CCK only.
+        const bool is_11b = modulation.rfind("DSS_", 0) == 0 ||
+                            modulation.rfind("CCK_", 0) == 0;
+        if (!is_11b)
+        {
+            *error = "winject.channel 14 requires DSSS/CCK winject.modulation";
+            return false;
+        }
     }
     auto pwr = parser.as<int>("winject.power");
     if (!pwr || *pwr < 2 || *pwr > 20)
@@ -243,6 +286,27 @@ bool config::load(const std::string& path, std::string* error)
     {
         skip_console = *skip == "1" || *skip == "true";
     }
+    manager_console_in = parser.arg("manager.console_in").value_or("");
+    manager_console_out = parser.arg("manager.console_out").value_or("");
+    if (manager_console_in.empty() != manager_console_out.empty())
+    {
+        *error = "manager.console_in and manager.console_out must both be set";
+        return false;
+    }
+    if (!manager_console_in.empty())
+    {
+        sockaddr_in tmp = {};
+        if (!parse_host_port(manager_console_in, &tmp))
+        {
+            *error = "invalid manager.console_in";
+            return false;
+        }
+        if (!parse_host_port(manager_console_out, &tmp))
+        {
+            *error = "invalid manager.console_out";
+            return false;
+        }
+    }
     auto fwd_base = parser.as<unsigned>("winject.forward_base");
     if (fwd_base && *fwd_base > 0 && *fwd_base <= 65535)
     {
@@ -286,27 +350,55 @@ bool config::load(const std::string& path, std::string* error)
             *error = "invalid " + key_of(i, "mode");
             return false;
         }
-        std::string bus_tx_s;
-        std::string bus_rx_s;
-        if (!require_arg(parser, key_of(i, "bus_tx"), &bus_tx_s, error) ||
-            !require_arg(parser, key_of(i, "bus_rx"), &bus_rx_s, error))
+        // Firmware TX/RX are independent and optional.
+        // Preferred: upstream-N.tx_bus / rx_bus.
+        // Legacy: upstream_tx-N.bus / upstream_rx-N.bus, or bus_tx / bus_rx.
+        const std::string bus_tx_s =
+            parser.arg(key_of(i, "tx_bus"))
+                .value_or(
+                    parser.arg("upstream_tx-" + std::to_string(i) + ".bus")
+                        .value_or(
+                            parser.arg(key_of(i, "bus_tx")).value_or("")));
+        const std::string bus_rx_s =
+            parser.arg(key_of(i, "rx_bus"))
+                .value_or(
+                    parser.arg("upstream_rx-" + std::to_string(i) + ".bus")
+                        .value_or(
+                            parser.arg(key_of(i, "bus_rx")).value_or("")));
+        if (!bus_tx_s.empty())
         {
+            if (!parse_bus(bus_tx_s, &u.bus_tx) || u.bus_tx == 0)
+            {
+                *error = "invalid " + key_of(i, "tx_bus");
+                return false;
+            }
+        }
+        if (!bus_rx_s.empty())
+        {
+            if (!parse_bus(bus_rx_s, &u.bus_rx) || u.bus_rx == 0)
+            {
+                *error = "invalid " + key_of(i, "rx_bus");
+                return false;
+            }
+        }
+        if (u.bus_tx == 0 && u.bus_rx == 0)
+        {
+            *error =
+                "upstream-" + std::to_string(i) + " needs tx_bus and/or rx_bus";
             return false;
         }
-        if (!parse_bus(bus_tx_s, &u.bus_tx) || u.bus_tx == 0)
+        if (u.bus_tx != 0 && u.bus_tx == u.bus_rx)
         {
-            *error = "invalid " + key_of(i, "bus_tx");
-            return false;
-        }
-        if (!parse_bus(bus_rx_s, &u.bus_rx) || u.bus_rx == 0)
-        {
-            *error = "invalid " + key_of(i, "bus_rx");
-            return false;
-        }
-        if (u.bus_tx == u.bus_rx)
-        {
-            *error = key_of(i, "bus_tx") + " and " + key_of(i, "bus_rx") +
+            *error = key_of(i, "tx_bus") + " and " + key_of(i, "rx_bus") +
                      " must differ";
+            return false;
+        }
+        if ((u.mode == upstream_mode_e::tcp_client ||
+             u.mode == upstream_mode_e::tcp_server) &&
+            (u.bus_tx == 0 || u.bus_rx == 0))
+        {
+            *error = "TCP upstream-" + std::to_string(i) +
+                     " needs both tx_bus and rx_bus (ARQ)";
             return false;
         }
         auto budget = parser.as<unsigned>(key_of(i, "scheduler_budget"));
@@ -391,10 +483,13 @@ bool config::load(const std::string& path, std::string* error)
             *error = "TCP_SERVER_FORWARDING needs bind_address";
             return false;
         }
+        auto bus_used = [](uint8_t bus, const upstream_config_s& o)
+        {
+            return bus != 0 && (bus == o.bus_tx || bus == o.bus_rx);
+        };
         for (const auto& prev : upstreams)
         {
-            if (prev.bus_tx == u.bus_tx || prev.bus_rx == u.bus_tx ||
-                prev.bus_tx == u.bus_rx || prev.bus_rx == u.bus_rx)
+            if (bus_used(u.bus_tx, prev) || bus_used(u.bus_rx, prev))
             {
                 *error = "duplicate bus on upstream-" + std::to_string(i);
                 return false;

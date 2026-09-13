@@ -57,12 +57,12 @@ void wifi_rx::note_air(const wifi_pkt_rx_ctrl_t& ctrl)
         static_cast<uint8_t>(ctrl.sig_mode), static_cast<uint8_t>(ctrl.rate),
         static_cast<uint8_t>(ctrl.mcs), ctrl.sgi != 0);
     modulation.store(name, std::memory_order_relaxed);
-    const int8_t rssi = clamp_i8(ctrl.rssi);
-    const int8_t snr = clamp_i8(ctrl.rssi - ctrl.noise_floor);
-    rssi.store(rssi, std::memory_order_relaxed);
-    snr.store(snr, std::memory_order_relaxed);
+    const int8_t rssi_dbm = clamp_i8(ctrl.rssi);
+    const int8_t snr_db = clamp_i8(ctrl.rssi - ctrl.noise_floor);
+    rssi.store(rssi_dbm, std::memory_order_relaxed);
+    snr.store(snr_db, std::memory_order_relaxed);
     air_valid.store(true, std::memory_order_relaxed);
-    channel_info_endpoint::instance().on_rx_air_info(rssi, snr);
+    channel_info_endpoint::instance().on_rx_air_info(rssi_dbm, snr_db);
 }
 
 void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
@@ -125,7 +125,7 @@ void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
 
 void wifi_rx::promiscuous_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 {
-    wifi::instance().rx.on_promiscuous(buf, type);
+    wifi::instance().rx().on_promiscuous(buf, type);
 }
 
 bool wifi_rx::init(lc_rx& rx)

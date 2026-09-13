@@ -28,6 +28,26 @@ void tx_scheduler::add(stream* up, wifi_udp* radio, size_t budget)
     slots.push_back(slot_s{up, radio, budget});
 }
 
+bool tx_scheduler::set_budget(size_t index, size_t budget)
+{
+    if (index >= slots.size() || budget == 0)
+    {
+        return false;
+    }
+    slots[index].budget = budget;
+    return true;
+}
+
+bool tx_scheduler::get_budget(size_t index, size_t* budget) const
+{
+    if (index >= slots.size() || budget == nullptr)
+    {
+        return false;
+    }
+    *budget = slots[index].budget;
+    return true;
+}
+
 void tx_scheduler::refill()
 {
     const auto now = std::chrono::steady_clock::now();
@@ -97,8 +117,7 @@ void tx_scheduler::tick()
             }
             else
             {
-                if (remain[i] == 0 || tokens == 0 ||
-                    data_sent >= k_max_data_per_tick)
+                if (tokens == 0 || data_sent >= k_max_data_per_tick)
                 {
                     return false;
                 }
@@ -108,14 +127,23 @@ void tx_scheduler::tick()
                 }
             }
 
-            size_t max = k_wifi_payload_max;
+            size_t max = k_stream_payload_max;
             if (!acks_only)
             {
-                max = remain[i] < tokens ? remain[i]
-                                          : static_cast<size_t>(tokens);
-                if (max > k_wifi_payload_max)
+                // First datagram this wakeup may exceed scheduler_budget so a
+                // single gci / help reply cannot stall the TX queue forever.
+                const bool first_data = (remain[i] == slots[i].budget);
+                if (!first_data && remain[i] == 0)
                 {
-                    max = k_wifi_payload_max;
+                    return false;
+                }
+                if (tokens < max)
+                {
+                    max = static_cast<size_t>(tokens);
+                }
+                if (!first_data && remain[i] < max)
+                {
+                    max = remain[i];
                 }
                 if (max == 0)
                 {
@@ -133,21 +161,22 @@ void tx_scheduler::tick()
             {
                 return false;
             }
-            air_bytes_interval += n;
+            const size_t air_n = n + k_air_seq_len;
+            air_bytes_interval += air_n;
             // ACKs/ctrl are exempt from the data rate bucket.
             if (!is_ack)
             {
-                if (n <= remain[i])
+                if (air_n <= remain[i])
                 {
-                    remain[i] -= n;
+                    remain[i] -= air_n;
                 }
                 else
                 {
                     remain[i] = 0;
                 }
-                if (n <= tokens)
+                if (air_n <= tokens)
                 {
-                    tokens -= n;
+                    tokens -= air_n;
                 }
                 else
                 {
@@ -200,6 +229,11 @@ uint64_t tx_scheduler::take_air_bytes()
     return n;
 }
 
+uint64_t tx_scheduler::peek_air_bytes() const
+{
+    return air_bytes_interval;
+}
+
 void tx_scheduler::log_stats(double interval_sec,
                           const std::vector<stream*>& ups)
 {
@@ -214,10 +248,12 @@ void tx_scheduler::log_stats(double interval_sec,
         stream_stats_s st;
         double tx_kbps = 0.0;
         double rx_kbps = 0.0;
+        uint64_t rx_lost = 0;
     };
     std::vector<row_s> rows;
     uint64_t total_tx = take_air_bytes();
     uint64_t total_rx = 0;
+    uint64_t total_lost = 0;
     for (size_t i = 0; i < ups.size(); i++)
     {
         if (ups[i] == nullptr)
@@ -230,34 +266,41 @@ void tx_scheduler::log_stats(double interval_sec,
             continue;
         }
         total_rx += st.air_rx_bytes;
-        rows.push_back(row_s{i, st, kbps(st.tx_bytes), kbps(st.rx_bytes)});
+        uint64_t lost = 0;
+        if (i < slots.size() && slots[i].radio != nullptr)
+        {
+            lost = slots[i].radio->take_lost_interval();
+        }
+        total_lost += lost;
+        rows.push_back(row_s{i, st, kbps(st.tx_bytes), kbps(st.rx_bytes), lost});
     }
 
-    LOG_INF("STREAM TOTAL TX=%6.0f RX=%6.0f", kbps(total_tx), kbps(total_rx));
+    LOG_INF("STREAM TOTAL TX=%6.0f RX=%6.0f LOST=%llu", kbps(total_tx),
+            kbps(total_rx), static_cast<unsigned long long>(total_lost));
     for (const row_s& row : rows)
     {
         if (row.st.tcp)
         {
-            LOG_INF("STREAM-%zu %s TX=%6.0f RX=%6.0f QUEUE=%zu UNACKED=%zu",
+            LOG_INF("STREAM-%zu %s TX=%6.0f RX=%6.0f QUEUE=%zu UNACKED=%zu "
+                    "LOST=%llu",
                     row.index, row.st.proto, row.tx_kbps, row.rx_kbps,
-                    row.st.queue, row.st.unacked);
+                    row.st.queue, row.st.unacked,
+                    static_cast<unsigned long long>(row.rx_lost));
+        }
+        else if (row.st.fec_recovered != 0 || row.st.fec_fail != 0)
+        {
+            LOG_INF("STREAM-%zu %s TX=%6.0f RX=%6.0f FEC_REC=%llu "
+                    "FEC_FAIL=%llu LOST=%llu",
+                    row.index, row.st.proto, row.tx_kbps, row.rx_kbps,
+                    static_cast<unsigned long long>(row.st.fec_recovered),
+                    static_cast<unsigned long long>(row.st.fec_fail),
+                    static_cast<unsigned long long>(row.rx_lost));
         }
         else
         {
-            if (row.st.fec_recovered != 0 || row.st.fec_fail != 0)
-            {
-                LOG_INF(
-                    "STREAM-%zu %s TX=%6.0f RX=%6.0f FEC_REC=%llu "
-                    "FEC_FAIL=%llu",
-                    row.index, row.st.proto, row.tx_kbps, row.rx_kbps,
-                    static_cast<unsigned long long>(row.st.fec_recovered),
-                    static_cast<unsigned long long>(row.st.fec_fail));
-            }
-            else
-            {
-                LOG_INF("STREAM-%zu %s TX=%6.0f RX=%6.0f", row.index,
-                        row.st.proto, row.tx_kbps, row.rx_kbps);
-            }
+            LOG_INF("STREAM-%zu %s TX=%6.0f RX=%6.0f LOST=%llu", row.index,
+                    row.st.proto, row.tx_kbps, row.rx_kbps,
+                    static_cast<unsigned long long>(row.rx_lost));
         }
     }
 }

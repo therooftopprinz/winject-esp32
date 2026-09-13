@@ -46,7 +46,7 @@ size_t align_shard(size_t row)
 
 size_t rs_block_erasure::max_original()
 {
-    return k_wifi_payload_max - k_header_len - k_len_prefix;
+    return k_stream_payload_max - k_header_len - k_len_prefix;
 }
 
 const char* rs_block_erasure::impl_name() const
@@ -81,11 +81,28 @@ bool rs_block_erasure::init(int k, int n, int timeout_ms)
     done_order.clear();
     done.clear();
     recovered_ = 0;
+    recovered_seen_ = 0;
     blocks_ = 0;
     decode_fail_ = 0;
+    decode_fail_seen_ = 0;
     oversized_ = 0;
     enabled_ = true;
     return true;
+}
+
+void rs_block_erasure::disable()
+{
+    enabled_ = false;
+    pending.clear();
+    deadline_set = false;
+    k_ = 0;
+    n_ = 0;
+    p = 0;
+    encode_matrix.clear();
+    g_tbls.clear();
+    rx_blocks.clear();
+    done_order.clear();
+    done.clear();
 }
 
 bool rs_block_erasure::pack_header(uint8_t* out, uint16_t block_id, int index,
@@ -160,7 +177,7 @@ bool rs_block_erasure::encode_block(
         max_row = std::max(max_row, data_shards[static_cast<size_t>(i)].size());
     }
     const size_t shard_len = align_shard(max_row);
-    if (k_header_len + shard_len > k_wifi_payload_max)
+    if (k_header_len + shard_len > k_stream_payload_max)
     {
         return false;
     }
@@ -191,79 +208,97 @@ bool rs_block_erasure::encode_block(
     for (int i = 0; i < n_; i++)
     {
         auto& pkt = (*out)[static_cast<size_t>(i)];
-        pkt.resize(k_header_len + shard_len);
         const uint8_t flags = i >= k_ ? k_flag_parity : 0;
+        size_t body_len = shard_len;
+        const uint8_t* body = nullptr;
+        if (i < k_)
+        {
+            const size_t plen = i < static_cast<int>(packets.size())
+                                    ? packets[static_cast<size_t>(i)].size()
+                                    : 0;
+            body_len = k_len_prefix + plen;
+            body = data_shards[static_cast<size_t>(i)].data();
+        }
+        else
+        {
+            body = parity[static_cast<size_t>(i - k_)].data();
+        }
+        pkt.resize(k_header_len + body_len);
         pack_header(pkt.data(), block_id, i, k_, n_, flags);
-        const uint8_t* body = i < k_
-                                  ? data_shards[static_cast<size_t>(i)].data()
-                                  : parity[static_cast<size_t>(i - k_)].data();
-        memcpy(pkt.data() + k_header_len, body, shard_len);
+        memcpy(pkt.data() + k_header_len, body, body_len);
     }
     return true;
 }
 
-int rs_block_erasure::gen_decode_matrix(const uint8_t* err_list, int nerrs,
-                                      uint8_t* decode_matrix,
-                                      uint8_t* decode_index) const
+int rs_block_erasure::gen_decode_matrix(int k, int n,
+                                        const uint8_t* encode_matrix,
+                                        const uint8_t* err_list, int nerrs,
+                                        uint8_t* decode_matrix,
+                                        uint8_t* decode_index)
 {
-    std::vector<uint8_t> in_err(static_cast<size_t>(n_), 0);
+    if (encode_matrix == nullptr || err_list == nullptr ||
+        decode_matrix == nullptr || decode_index == nullptr || k < 1 ||
+        n <= k)
+    {
+        return -1;
+    }
+    std::vector<uint8_t> in_err(static_cast<size_t>(n), 0);
     for (int i = 0; i < nerrs; i++)
     {
-        if (err_list[i] >= n_)
+        if (err_list[i] >= n)
         {
             return -1;
         }
         in_err[err_list[i]] = 1;
     }
-    std::vector<uint8_t> b(static_cast<size_t>(k_) * static_cast<size_t>(k_));
-    std::vector<uint8_t> invert(static_cast<size_t>(k_) *
-                                static_cast<size_t>(k_));
+    std::vector<uint8_t> b(static_cast<size_t>(k) * static_cast<size_t>(k));
+    std::vector<uint8_t> invert(static_cast<size_t>(k) *
+                                static_cast<size_t>(k));
     int r = 0;
-    for (int i = 0; i < k_; i++, r++)
+    for (int i = 0; i < k; i++, r++)
     {
-        while (r < n_ && in_err[static_cast<size_t>(r)])
+        while (r < n && in_err[static_cast<size_t>(r)])
         {
             r++;
         }
-        if (r >= n_)
+        if (r >= n)
         {
             return -1;
         }
-        memcpy(b.data() + static_cast<size_t>(k_) * static_cast<size_t>(i),
-               encode_matrix.data() +
-                   static_cast<size_t>(k_) * static_cast<size_t>(r),
-               static_cast<size_t>(k_));
+        memcpy(b.data() + static_cast<size_t>(k) * static_cast<size_t>(i),
+               encode_matrix + static_cast<size_t>(k) * static_cast<size_t>(r),
+               static_cast<size_t>(k));
         decode_index[i] = static_cast<uint8_t>(r);
     }
-    if (gf_invert_matrix(b.data(), invert.data(), k_) < 0)
+    if (gf_invert_matrix(b.data(), invert.data(), k) < 0)
     {
         return -1;
     }
     for (int e = 0; e < nerrs; e++)
     {
         const int idx = err_list[e];
-        if (idx < k_)
+        if (idx < k)
         {
             memcpy(decode_matrix +
-                       static_cast<size_t>(k_) * static_cast<size_t>(e),
+                       static_cast<size_t>(k) * static_cast<size_t>(e),
                    invert.data() +
-                       static_cast<size_t>(k_) * static_cast<size_t>(idx),
-                   static_cast<size_t>(k_));
+                       static_cast<size_t>(k) * static_cast<size_t>(idx),
+                   static_cast<size_t>(k));
             continue;
         }
-        for (int i = 0; i < k_; i++)
+        for (int i = 0; i < k; i++)
         {
             uint8_t s = 0;
-            for (int j = 0; j < k_; j++)
+            for (int j = 0; j < k; j++)
             {
                 s ^= gf_mul(
-                    invert[static_cast<size_t>(j) * static_cast<size_t>(k_) +
+                    invert[static_cast<size_t>(j) * static_cast<size_t>(k) +
                            static_cast<size_t>(i)],
-                    encode_matrix[static_cast<size_t>(k_) *
+                    encode_matrix[static_cast<size_t>(k) *
                                        static_cast<size_t>(idx) +
                                    static_cast<size_t>(j)]);
             }
-            decode_matrix[static_cast<size_t>(k_) * static_cast<size_t>(e) +
+            decode_matrix[static_cast<size_t>(k) * static_cast<size_t>(e) +
                           static_cast<size_t>(i)] = s;
         }
     }
@@ -274,43 +309,67 @@ bool rs_block_erasure::decode_block(
     const std::unordered_map<int, std::vector<uint8_t>>& frags,
     std::vector<std::vector<uint8_t>>* payloads, int* recovered) const
 {
-    if (!enabled_ || payloads == nullptr ||
-        frags.size() < static_cast<size_t>(k_))
+    if (!enabled_)
     {
         return false;
     }
+    return decode_block(k_, n_, frags, payloads, recovered);
+}
+
+bool rs_block_erasure::decode_block(
+    int k, int n, const std::unordered_map<int, std::vector<uint8_t>>& frags,
+    std::vector<std::vector<uint8_t>>* payloads, int* recovered) const
+{
+    if (payloads == nullptr || k < 1 || n <= k ||
+        n > static_cast<int>(k_max_n) ||
+        frags.size() < static_cast<size_t>(k))
+    {
+        return false;
+    }
+    const int parity = n - k;
+    std::vector<uint8_t> encode_matrix(static_cast<size_t>(n) *
+                                       static_cast<size_t>(k));
+    gf_gen_cauchy1_matrix(encode_matrix.data(), n, k);
+
     size_t shard_len = 0;
     for (const auto& kv : frags)
     {
-        if (kv.first < 0 || kv.first >= n_)
+        if (kv.first < 0 || kv.first >= n)
         {
             return false;
         }
-        if (shard_len == 0)
-        {
-            shard_len = kv.second.size();
-        }
-        else if (kv.second.size() != shard_len)
-        {
-            return false;
-        }
+        shard_len = std::max(shard_len, kv.second.size());
     }
     if (shard_len < k_len_prefix)
     {
         return false;
     }
-
-    std::vector<std::vector<uint8_t>> data_copy(static_cast<size_t>(k_));
-    bool have_all_data = true;
-    for (int i = 0; i < k_; i++)
+    // Systematic rows may be native-size; pad to the longest (usually parity)
+    // so ISA-L columns match encode.
+    shard_len = align_shard(shard_len);
+    std::vector<std::vector<uint8_t>> padded(static_cast<size_t>(n));
+    std::vector<uint8_t> have(static_cast<size_t>(n), 0);
+    for (const auto& kv : frags)
     {
-        auto it = frags.find(i);
-        if (it == frags.end())
+        auto& row = padded[static_cast<size_t>(kv.first)];
+        row = kv.second;
+        if (row.size() < shard_len)
+        {
+            row.resize(shard_len, 0);
+        }
+        have[static_cast<size_t>(kv.first)] = 1;
+    }
+
+    std::vector<std::vector<uint8_t>> data_copy(static_cast<size_t>(k));
+    bool have_all_data = true;
+    for (int i = 0; i < k; i++)
+    {
+        if (!have[static_cast<size_t>(i)])
         {
             have_all_data = false;
             continue;
         }
-        data_copy[static_cast<size_t>(i)] = it->second;
+        data_copy[static_cast<size_t>(i)] = padded[static_cast<size_t>(i)];
     }
 
     int rec = 0;
@@ -318,39 +377,39 @@ bool rs_block_erasure::decode_block(
     {
         uint8_t err_list[k_max_n];
         int nerrs = 0;
-        for (int i = 0; i < n_; i++)
+        for (int i = 0; i < n; i++)
         {
-            if (frags.find(i) == frags.end())
+            if (!have[static_cast<size_t>(i)])
             {
                 err_list[nerrs++] = static_cast<uint8_t>(i);
             }
         }
-        if (nerrs > p)
+        if (nerrs > parity)
         {
             return false;
         }
         std::vector<uint8_t> decode_matrix(static_cast<size_t>(nerrs) *
-                                           static_cast<size_t>(k_));
+                                           static_cast<size_t>(k));
         uint8_t decode_index[k_max_n];
-        if (gen_decode_matrix(err_list, nerrs, decode_matrix.data(),
-                              decode_index) != 0)
+        if (gen_decode_matrix(k, n, encode_matrix.data(), err_list, nerrs,
+                              decode_matrix.data(), decode_index) != 0)
         {
             return false;
         }
-        std::vector<uint8_t> decode_tbls(static_cast<size_t>(k_) *
+        std::vector<uint8_t> decode_tbls(static_cast<size_t>(k) *
                                          static_cast<size_t>(nerrs) * 32);
-        std::vector<unsigned char*> src_ptrs(static_cast<size_t>(k_));
+        std::vector<unsigned char*> src_ptrs(static_cast<size_t>(k));
         std::vector<std::vector<uint8_t>> recover(static_cast<size_t>(nerrs));
         std::vector<unsigned char*> rec_ptrs(static_cast<size_t>(nerrs));
-        for (int i = 0; i < k_; i++)
+        for (int i = 0; i < k; i++)
         {
-            auto it = frags.find(decode_index[i]);
-            if (it == frags.end())
+            const int idx = decode_index[i];
+            if (!have[static_cast<size_t>(idx)])
             {
                 return false;
             }
             src_ptrs[static_cast<size_t>(i)] =
-                const_cast<unsigned char*>(it->second.data());
+                padded[static_cast<size_t>(idx)].data();
         }
         for (int i = 0; i < nerrs; i++)
         {
@@ -358,14 +417,14 @@ bool rs_block_erasure::decode_block(
             rec_ptrs[static_cast<size_t>(i)] =
                 recover[static_cast<size_t>(i)].data();
         }
-        ec_init_tables_base(k_, nerrs, decode_matrix.data(),
+        ec_init_tables_base(k, nerrs, decode_matrix.data(),
                             decode_tbls.data());
-        WINJECT_EC_ENCODE(static_cast<int>(shard_len), k_, nerrs,
+        WINJECT_EC_ENCODE(static_cast<int>(shard_len), k, nerrs,
                           decode_tbls.data(), src_ptrs.data(), rec_ptrs.data());
         for (int i = 0; i < nerrs; i++)
         {
             const int idx = err_list[i];
-            if (idx < k_)
+            if (idx < k)
             {
                 data_copy[static_cast<size_t>(idx)] =
                     std::move(recover[static_cast<size_t>(i)]);
@@ -375,7 +434,7 @@ bool rs_block_erasure::decode_block(
     }
 
     payloads->clear();
-    for (int i = 0; i < k_; i++)
+    for (int i = 0; i < k; i++)
     {
         const auto& row = data_copy[static_cast<size_t>(i)];
         if (row.size() < k_len_prefix)
@@ -454,12 +513,28 @@ void rs_block_erasure::flush(std::vector<std::vector<uint8_t>>* out)
     blocks_++;
 }
 
+int rs_block_erasure::rx_hold_ms() const
+{
+    return std::max(timeout_ms * 5, 100);
+}
+
+int rs_block_erasure::done_hold_ms() const
+{
+    return std::max(timeout_ms * 50, rx_hold_ms());
+}
+
+std::chrono::steady_clock::time_point rs_block_erasure::now() const
+{
+    return std::chrono::steady_clock::now();
+}
+
 void rs_block_erasure::on_tick(std::vector<std::vector<uint8_t>>* out)
 {
     if (out != nullptr)
     {
         out->clear();
     }
+    // Always expire incomplete RX blocks (RX decode needs no encode init).
     expire_rx();
     if (!enabled_ || !deadline_set || timeout_ms <= 0)
     {
@@ -474,16 +549,16 @@ void rs_block_erasure::on_tick(std::vector<std::vector<uint8_t>>* out)
 
 void rs_block_erasure::expire_rx()
 {
+    expire_done();
     if (rx_blocks.empty())
     {
         return;
     }
-    const auto now = std::chrono::steady_clock::now();
-    const int hold_ms = std::max(timeout_ms * 5, 100);
-    const auto hold = std::chrono::milliseconds(hold_ms);
+    const auto t = now();
+    const auto hold = std::chrono::milliseconds(rx_hold_ms());
     for (auto it = rx_blocks.begin(); it != rx_blocks.end();)
     {
-        if (now - it->second.first_seen > hold)
+        if (t - it->second.first_seen > hold)
         {
             decode_fail_++;
             it = rx_blocks.erase(it);
@@ -495,11 +570,39 @@ void rs_block_erasure::expire_rx()
     }
 }
 
+void rs_block_erasure::expire_done()
+{
+    const auto t = now();
+    const auto hold = std::chrono::milliseconds(done_hold_ms());
+    while (!done_order.empty())
+    {
+        const uint16_t id = done_order.front();
+        auto it = done.find(id);
+        if (it == done.end())
+        {
+            done_order.pop_front();
+            continue;
+        }
+        if (t - it->second <= hold)
+        {
+            break;
+        }
+        done.erase(it);
+        done_order.pop_front();
+    }
+}
+
 void rs_block_erasure::mark_done(uint16_t block_id)
 {
-    if (done.insert(block_id).second)
+    const auto t = now();
+    auto inserted = done.emplace(block_id, t);
+    if (inserted.second)
     {
         done_order.push_back(block_id);
+    }
+    else
+    {
+        inserted.first->second = t;
     }
     while (done_order.size() > k_done_max)
     {
@@ -515,15 +618,18 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
     {
         out->clear();
     }
-    if (!enabled_ || out == nullptr || data == nullptr || len == 0)
+    if (out == nullptr || data == nullptr || len == 0)
     {
         return;
     }
+    // RX is always FEC-aware: k/n come from the shard header. Encode still
+    // requires init(). Non-FEC datagrams pass through unchanged.
     if (data[0] != k_magic)
     {
         out->emplace_back(data, data + len);
         return;
     }
+    expire_rx();
     uint16_t block_id = 0;
     int index = 0;
     int k = 0;
@@ -534,12 +640,7 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
         decode_fail_++;
         return;
     }
-    if (k != k_ || n != n_)
-    {
-        decode_fail_++;
-        return;
-    }
-    if (done.count(block_id) != 0)
+    if (done.find(block_id) != done.end())
     {
         return;
     }
@@ -563,8 +664,13 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
         rx_block_s nb;
         nb.k = k;
         nb.n = n;
-        nb.first_seen = std::chrono::steady_clock::now();
+        nb.first_seen = now();
         it = rx_blocks.emplace(block_id, std::move(nb)).first;
+    }
+    else if (it->second.k != k || it->second.n != n)
+    {
+        decode_fail_++;
+        return;
     }
     buf = &it->second;
     if (buf->frags.count(index) != 0)
@@ -573,12 +679,12 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
     }
     buf->frags.emplace(index,
                        std::vector<uint8_t>(data + k_header_len, data + len));
-    if (buf->frags.size() < static_cast<size_t>(k_))
+    if (buf->frags.size() < static_cast<size_t>(k))
     {
         return;
     }
     int rec = 0;
-    const bool ok = decode_block(buf->frags, out, &rec);
+    const bool ok = decode_block(k, n, buf->frags, out, &rec);
     rx_blocks.erase(block_id);
     mark_done(block_id);
     if (!ok)
@@ -596,14 +702,14 @@ void rs_block_erasure::push_air(const uint8_t* data, size_t len,
 
 uint64_t rs_block_erasure::take_recovered()
 {
-    const uint64_t n = recovered_;
-    recovered_ = 0;
+    const uint64_t n = recovered_ - recovered_seen_;
+    recovered_seen_ = recovered_;
     return n;
 }
 
 uint64_t rs_block_erasure::take_decode_fail()
 {
-    const uint64_t n = decode_fail_;
-    decode_fail_ = 0;
+    const uint64_t n = decode_fail_ - decode_fail_seen_;
+    decode_fail_seen_ = decode_fail_;
     return n;
 }

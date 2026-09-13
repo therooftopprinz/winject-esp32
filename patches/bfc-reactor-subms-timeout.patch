@@ -1,0 +1,47 @@
+diff --git a/src/bfc/epoll_reactor.hpp b/src/bfc/epoll_reactor.hpp
+--- a/src/bfc/epoll_reactor.hpp
++++ b/src/bfc/epoll_reactor.hpp
+@@ -236,7 +236,11 @@ class epoll_reactor
+                 else
+                 {
+                     // convert microseconds to milliseconds for epoll_wait
+-                    auto diff_ms = diff / 1000;
++                    auto diff_ms = (diff + 999) / 1000;
++                    if (diff_ms == 0)
++                    {
++                        diff_ms = 1;
++                    }
+                     if (diff_ms > static_cast<int64_t>(std::numeric_limits<int>::max()))
+                     {
+                         timeout_ms = std::numeric_limits<int>::max();
+diff --git a/src/bfc/poll_reactor.hpp b/src/bfc/poll_reactor.hpp
+--- a/src/bfc/poll_reactor.hpp
++++ b/src/bfc/poll_reactor.hpp
+@@ -261,7 +261,11 @@ class poll_reactor
+                 }
+                 else
+                 {
+-                    auto diff_ms = diff / 1000;
++                    auto diff_ms = (diff + 999) / 1000;
++                    if (diff_ms == 0)
++                    {
++                        diff_ms = 1;
++                    }
+                     if (diff_ms > static_cast<int64_t>(std::numeric_limits<int>::max()))
+                     {
+                         timeout_ms = std::numeric_limits<int>::max();
+diff --git a/src/bfc/cv_reactor.hpp b/src/bfc/cv_reactor.hpp
+--- a/src/bfc/cv_reactor.hpp
++++ b/src/bfc/cv_reactor.hpp
+@@ -88,6 +88,11 @@ class cv_reactor
+                 else if (static_cast<size_t>(diff) < timeout_ms)
+                 {
+-                    timeout_ms = static_cast<size_t>(diff / 1000);
++                    auto diff_ms = (diff + 999) / 1000;
++                    if (diff_ms == 0)
++                    {
++                        diff_ms = 1;
++                    }
++                    timeout_ms = static_cast<size_t>(diff_ms);
+                 }
+             }

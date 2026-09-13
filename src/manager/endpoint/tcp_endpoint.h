@@ -29,6 +29,7 @@ public:
     void on_tick() override;
     void announce_down() override;
     uint64_t take_rx_bytes() override;
+    stream_stats_s peek_stats() const override;
     stream_stats_s take_stats() override;
 
 protected:
@@ -71,7 +72,9 @@ private:
     size_t tx_pending_len = 0;
     size_t tx_pending_off = 0;
     uint64_t radio_rx_bytes_interval = 0;
+    uint64_t radio_rx_bytes_life = 0;
     uint64_t air_tx_bytes_interval = 0;
+    uint64_t air_tx_bytes_life = 0;
     std::atomic<uint64_t> app_rx_bytes_interval{0};
     uint64_t app_tx_bytes_interval = 0;
 

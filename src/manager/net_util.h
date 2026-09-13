@@ -9,11 +9,16 @@
 #include <string>
 
 constexpr size_t k_wifi_payload_max = 1476;
+// uint16 seq prefix on every manager inject datagram (see frames/air_seq.h).
+constexpr size_t k_air_seq_len = 2;
+constexpr size_t k_stream_payload_max = k_wifi_payload_max - k_air_seq_len;
+static_assert(k_stream_payload_max + k_air_seq_len == k_wifi_payload_max,
+              "seq prefix must fit in one wifi payload");
 
 bool parse_host_port(const std::string& text, sockaddr_in* out);
 bool parse_host(const std::string& text, in_addr* out);
 // Bus / lcid: 1–2 hex digits (optional 0x). Broadcast 0 is allowed for parse
-// but manager configs reject it for bus_tx / bus_rx.
+// but manager configs reject it for tx_bus / rx_bus.
 bool parse_bus(const std::string& text, uint8_t* bus);
 // Domain: hex 1…65535 (optional 0x).
 bool parse_domain(const std::string& text, uint16_t* domain);

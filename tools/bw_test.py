@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +37,8 @@ HOST_PORT_B = 9002  # frames heard by radio B (A→B bus)
 DEFAULT_DOMAIN = "1234"
 BUS_AB = "b2"  # A injects, B filters
 BUS_BA = "a1"  # B injects, A filters
+CHANNEL_MIN = 1
+CHANNEL_MAX = 14  # matches firmware WIFI_CHANNEL_*; 14 is 802.11b-only
 TCP_SEND_A = 29000  # manager A TCP_SERVER (host sends A->B)
 TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
 # Manager ARQ can stop reading when the window fills and reverse ACKs starve;
@@ -44,6 +47,7 @@ TCP_SEND_TIMEOUT_S = 3.0
 # Wait until recv==sent after a TCP phase so leftover DATA does not occupy the
 # air during the reverse leg. Manager data-stall abort is 5s; keep headroom.
 TCP_DRAIN_TIMEOUT_S = 10.0
+LOSS_WINDOW_S = 1.0
 MAX_PAYLOAD = 1476
 FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
 FEC_ENC_A = 19100  # host -> encode -> radio A inject
@@ -95,6 +99,24 @@ PHY_KBPS = {
 }
 
 MODULATIONS = tuple(PHY_KBPS.keys())
+# Channel 14 (2484 MHz) accepts DSSS/CCK only — same rule as firmware.
+MODULATIONS_11B = tuple(
+    name for name in MODULATIONS if name.startswith(("DSS_", "CCK_"))
+)
+
+
+def is_11b_modulation(name: str) -> bool:
+    return name.upper().startswith(("DSS_", "CCK_"))
+
+
+def channel_ok(channel: int) -> bool:
+    return CHANNEL_MIN <= channel <= CHANNEL_MAX
+
+
+def modulation_ok_for_channel(modulation: str, channel: int | None) -> bool:
+    if channel != 14:
+        return True
+    return is_11b_modulation(modulation)
 
 
 @dataclass
@@ -152,6 +174,14 @@ class ModResult:
     bidir_ok: bool = False
     overall: bool = False
     note: str = ""
+
+
+class TestInterrupted(Exception):
+    """Ctrl+C during a bandwidth phase; results use the elapsed send window."""
+
+    def __init__(self, results: list[PhaseResult]) -> None:
+        super().__init__("interrupted")
+        self.results = results
 
 
 def detect_host(peer: str) -> str:
@@ -388,11 +418,18 @@ def log_status(ip: str, label: str) -> str:
 def configure_radio(
     ip: str, channel: int | None, modulation: str | None, cca: bool, quiet: bool
 ) -> bool:
+    # Channel 14 is 802.11b-only: apply DSSS/CCK before switching to 14,
+    # and leave 14 before applying OFDM (matches firmware settings::apply_snapshot).
     cmds: list[str] = []
-    if channel is not None:
+    if channel == 14:
+        if modulation is not None:
+            cmds.append(f"set_modulation {modulation}")
         cmds.append(f"set_channel {channel}")
-    if modulation is not None:
-        cmds.append(f"set_modulation {modulation}")
+    else:
+        if channel is not None:
+            cmds.append(f"set_channel {channel}")
+        if modulation is not None:
+            cmds.append(f"set_modulation {modulation}")
     cmds.append(f"set_cca_enabled {1 if cca else 0}")
     replies = console(ip, cmds, quiet=quiet)
     return replies_ok(replies)
@@ -612,6 +649,7 @@ def send_window_tcp(
     start: float,
     sock: socket.socket | None = None,
     progress: list[int] | None = None,
+    stop: threading.Event | None = None,
 ) -> int:
     own = sock is None
     if own:
@@ -622,7 +660,7 @@ def send_window_tcp(
     interval = (size * 8.0) / (kbps * 1000.0) if kbps > 0 else 0.0
     next_t = start
     try:
-        while time.monotonic() - start < duration:
+        while (stop is None or not stop.is_set()) and time.monotonic() - start < duration:
             now = time.monotonic()
             if interval > 0 and now < next_t:
                 time.sleep(min(0.001, next_t - now))
@@ -630,7 +668,9 @@ def send_window_tcp(
             try:
                 send_tcp_record(sock, make_payload(tag, seq, size))
             except (TimeoutError, socket.timeout, ConnectionResetError,
-                    BrokenPipeError, ConnectionError) as err:
+                    BrokenPipeError, ConnectionError, OSError) as err:
+                if stop is not None and stop.is_set():
+                    return sent
                 raise TcpSendStall(
                     f"tcp send stall to {dest[0]}:{dest[1]} after {sent} pkts "
                     f"(ARQ window full / ACKs starved?)",
@@ -846,6 +886,7 @@ def send_window(
     kbps: float,
     start: float,
     progress: list[int] | None = None,
+    stop: threading.Event | None = None,
 ) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sent = 0
@@ -853,7 +894,7 @@ def send_window(
     interval = (size * 8.0) / (kbps * 1000.0) if kbps > 0 else 0.0
     next_t = start
     try:
-        while time.monotonic() - start < duration:
+        while (stop is None or not stop.is_set()) and time.monotonic() - start < duration:
             now = time.monotonic()
             if interval > 0 and now < next_t:
                 time.sleep(min(0.001, next_t - now))
@@ -888,6 +929,22 @@ def fmt_loss_pct(sent: int, recv: int) -> str:
     if sent <= 0:
         return "n/a"
     return f"{max(0.0, 100.0 * (sent - recv) / sent):.1f}%"
+
+
+def push_window_loss(
+    hist: deque[tuple[float, int, int]],
+    now: float,
+    sent: int,
+    recv: int,
+    window_s: float = LOSS_WINDOW_S,
+) -> str:
+    """Packet loss over the last window_s seconds (keeps one sample at/before cutoff)."""
+    hist.append((now, sent, recv))
+    cutoff = now - window_s
+    while len(hist) > 1 and hist[1][0] <= cutoff:
+        hist.popleft()
+    _t0, sent0, recv0 = hist[0]
+    return fmt_loss_pct(sent - sent0, recv - recv0)
 
 
 def to_phase(sent: int, stats: RecvStats, duration: float) -> PhaseResult:
@@ -944,7 +1001,8 @@ def parse_args() -> argparse.Namespace:
         "--channel",
         type=int,
         default=None,
-        help="set_channel on both radios (1-13); omit to keep existing",
+        help=f"set_channel on both radios ({CHANNEL_MIN}-{CHANNEL_MAX}; "
+        "14 is 802.11b-only); omit to keep existing",
     )
     p.add_argument(
         "--modulation",
@@ -1002,11 +1060,25 @@ def parse_args() -> argparse.Namespace:
         default=TCP_SEND_B,
         help=f"manager B TCP_SERVER port for B->A send (default {TCP_SEND_B})",
     )
-    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase after unidirectional")
     p.add_argument(
-        "--bidir-only",
+        "--test-integ",
         action="store_true",
-        help="run only the simultaneous A+B phase (skip unidirectional)",
+        help="run integrity check (both directions)",
+    )
+    p.add_argument(
+        "--test-ab",
+        action="store_true",
+        help="run unidirectional A->B bandwidth phase",
+    )
+    p.add_argument(
+        "--test-ba",
+        action="store_true",
+        help="run unidirectional B->A bandwidth phase",
+    )
+    p.add_argument(
+        "--test-bidir",
+        action="store_true",
+        help="run simultaneous A+B bandwidth phase",
     )
     p.add_argument("--verbose", action="store_true", help="print full console replies")
     p.add_argument(
@@ -1033,57 +1105,63 @@ def parse_args() -> argparse.Namespace:
 
 
 def fmt_summary(
-    results: list[ModResult], paced: bool, bidir: bool, uni: bool = True
+    results: list[ModResult],
+    paced: bool,
+    *,
+    integ: bool = True,
+    ab: bool = True,
+    ba: bool = True,
+    bidir: bool = False,
 ) -> str:
-    header = (
-        "| modulation      | ch | offer kbps |  int A->B |  int B->A |"
-    )
-    sep = (
-        "|-----------------|---:|-----------:|----------:|----------:|"
-    )
-    if uni:
-        header += " A->B kbps | A->B loss | B->A kbps | B->A loss |"
-        sep += "----------:|----------:|----------:|----------:|"
+    header = "| modulation      | ch | offer kbps |"
+    sep = "|-----------------|----|------------|"
+    if integ:
+        header += "  int A->B |  int B->A |"
+        sep += "-----------|-----------|"
+    if ab:
+        header += " A->B kbps | A->B loss |"
+        sep += "-----------|-----------|"
+    if ba:
+        header += " B->A kbps | B->A loss |"
+        sep += "-----------|-----------|"
     if bidir:
         header += " A+B A kbps | A+B B kbps | A+B A loss | A+B B loss |"
-        sep += "-----------:|-----------:|-----------:|-----------:|"
-    header += " result |"
-    sep += "--------|"
+        sep += "------------|------------|------------|------------|"
     lines = [header, sep]
     for r in results:
         int_ab = f"{r.integrity_ab}" if r.config_ok else "-"
         int_ba = f"{r.integrity_ba}" if r.config_ok else "-"
+
         def cell(phase: PhaseResult) -> tuple[str, str]:
             if not r.config_ok or phase.sent == 0:
                 return "-", "-"
             loss = f"{phase.loss:.1f}" if paced else "n/a"
             return f"{phase.kbps:.1f}", loss
 
-        verdict = "PASS" if r.overall else "FAIL"
-        if r.note:
-            verdict = r.note
         ch = "-" if r.channel is None else r.channel
-        line = (
-            f"| {r.modulation:<15} | {ch:>2} | {r.offer:>10.0f} |"
-            f" {int_ab:>9} | {int_ba:>9} |"
-        )
-        if uni:
+        line = f"| {r.modulation:<15} | {ch:>2} | {r.offer:>10.0f} |"
+        if integ:
+            line += f" {int_ab:>9} | {int_ba:>9} |"
+        if ab:
             ab_k, ab_l = cell(r.uni_ab)
+            line += f" {ab_k:>9} | {ab_l:>9} |"
+        if ba:
             ba_k, ba_l = cell(r.uni_ba)
-            line += f" {ab_k:>9} | {ab_l:>9} | {ba_k:>9} | {ba_l:>9} |"
+            line += f" {ba_k:>9} | {ba_l:>9} |"
         if bidir:
             a_k, a_l = cell(r.bidir_ab)
             b_k, b_l = cell(r.bidir_ba)
             line += f" {a_k:>10} | {b_k:>10} | {a_l:>10} | {b_l:>10} |"
-        line += f" {verdict:<6} |"
         lines.append(line)
     return "\n".join(lines)
 
 
 def main() -> int:
     args = parse_args()
-    if args.bidir_only:
-        args.bidir = True
+    if not (args.test_integ or args.test_ab or args.test_ba or args.test_bidir):
+        args.test_integ = True
+        args.test_ab = True
+        args.test_ba = True
     # --tcp: managers / prepare_radios own sut/sur binds. Still apply PHY knobs
     # unless the caller also passed --skip-config.
     skip_upstream = args.skip_config or args.tcp
@@ -1105,16 +1183,21 @@ def main() -> int:
                 f"--size {args.size} exceeds FEC max {max_orig} "
                 f"({'intra' if args.fec_intra else 'block'} must fit in {MAX_PAYLOAD} on the air)"
             )
-    if args.channel is not None and (args.channel < 1 or args.channel > 13):
-        raise SystemExit("--channel must be 1-13")
+    if args.channel is not None and not channel_ok(args.channel):
+        raise SystemExit(f"--channel must be {CHANNEL_MIN}-{CHANNEL_MAX}")
     if args.all and args.modulation is not None:
         raise SystemExit("use --all or --modulation, not both")
 
     apply_modulation = args.all or args.modulation is not None
     if args.all:
-        mods = list(MODULATIONS)
+        mods = list(MODULATIONS_11B if args.channel == 14 else MODULATIONS)
     elif args.modulation is not None:
         mods = parse_modulations(args.modulation)
+        bad = [m for m in mods if not modulation_ok_for_channel(m, args.channel)]
+        if bad:
+            raise SystemExit(
+                f"channel 14 rejects OFDM/MCS; not allowed: {', '.join(bad)}"
+            )
     else:
         mods = []
 
@@ -1147,6 +1230,11 @@ def main() -> int:
         current = mod_a or mod_b
         if current is None:
             raise SystemExit("could not read existing modulation; pass --modulation or --all")
+        if not modulation_ok_for_channel(current, args.channel):
+            raise SystemExit(
+                f"channel 14 rejects OFDM/MCS; radios are {current} — "
+                "pass --modulation DSS_1M_L (or another DSSS/CCK rate)"
+            )
         mods = [current]
 
     if skip_upstream and not args.tcp:
@@ -1295,17 +1383,19 @@ def main() -> int:
                 return send_exact_tcp(dest, tag, count, size, gap, sock)
         return send_exact(dest, tag, count, size, gap)
 
+    stop = threading.Event()
+
     def send_window_fn(dest, tag, size, duration, kbps, start, progress=None):
         if args.tcp:
             sock = tcp_sock_for(dest)
             try:
                 return send_window_tcp(
-                    dest, tag, size, duration, kbps, start, sock, progress
+                    dest, tag, size, duration, kbps, start, sock, progress, stop
                 )
             except TcpSendStall:
                 reconnect_tcp(dest)
                 raise
-        return send_window(dest, tag, size, duration, kbps, start, progress)
+        return send_window(dest, tag, size, duration, kbps, start, progress, stop)
 
     def reset() -> None:
         listen_a.stats.clear()
@@ -1327,6 +1417,7 @@ def main() -> int:
         kbps: float,
     ) -> list[PhaseResult]:
         nonlocal tcp_sock_a, tcp_sock_b
+        stop.clear()
         reset()
         start = time.monotonic()
         results = [0] * len(senders)
@@ -1353,7 +1444,7 @@ def main() -> int:
                 stalls[idx] = err
 
         for i, (dest, tag, _lis) in enumerate(senders):
-            t = threading.Thread(target=run_one, args=(i, dest, tag))
+            t = threading.Thread(target=run_one, args=(i, dest, tag), daemon=True)
             threads.append(t)
             t.start()
 
@@ -1364,243 +1455,349 @@ def main() -> int:
         prev_sent = [0] * len(senders)
         prev_nbytes = [0] * len(senders)
         last_print = start
+        win_hist: list[deque[tuple[float, int, int]]] = [
+            deque([(start, 0, 0)]) for _ in senders
+        ]
 
         def progress_line() -> str:
             now = time.monotonic()
             elapsed = max(0.0, now - start)
             dt = max(now - prev_t, 1e-6)
-            parts = [f"{elapsed:4.1f}/{args.duration:.0f}s"]
+            parts = [f"{elapsed:6.1f}/{args.duration:.0f}s"]
             for i, (dest, _tag, lis) in enumerate(senders):
                 sent_n = sent_live[i][0]
                 recv_n = lis.stats.packets
                 recv_b = lis.stats.nbytes
                 send_rate = live_kbps((sent_n - prev_sent[i]) * args.size, dt)
                 recv_rate = live_kbps(recv_b - prev_nbytes[i], dt)
+                loss_rt = push_window_loss(win_hist[i], now, sent_n, recv_n)
                 parts.append(
-                    f"{dir_label(dest)} send {send_rate:7.1f} recv {recv_rate:7.1f} kbps "
-                    f"loss {fmt_loss_pct(sent_n, recv_n):>6}"
+                    f"{send_rate: 8.1f} {dir_label(dest)} {recv_rate: 8.1f} "
+                    f"loss_rt {loss_rt:>6}"
                 )
             return "  ".join(parts)
 
         def emit_progress(line: str, *, newline: bool = False) -> None:
             if use_cr:
                 end = "\n" if newline else ""
-                print(f"\r{line:<160}", end=end, flush=True)
+                print(f"\r{line:<220}", end=end, flush=True)
             else:
                 print(line, flush=True)
 
-        while True:
-            alive = [t for t in threads if t.is_alive()]
-            now = time.monotonic()
-            due = now - last_print >= print_interval
-            finished = not alive and now - last_print >= 0.05
-            if due or finished:
-                emit_progress(progress_line())
-                last_print = now
-                prev_t = now
-                prev_sent = [cell[0] for cell in sent_live]
-                prev_nbytes = [lis.stats.nbytes for _dest, _tag, lis in senders]
-            if not alive or now >= deadline:
-                break
-            wait = min(print_interval, max(0.0, deadline - now))
-            alive[0].join(timeout=wait)
+        def halt_senders() -> None:
+            nonlocal tcp_sock_a, tcp_sock_b
+            stop.set()
+            if args.tcp:
+                close_quiet(tcp_sock_a)
+                close_quiet(tcp_sock_b)
+                tcp_sock_a = None
+                tcp_sock_b = None
+            for t in threads:
+                t.join(timeout=1.0)
+
+        interrupted = False
+        try:
+            while True:
+                alive = [t for t in threads if t.is_alive()]
+                now = time.monotonic()
+                due = now - last_print >= print_interval
+                finished = not alive and now - last_print >= 0.05
+                if due or finished:
+                    emit_progress(progress_line())
+                    last_print = now
+                    prev_t = now
+                    prev_sent = [cell[0] for cell in sent_live]
+                    prev_nbytes = [lis.stats.nbytes for _dest, _tag, lis in senders]
+                if not alive or now >= deadline:
+                    break
+                wait = min(print_interval, max(0.0, deadline - now))
+                alive[0].join(timeout=wait)
+        except KeyboardInterrupt:
+            interrupted = True
+            try:
+                halt_senders()
+            except KeyboardInterrupt:
+                pass
 
         if use_cr:
             print(flush=True)
 
         def drain_line(elapsed: float, timeout: float) -> str:
+            now = time.monotonic()
             parts = [f"drain {elapsed:4.1f}/{timeout:.0f}s"]
             for i, (dest, _tag, lis) in enumerate(senders):
+                sent_n = results[i] if results[i] > 0 else sent_live[i][0]
+                recv_n = lis.stats.packets
+                loss_rt = push_window_loss(win_hist[i], now, sent_n, recv_n)
                 parts.append(
-                    f"{dir_label(dest)} {lis.stats.packets}/{results[i]} "
-                    f"loss {fmt_loss_pct(results[i], lis.stats.packets):>6}"
+                    f"{dir_label(dest)} {recv_n}/{sent_n} "
+                    f"loss_rt {loss_rt:>6}"
                 )
             return "  ".join(parts)
 
-        for t in threads:
-            if t.is_alive():
-                print(
-                    f"warning: sender thread still blocked after {join_timeout:.1f}s; "
-                    "closing TCP sockets"
-                )
-                if args.tcp:
-                    close_quiet(tcp_sock_a)
-                    close_quiet(tcp_sock_b)
-                    tcp_sock_a = None
-                    tcp_sock_b = None
-                t.join(timeout=TCP_SEND_TIMEOUT_S + 1.0)
-        for err in stalls:
-            if err is not None:
-                print(f"warning: {err}")
-        if args.tcp and (tcp_sock_a is None or tcp_sock_b is None):
-            if tcp_sock_a is None:
-                tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
-            if tcp_sock_b is None:
-                tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
-        # TCP kbps is send-window goodput. Drain bytes still count toward recv
-        # so loss is "never delivered", not "still in ARQ when the next leg starts".
+        if interrupted:
+            print("interrupted")
+        else:
+            for t in threads:
+                if t.is_alive():
+                    print(
+                        f"warning: sender thread still blocked after {join_timeout:.1f}s; "
+                        "closing TCP sockets"
+                    )
+                    if args.tcp:
+                        close_quiet(tcp_sock_a)
+                        close_quiet(tcp_sock_b)
+                        tcp_sock_a = None
+                        tcp_sock_b = None
+                    t.join(timeout=TCP_SEND_TIMEOUT_S + 1.0)
+            for err in stalls:
+                if err is not None:
+                    print(f"warning: {err}")
+            if args.tcp and (tcp_sock_a is None or tcp_sock_b is None):
+                if tcp_sock_a is None:
+                    tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
+                if tcp_sock_b is None:
+                    tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
+            # TCP kbps is send-window goodput. Drain bytes still count toward recv
+            # so loss is "never delivered", not "still in ARQ when the next leg starts".
+            if args.tcp:
+                timeout = max(args.drain, TCP_DRAIN_TIMEOUT_S)
+                t0 = time.monotonic()
+                deadline_d = t0 + timeout
+                last_dprint = 0.0
+                drained = False
+                try:
+                    while time.monotonic() < deadline_d:
+                        drained = True
+                        for i, (_dest, _tag, lis) in enumerate(senders):
+                            sent_n = results[i] if results[i] > 0 else sent_live[i][0]
+                            if sent_n > 0 and lis.stats.packets < sent_n:
+                                drained = False
+                                break
+                        if drained:
+                            break
+                        now = time.monotonic()
+                        if now - last_dprint >= print_interval:
+                            emit_progress(drain_line(now - t0, timeout))
+                            last_dprint = now
+                        time.sleep(0.05)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    if use_cr and last_dprint > 0.0:
+                        print(flush=True)
+                    print("interrupted")
+                else:
+                    if use_cr and last_dprint > 0.0:
+                        emit_progress(
+                            drain_line(time.monotonic() - t0, timeout), newline=True
+                        )
+                    if not drained:
+                        for i, (dest, _tag, lis) in enumerate(senders):
+                            sent_n = results[i] if results[i] > 0 else sent_live[i][0]
+                            if sent_n > 0 and lis.stats.packets < sent_n:
+                                print(
+                                    f"warning: {dir_label(dest)} drain incomplete "
+                                    f"{lis.stats.packets}/{sent_n} after {timeout:.1f}s"
+                                )
+            if not interrupted:
+                try:
+                    time.sleep(args.drain)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    print("interrupted")
+
+        elapsed = time.monotonic() - start
+        if interrupted and elapsed < args.duration:
+            measure_s = max(elapsed, 1e-6)
+        else:
+            measure_s = args.duration if args.duration > 0 else max(elapsed, 1e-6)
         kbps_bytes = (
             [lis.stats.nbytes for _dest, _tag, lis in senders] if args.tcp else None
         )
-        if args.tcp:
-            timeout = max(args.drain, TCP_DRAIN_TIMEOUT_S)
-            t0 = time.monotonic()
-            deadline_d = t0 + timeout
-            last_dprint = 0.0
-            drained = False
-            while time.monotonic() < deadline_d:
-                drained = True
-                for i, (_dest, _tag, lis) in enumerate(senders):
-                    if results[i] > 0 and lis.stats.packets < results[i]:
-                        drained = False
-                        break
-                if drained:
-                    break
-                now = time.monotonic()
-                if now - last_dprint >= print_interval:
-                    emit_progress(drain_line(now - t0, timeout))
-                    last_dprint = now
-                time.sleep(0.05)
-            if use_cr and last_dprint > 0.0:
-                emit_progress(
-                    drain_line(time.monotonic() - t0, timeout), newline=True
-                )
-            if not drained:
-                for i, (dest, _tag, lis) in enumerate(senders):
-                    if results[i] > 0 and lis.stats.packets < results[i]:
-                        print(
-                            f"warning: {dir_label(dest)} drain incomplete "
-                            f"{lis.stats.packets}/{results[i]} after {timeout:.1f}s"
-                        )
-        time.sleep(args.drain)
         out: list[PhaseResult] = []
         for i, (_dest, _tag, lis) in enumerate(senders):
+            sent_n = results[i] if results[i] > 0 else sent_live[i][0]
             nbytes = kbps_bytes[i] if kbps_bytes is not None else lis.stats.nbytes
-            kbps = (
-                (nbytes * 8.0) / args.duration / 1000.0 if args.duration > 0 else 0.0
-            )
-            out.append(
-                PhaseResult(sent=results[i], recv=lis.stats.packets, kbps=kbps)
-            )
+            kbps = (nbytes * 8.0) / measure_s / 1000.0
+            out.append(PhaseResult(sent=sent_n, recv=lis.stats.packets, kbps=kbps))
+        if interrupted:
+            raise TestInterrupted(out)
         return out
 
-    all_results: list[ModResult] = []
+    def take_phase(
+        senders: list[tuple[tuple[str, int], bytes, Listener | TcpListener]],
+        kbps: float,
+    ) -> tuple[list[PhaseResult], bool]:
+        try:
+            return phase(senders, kbps), False
+        except TestInterrupted as err:
+            return err.results, True
 
-    for idx, mod in enumerate(mods, 1):
-        offer = args.kbps
-        if offer < 0:
-            if args.fec:
-                offer = auto_offer_kbps_fec(
-                    mod, args.size, args.fec_k, args.fec_n, args.fec_intra, args.fec_nsym
-                )
-            elif args.tcp:
-                # TCP ARQ needs reverse ACK capacity; target ~50% of UDP air estimate.
-                offer = auto_offer_kbps(mod, args.size) * 0.55
-            else:
-                offer = auto_offer_kbps(mod, args.size)
-        paced = offer > 0
+    def print_snap(prefix: str, pr: PhaseResult) -> None:
         print(
-            f"\n=== [{idx}/{len(mods)}] ch {channel_label}  {mod}{mod_label_suffix}  "
-            f"cca {cca_label}  fec {fec_label(args)}  offer {offer:.0f} kbps ==="
+            f"{prefix} sent {pr.sent} recv {pr.recv}  "
+            f"{pr.kbps:.1f} kbps  loss {pr.loss:.1f}%"
         )
-        result = ModResult(modulation=mod, channel=display_channel, offer=offer)
 
-        if not skip_phy:
-            set_mod = mod if apply_modulation else None
-            try:
-                ok_a = configure_radio(args.a, args.channel, set_mod, args.cca, quiet)
-                ok_b = configure_radio(args.b, args.channel, set_mod, args.cca, quiet)
-            except OSError as err:
-                result.config_ok = False
-                result.note = "CONFIG"
-                result.overall = False
-                print(f"configure failed: {err}")
-                all_results.append(result)
-                continue
-            if not ok_a or not ok_b:
-                result.config_ok = False
-                result.note = "CONFIG"
-                result.overall = False
-                print("radio config failed")
-                all_results.append(result)
-                continue
-            if args.channel is not None or apply_modulation:
-                time.sleep(1.2)
-
-        print("-- integrity")
-        a_to_b, b_to_a = run_integrity()
-        print(f"A -> B  {a_to_b}/{args.integrity}")
-        print(f"B -> A  {b_to_a}/{args.integrity}")
-        if a_to_b != args.integrity or b_to_a != args.integrity:
-            print("integrity retry")
-            time.sleep(0.5)
-            a_to_b, b_to_a = run_integrity()
-            print(f"A -> B  {a_to_b}/{args.integrity}")
-            print(f"B -> A  {b_to_a}/{args.integrity}")
-        result.integrity_ab = a_to_b
-        result.integrity_ba = b_to_a
-        result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
-
-        if not args.bidir_only:
-            print("-- unidirectional")
-            result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
-            result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
+    all_results: list[ModResult] = []
+    interrupted = False
+    current: ModResult | None = None
+    try:
+        for idx, mod in enumerate(mods, 1):
+            offer = args.kbps
+            if offer < 0:
+                if args.fec:
+                    offer = auto_offer_kbps_fec( 
+                        mod, args.size, args.fec_k, args.fec_n, args.fec_intra, args.fec_nsym
+                    )
+                elif args.tcp:
+                    # TCP ARQ needs reverse ACK capacity; target ~50% of UDP air estimate.
+                    offer = auto_offer_kbps(mod, args.size) * 0.55
+                else:
+                    offer = auto_offer_kbps(mod, args.size)
+            paced = offer > 0
             print(
-                f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
-                f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
+                f"\n=== [{idx}/{len(mods)}] ch {channel_label}  {mod}{mod_label_suffix}  "
+                f"cca {cca_label}  fec {fec_label(args)}  offer {offer:.0f} kbps ==="
             )
-            print(
-                f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
-                f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
-            )
-            result.uni_ok = loss_ok(
-                result.uni_ab, 25.0 if args.tcp else 5.0, paced
-            ) and loss_ok(result.uni_ba, 25.0 if args.tcp else 5.0, paced)
-        else:
+            result = ModResult(modulation=mod, channel=display_channel, offer=offer)
+            current = result
+
+            if not skip_phy:
+                set_mod = mod if apply_modulation else None
+                try:
+                    ok_a = configure_radio(args.a, args.channel, set_mod, args.cca, quiet)
+                    ok_b = configure_radio(args.b, args.channel, set_mod, args.cca, quiet)
+                except OSError as err:
+                    result.config_ok = False
+                    result.note = "CONFIG"
+                    result.overall = False
+                    print(f"configure failed: {err}")
+                    all_results.append(result)
+                    current = None
+                    continue
+                if not ok_a or not ok_b:
+                    result.config_ok = False
+                    result.note = "CONFIG"
+                    result.overall = False
+                    print("radio config failed")
+                    all_results.append(result)
+                    current = None
+                    continue
+                if args.channel is not None or apply_modulation:
+                    time.sleep(1.2)
+
+            def mark_int() -> None:
+                nonlocal interrupted
+                interrupted = True
+                result.note = "INT"
+                result.overall = False
+                print("INTERRUPTED")
+                all_results.append(result)
+
+            if args.test_integ:
+                print("-- integrity")
+                a_to_b, b_to_a = run_integrity()
+                print(f"A -> B  {a_to_b}/{args.integrity}")
+                print(f"B -> A  {b_to_a}/{args.integrity}")
+                if a_to_b != args.integrity or b_to_a != args.integrity:
+                    print("integrity retry")
+                    time.sleep(0.5)
+                    a_to_b, b_to_a = run_integrity()
+                    print(f"A -> B  {a_to_b}/{args.integrity}")
+                    print(f"B -> A  {b_to_a}/{args.integrity}")
+                result.integrity_ab = a_to_b
+                result.integrity_ba = b_to_a
+                result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
+            else:
+                result.integrity_ok = True
+
+            loss_lim = 25.0 if args.tcp else 5.0
             result.uni_ok = True
+            if args.test_ab or args.test_ba:
+                print("-- unidirectional")
+            if args.test_ab:
+                snaps, stopped = take_phase([(dest_a, b"A", listen_b)], offer)
+                result.uni_ab = snaps[0]
+                print_snap("A->B", result.uni_ab)
+                if stopped:
+                    mark_int()
+                    current = None
+                    break
+                result.uni_ok = result.uni_ok and loss_ok(result.uni_ab, loss_lim, paced)
+            if args.test_ba:
+                snaps, stopped = take_phase([(dest_b, b"B", listen_a)], offer)
+                result.uni_ba = snaps[0]
+                print_snap("B->A", result.uni_ba)
+                if stopped:
+                    mark_int()
+                    current = None
+                    break
+                result.uni_ok = result.uni_ok and loss_ok(result.uni_ba, loss_lim, paced)
 
-        if args.bidir:
-            bidir_offer = (offer / 2.0) if paced else offer
-            print(f"-- simultaneous ({bidir_offer:.0f} kbps each)")
-            snaps = phase(
-                [
-                    (dest_a, b"A", listen_b),
-                    (dest_b, b"B", listen_a),
-                ],
-                bidir_offer,
-            )
-            result.bidir_ab, result.bidir_ba = snaps
-            print(
-                f"A+B A sent {result.bidir_ab.sent} recv {result.bidir_ab.recv}  "
-                f"{result.bidir_ab.kbps:.1f} kbps  loss {result.bidir_ab.loss:.1f}%"
-            )
-            print(
-                f"A+B B sent {result.bidir_ba.sent} recv {result.bidir_ba.recv}  "
-                f"{result.bidir_ba.kbps:.1f} kbps  loss {result.bidir_ba.loss:.1f}%"
-            )
-            result.bidir_ok = loss_ok(result.bidir_ab, 10.0, paced) and loss_ok(
-                result.bidir_ba, 10.0, paced
-            )
-        else:
-            result.bidir_ok = True
+            if args.test_bidir:
+                bidir_offer = (offer / 2.0) if paced else offer
+                print(f"-- simultaneous ({bidir_offer:.0f} kbps each)")
+                snaps, stopped = take_phase(
+                    [
+                        (dest_a, b"A", listen_b),
+                        (dest_b, b"B", listen_a),
+                    ],
+                    bidir_offer,
+                )
+                result.bidir_ab, result.bidir_ba = snaps
+                print_snap("A+B A", result.bidir_ab)
+                print_snap("A+B B", result.bidir_ba)
+                if stopped:
+                    mark_int()
+                    current = None
+                    break
+                result.bidir_ok = loss_ok(result.bidir_ab, 10.0, paced) and loss_ok(
+                    result.bidir_ba, 10.0, paced
+                )
+            else:
+                result.bidir_ok = True
 
-        result.overall = result.config_ok and result.integrity_ok and result.uni_ok and result.bidir_ok
-        print("PASS" if result.overall else "FAIL")
-        all_results.append(result)
+            result.overall = (
+                result.config_ok and result.integrity_ok and result.uni_ok and result.bidir_ok
+            )
+            all_results.append(result)
+            current = None
+    except KeyboardInterrupt:
+        interrupted = True
+        print("interrupted")
+        if current is not None and (not all_results or all_results[-1] is not current):
+            current.note = current.note or "INT"
+            current.overall = False
+            all_results.append(current)
+    finally:
+        listen_a.stop()
+        listen_b.stop()
+        if fec is not None:
+            fec.stop()
 
-    listen_a.stop()
-    listen_b.stop()
-    if fec is not None:
-        fec.stop()
-
-    print("\n=== result ===")
+    print("\n=== result (interrupted) ===" if interrupted else "\n=== result ===")
     paced = args.kbps != 0
-    print(fmt_summary(all_results, paced, args.bidir, uni=not args.bidir_only))
+    print(
+        fmt_summary(
+            all_results,
+            paced,
+            integ=args.test_integ,
+            ab=args.test_ab,
+            ba=args.test_ba,
+            bidir=args.test_bidir,
+        )
+    )
 
     passed = sum(1 for r in all_results if r.overall)
-    print(f"\n{passed}/{len(all_results)} modulations PASS  channel {channel_label}")
+    if interrupted:
+        return 130
     return 0 if passed == len(all_results) else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\ninterrupted", flush=True)
+        raise SystemExit(130)

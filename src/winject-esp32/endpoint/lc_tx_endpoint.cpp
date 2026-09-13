@@ -85,24 +85,28 @@ void lc_tx_endpoint::watch(entry_s& e)
         });
 }
 
-void lc_tx_endpoint::unwatch(entry_s& e)
+void lc_tx_endpoint::release_sock(bfc::socket sock)
 {
-    if (!e.sock.valid())
+    if (!sock.valid())
     {
         return;
     }
-    reactor.rem_read_rdy(e.sock.fd());
+    // Close only after the reactor drops the watch. Closing earlier lets
+    // lwIP recycle the fd while select still has it, which leaks PCBs /
+    // poisons ports (EADDRINUSE) under repeated sut/uut churn.
+    const int fd = sock.fd();
+    auto* closing = new bfc::socket(std::move(sock));
+    reactor.rem_read_rdy(fd, [closing]() { delete closing; });
 }
 
 void lc_tx_endpoint::clear_slot(entry_s& e)
 {
-    unwatch(e);
-    e.sock.close();
     e.used = false;
     e.bus = 0;
     e.udp_port = 0;
     e.drop_no_pkt_pool.store(0, std::memory_order_relaxed);
     e.drop_queue_full.store(0, std::memory_order_relaxed);
+    release_sock(std::move(e.sock));
 }
 
 bool lc_tx_endpoint::drop_datagram(entry_s& e)
@@ -230,8 +234,7 @@ bool lc_tx_endpoint::add_endpoint(bus_t bus, uint16_t udp_port)
 
     if (ep[idx].used)
     {
-        unwatch(ep[idx]);
-        ep[idx].sock.close();
+        release_sock(std::move(ep[idx].sock));
     }
     ep[idx].sock = std::move(sock);
     ep[idx].bus = bus;

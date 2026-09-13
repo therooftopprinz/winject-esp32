@@ -248,21 +248,21 @@ bool manager::start()
     if (ok != pdPASS)
     {
         ESP_LOGE(TAG, "reactor task create failed");
-        init_done = nullptr;
         vSemaphoreDelete(init_done);
+        this->init_done = nullptr;
         return false;
     }
 
     if (xSemaphoreTake(init_done, portMAX_DELAY) != pdTRUE)
     {
         ESP_LOGE(TAG, "reactor init wait failed");
-        init_done = nullptr;
         vSemaphoreDelete(init_done);
+        this->init_done = nullptr;
         reactor_.stop();
         return false;
     }
-    init_done = nullptr;
     vSemaphoreDelete(init_done);
+    this->init_done = nullptr;
 
     started.store(true, std::memory_order_release);
     return init_ok.load(std::memory_order_acquire);

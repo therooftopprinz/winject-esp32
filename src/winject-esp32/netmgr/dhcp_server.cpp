@@ -66,14 +66,20 @@ void dhcp_server::assigned_ip_event_handler(void* arg, esp_event_base_t event_ba
              event->mac[3], event->mac[4], event->mac[5]);
 }
 
-void dhcp_server::bind_netif(esp_netif_t* netif)
+void dhcp_server::bind_netif(esp_netif_t* iface)
 {
-    netif.store(netif, std::memory_order_relaxed);
+    netif.store(iface, std::memory_order_relaxed);
 }
 
 void dhcp_server::register_events()
 {
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ASSIGNED_IP_TO_CLIENT, &assigned_ip_event_handler, this));
+    const esp_err_t err = esp_event_handler_register(
+        IP_EVENT, IP_EVENT_ASSIGNED_IP_TO_CLIENT, &assigned_ip_event_handler,
+        this);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "lease event register failed: %s", esp_err_to_name(err));
+    }
 }
 
 bool dhcp_server::start(esp_netif_t* netif, uint32_t device_ip)

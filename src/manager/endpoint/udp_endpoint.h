@@ -5,6 +5,7 @@
 
 #include <deque>
 #include <netinet/in.h>
+#include <string>
 #include <vector>
 
 #include "frames/basic_fec.h"
@@ -26,7 +27,13 @@ public:
     void on_tick() override;
     void announce_down() override;
     uint64_t take_rx_bytes() override;
+    stream_stats_s peek_stats() const override;
     stream_stats_s take_stats() override;
+
+    // Dynamic TX FEC. Flushes any partial encode block first.
+    // type none disables encode; RS_BLOCK_ERASURE needs 1 <= k < n <= 255.
+    bool set_fec(fec_type_e type, int k, int n, std::string* error);
+    void get_fec(fec_type_e* type, int* k, int* n) const;
 
 private:
     void on_app();
@@ -41,11 +48,14 @@ private:
     uint8_t buf[2048]{};
     uint64_t radio_rx_pkt_interval = 0;
     uint64_t radio_rx_bytes_interval = 0;
+    uint64_t radio_rx_bytes_life = 0;
     uint64_t air_tx_bytes_interval = 0;
     uint64_t air_rx_bytes_interval = 0;
     uint64_t app_rx_pkt_interval = 0;
     uint64_t app_rx_bytes_interval = 0;
+    uint64_t app_rx_bytes_life = 0;
     rs_block_erasure fec;
+    int fec_timeout_ms = rs_block_erasure::k_default_timeout_ms;
 };
 
 #endif  // WINJECT_MANAGER_UDP_ENDPOINT_H_

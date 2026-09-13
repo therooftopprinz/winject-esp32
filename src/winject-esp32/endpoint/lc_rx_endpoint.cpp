@@ -98,15 +98,29 @@ bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
+
+    // Same bus+dest is idempotent. Otherwise replace any existing binds for
+    // this bus (terminate then create) so reset/re-apply takes the new values.
     if (find_exact(bus, dest) >= 0)
     {
         return true;
     }
+    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
+    {
+        if (ep[i].used && ep[i].bus == bus)
+        {
+            ep[i].used = false;
+            ep[i].bus = 0;
+            ep[i].dest = {};
+            ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
+        }
+    }
+
     const int idx = find_free();
     if (idx < 0)
     {
@@ -131,8 +145,8 @@ bool lc_rx_endpoint::rem_endpoint(bus_t bus)
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
@@ -159,8 +173,8 @@ bool lc_rx_endpoint::load(const lc_rx_bind_s* binds, uint8_t count)
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
@@ -192,8 +206,8 @@ void lc_rx_endpoint::fill_status(lc_rx_bind_s* out, uint8_t* count)
     {
         return;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return;
     }
@@ -217,8 +231,8 @@ void lc_rx_endpoint::forward(bus_t bus, packet&& pdu)
     entry_s* entries[WIFI_AIRPORT_MAX];
     uint8_t n = 0;
     {
-        bfc::semaphore::lock lock(lock);
-        if (!lock)
+        bfc::semaphore::lock guard(lock);
+        if (!guard)
         {
             return;
         }

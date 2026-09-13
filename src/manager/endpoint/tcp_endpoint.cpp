@@ -370,6 +370,7 @@ size_t tcp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
 {
     const size_t n = stream.pull_tx(out, max, is_ack);
     air_tx_bytes_interval += n;
+    air_tx_bytes_life += n;
     return n;
 }
 
@@ -380,7 +381,7 @@ uint64_t tcp_endpoint::take_rx_bytes()
     return n;
 }
 
-stream_stats_s tcp_endpoint::take_stats()
+stream_stats_s tcp_endpoint::peek_stats() const
 {
     stream_stats_s s;
     s.proto = "TCP";
@@ -388,10 +389,9 @@ stream_stats_s tcp_endpoint::take_stats()
     s.air_tx_bytes = air_tx_bytes_interval;
     s.air_rx_bytes = radio_rx_bytes_interval;
     s.tx_bytes = air_tx_bytes_interval;
-    s.rx_bytes = take_rx_bytes();
-    air_tx_bytes_interval = 0;
-    app_rx_bytes_interval.exchange(0, std::memory_order_relaxed);
-    app_tx_bytes_interval = 0;
+    s.rx_bytes = radio_rx_bytes_interval;
+    s.tx_bytes_life = air_tx_bytes_life;
+    s.rx_bytes_life = radio_rx_bytes_life;
     size_t rxq = 0;
     {
         std::lock_guard<std::mutex> lock(rx_mu);
@@ -402,11 +402,22 @@ stream_stats_s tcp_endpoint::take_stats()
     return s;
 }
 
+stream_stats_s tcp_endpoint::take_stats()
+{
+    stream_stats_s s = peek_stats();
+    take_rx_bytes();
+    air_tx_bytes_interval = 0;
+    app_rx_bytes_interval.exchange(0, std::memory_order_relaxed);
+    app_tx_bytes_interval = 0;
+    return s;
+}
+
 void tcp_endpoint::on_radio_rx(const uint8_t* data, size_t len)
 {
     if (data != nullptr && len > 0)
     {
         radio_rx_bytes_interval += len;
+        radio_rx_bytes_life += len;
     }
     const bool connect = len >= tcp_stream::k_header_size &&
                          data[0] == tcp_stream::k_type_connect;

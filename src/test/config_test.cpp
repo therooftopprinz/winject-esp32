@@ -36,8 +36,8 @@ winject.domain        = 1234
 winject.max_rate_kbps = 10000
 upstream.size = 1
 upstream-0.mode             = UDP_GENERIC_FORWARDING
-upstream-0.bus_tx           = b2
-upstream-0.bus_rx           = a1
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
 upstream-0.scheduler_budget = 100
 upstream-0.rx               = 0.0.0.0:22081
 upstream-0.tx               = 127.0.0.1:21082
@@ -75,8 +75,8 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 upstream.size = 1
 upstream-0.mode             = UDP_GENERIC_FORWARDING
-upstream-0.bus_tx           = b2
-upstream-0.bus_rx           = a1
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
 upstream-0.scheduler_budget = 100
 upstream-0.rx               = 0.0.0.0:22081
 upstream-0.tx               = 127.0.0.1:21082
@@ -101,8 +101,8 @@ winject.domain        = 1234
 winject.max_rate_kbps = 10000
 upstream.size = 1
 upstream-0.mode             = UDP_CLIENT_FORWARDING
-upstream-0.bus_tx           = b2
-upstream-0.bus_rx           = b2
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = b2
 upstream-0.scheduler_budget = 100
 upstream-0.connect_address  = 127.0.0.1:9
 )");
@@ -125,8 +125,8 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 upstream.size = 1
 upstream-0.mode             = UDP_SERVER_FORWARDING
-upstream-0.bus_tx           = b2
-upstream-0.bus_rx           = a1
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
 upstream-0.scheduler_budget = 4096
 upstream-0.bind_address     = 127.0.0.1:22081
 upstream-0.fec.type         = RS_BLOCK_ERASURE
@@ -157,8 +157,8 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 upstream.size = 1
 upstream-0.mode             = UDP_SERVER_FORWARDING
-upstream-0.bus_tx           = b2
-upstream-0.bus_rx           = a1
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
 upstream-0.scheduler_budget = 100
 upstream-0.bind_address     = 127.0.0.1:22081
 upstream-0.fec.type         = RS_BLOCK_ERASURE
@@ -184,8 +184,8 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 upstream.size = 1
 upstream-0.mode             = TCP_SERVER_FORWARDING
-upstream-0.bus_tx           = c3
-upstream-0.bus_rx           = d4
+upstream-0.tx_bus           = c3
+upstream-0.rx_bus           = d4
 upstream-0.scheduler_budget = 1024
 upstream-0.bind_address     = 127.0.0.1:22022
 upstream-0.fec.type         = RS_BLOCK_ERASURE
@@ -196,5 +196,69 @@ upstream-0.fec.n            = 15
     std::string err;
     EXPECT_FALSE(cfg.load(path, &err));
     EXPECT_NE(err.find("UDP"), std::string::npos);
+    std::remove(path.c_str());
+}
+
+TEST(ConfigTest, Channel14AcceptsDsss)
+{
+    const std::string path = write_conf(R"(
+winject.device        = 192.168.32.1
+winject.console       = 2323
+winject.channel       = 14
+winject.modulation    = DSS_1M_L
+winject.power         = 20
+winject.mode          = STANDALONE
+winject.domain        = 1234
+upstream.size = 1
+upstream-0.mode             = UDP_GENERIC_FORWARDING
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
+upstream-0.scheduler_budget = 100
+upstream-0.rx               = 0.0.0.0:22081
+upstream-0.tx               = 127.0.0.1:21082
+)");
+    config cfg;
+    std::string err;
+    ASSERT_TRUE(cfg.load(path, &err)) << err;
+    EXPECT_EQ(cfg.channel, 14);
+    EXPECT_EQ(cfg.modulation, "DSS_1M_L");
+    std::remove(path.c_str());
+}
+
+TEST(ConfigTest, CanonicalModulation)
+{
+    EXPECT_EQ(config::canonical_modulation("OFDM_24M"), "OFDM_24M");
+    EXPECT_EQ(config::canonical_modulation("ofdm_24m"), "OFDM_24M");
+    EXPECT_TRUE(config::canonical_modulation("nope").empty());
+    EXPECT_EQ(config::phy_rate_kbps("ofdm_24m"), 24000u);
+    EXPECT_TRUE(config::modulation_ok_for_channel("CCK_11M_S", 14));
+    EXPECT_TRUE(config::modulation_ok_for_channel("DSS_1M_L", 14));
+    EXPECT_FALSE(config::modulation_ok_for_channel("OFDM_24M", 14));
+    EXPECT_TRUE(config::modulation_ok_for_channel("OFDM_24M", 1));
+    EXPECT_FALSE(config::modulation_ok_for_channel("nope", 1));
+}
+
+TEST(ConfigTest, Channel14RejectsOfdm)
+{
+    const std::string path = write_conf(R"(
+winject.device        = 192.168.32.1
+winject.console       = 2323
+winject.channel       = 14
+winject.modulation    = OFDM_24M
+winject.power         = 20
+winject.mode          = STANDALONE
+winject.domain        = 1234
+upstream.size = 1
+upstream-0.mode             = UDP_GENERIC_FORWARDING
+upstream-0.tx_bus           = b2
+upstream-0.rx_bus           = a1
+upstream-0.scheduler_budget = 100
+upstream-0.rx               = 0.0.0.0:22081
+upstream-0.tx               = 127.0.0.1:21082
+)");
+    config cfg;
+    std::string err;
+    EXPECT_FALSE(cfg.load(path, &err));
+    EXPECT_NE(err.find("channel 14"), std::string::npos);
     std::remove(path.c_str());
 }

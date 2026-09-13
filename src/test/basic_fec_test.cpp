@@ -1,7 +1,10 @@
 #include "frames/basic_fec.h"
+#include "net_util.h"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string.h>
+#include <thread>
 #include <vector>
 
 namespace
@@ -58,7 +61,7 @@ TEST(FecTest, RoundtripNoLoss)
     ASSERT_EQ(air.size(), 15u);
     for (const auto& p : air)
     {
-        EXPECT_LE(p.size(), 1476u);
+        EXPECT_LE(p.size(), k_stream_payload_max);
         EXPECT_EQ(p[0], rs_block_erasure::k_magic);
         EXPECT_EQ(p[1], rs_block_erasure::k_version);
     }
@@ -130,9 +133,8 @@ TEST(FecTest, PartialBlockPads)
 TEST(FecTest, FeedFullBlock)
 {
     rs_block_erasure enc;
-    rs_block_erasure dec;
+    rs_block_erasure dec;  // RX needs no init; k/n come from shard headers.
     ASSERT_TRUE(enc.init(10, 15, 20));
-    ASSERT_TRUE(dec.init(10, 15, 20));
     std::vector<std::vector<uint8_t>> orig;
     std::vector<std::vector<uint8_t>> got;
     for (int i = 0; i < 10; i++)
@@ -159,8 +161,7 @@ TEST(FecTest, FeedFullBlock)
 
 TEST(FecTest, PassthroughUnknownMagic)
 {
-    rs_block_erasure dec;
-    ASSERT_TRUE(dec.init(10, 15, 20));
+    rs_block_erasure dec;  // no init
     const uint8_t raw[] = {0x80, 0x21, 0x00, 0x01, 'R', 'T', 'P'};
     std::vector<std::vector<uint8_t>> payloads;
     dec.push_air(raw, sizeof(raw), &payloads);
@@ -178,10 +179,99 @@ TEST(FecTest, MaxPayloadFitsWifi)
     ASSERT_TRUE(fec.encode_block(orig, 4, &air));
     for (const auto& p : air)
     {
-        EXPECT_LE(p.size(), 1476u);
+        EXPECT_LE(p.size(), k_stream_payload_max);
     }
     auto frags = frags_except(air, {0, 2, 9, 11, 13});
     std::vector<std::vector<uint8_t>> got;
     ASSERT_TRUE(fec.decode_block(frags, &got, nullptr));
     EXPECT_EQ(got, orig);
+}
+
+TEST(FecTest, SystematicNativeSize)
+{
+    rs_block_erasure fec;
+    ASSERT_TRUE(fec.init(3, 4, 20));
+    std::vector<std::vector<uint8_t>> orig = {pkt(100, 1), pkt(300, 2),
+                                              pkt(200, 3)};
+    std::vector<std::vector<uint8_t>> air;
+    ASSERT_TRUE(fec.encode_block(orig, 1, &air));
+    ASSERT_EQ(air.size(), 4u);
+    EXPECT_EQ(air[0].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 100u);
+    EXPECT_EQ(air[1].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 300u);
+    EXPECT_EQ(air[2].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 200u);
+    EXPECT_EQ(air[3].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 300u);
+
+    auto drop_largest = frags_except(air, {1});
+    std::vector<std::vector<uint8_t>> got;
+    int rec = 0;
+    ASSERT_TRUE(fec.decode_block(drop_largest, &got, &rec));
+    EXPECT_EQ(rec, 1);
+    EXPECT_EQ(got, orig);
+
+    auto drop_small = frags_except(air, {0});
+    rec = -1;
+    ASSERT_TRUE(fec.decode_block(drop_small, &got, &rec));
+    EXPECT_EQ(rec, 1);
+    EXPECT_EQ(got, orig);
+}
+
+TEST(FecTest, PartialEmptyNotPadded)
+{
+    rs_block_erasure fec;
+    ASSERT_TRUE(fec.init(5, 6, 20));
+    std::vector<std::vector<uint8_t>> orig = {pkt(400, 9)};
+    std::vector<std::vector<uint8_t>> air;
+    ASSERT_TRUE(fec.encode_block(orig, 1, &air));
+    ASSERT_EQ(air.size(), 6u);
+    EXPECT_EQ(air[0].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 400u);
+    for (int i = 1; i < 5; i++)
+    {
+        EXPECT_EQ(air[static_cast<size_t>(i)].size(),
+                  rs_block_erasure::k_header_len +
+                      rs_block_erasure::k_len_prefix);
+    }
+    EXPECT_EQ(air[5].size(), rs_block_erasure::k_header_len +
+                                 rs_block_erasure::k_len_prefix + 400u);
+    size_t on_air = 0;
+    for (const auto& p : air)
+    {
+        on_air += p.size();
+    }
+    EXPECT_LT(on_air, 5 * 400u);
+
+    auto frags = frags_except(air, {0});
+    std::vector<std::vector<uint8_t>> got;
+    ASSERT_TRUE(fec.decode_block(frags, &got, nullptr));
+    EXPECT_EQ(got, orig);
+}
+
+TEST(FecTest, DuplicateBlockIdDroppedThenExpires)
+{
+    rs_block_erasure enc;
+    rs_block_erasure dec;
+    ASSERT_TRUE(enc.init(1, 2, 1));
+    ASSERT_TRUE(dec.init(1, 2, 1));
+    const std::vector<uint8_t> orig = pkt(8, 0x11);
+    std::vector<std::vector<uint8_t>> air;
+    enc.push_app(orig.data(), orig.size(), &air);
+    ASSERT_EQ(air.size(), 2u);
+
+    std::vector<std::vector<uint8_t>> got;
+    dec.push_air(air[0].data(), air[0].size(), &got);
+    ASSERT_EQ(got, std::vector<std::vector<uint8_t>>{orig});
+
+    got.clear();
+    dec.push_air(air[0].data(), air[0].size(), &got);
+    dec.push_air(air[1].data(), air[1].size(), &got);
+    EXPECT_TRUE(got.empty());
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(dec.done_hold_ms() + 50));
+    dec.push_air(air[0].data(), air[0].size(), &got);
+    EXPECT_EQ(got, std::vector<std::vector<uint8_t>>{orig});
 }

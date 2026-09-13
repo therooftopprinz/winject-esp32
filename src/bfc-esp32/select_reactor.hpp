@@ -139,10 +139,10 @@ public:
                             sizeof(wake_addr));
             return;
         }
-        const TaskHandle_t task = task.load(std::memory_order_acquire);
-        if (task != nullptr)
+        const TaskHandle_t handle = task.load(std::memory_order_acquire);
+        if (handle != nullptr)
         {
-            xTaskNotifyGive(task);
+            xTaskNotifyGive(handle);
         }
         else
         {
@@ -152,8 +152,8 @@ public:
 
     bool is_reactor_thread() const
     {
-        const TaskHandle_t task = task.load(std::memory_order_acquire);
-        return task != nullptr && xTaskGetCurrentTaskHandle() == task;
+        const TaskHandle_t handle = task.load(std::memory_order_acquire);
+        return handle != nullptr && xTaskGetCurrentTaskHandle() == handle;
     }
 
     bool start_pinned(const char* name, BaseType_t core, UBaseType_t prio,
@@ -189,7 +189,7 @@ public:
 
             int timeout_ms = -1;
             int64_t next_deadline_us = 0;
-            if (timer.get_next_deadline_us(next_deadline_us))
+            if (timer_.get_next_deadline_us(next_deadline_us))
             {
                 const int64_t diff =
                     next_deadline_us - timer_t::current_time_us();
@@ -199,7 +199,11 @@ public:
                 }
                 else
                 {
-                    const int64_t diff_ms = diff / 1000;
+                    auto diff_ms = (diff + 999) / 1000;
+                    if (diff_ms == 0)
+                    {
+                        diff_ms = 1;
+                    }
                     if (diff_ms > std::numeric_limits<int>::max())
                     {
                         timeout_ms = std::numeric_limits<int>::max();
@@ -322,7 +326,7 @@ public:
             }
 
             apply_pending_rem();
-            timer.schedule(timer_t::current_time_us());
+            timer_.schedule(timer_t::current_time_us());
         }
 
         task.store(nullptr, std::memory_order_release);
@@ -336,7 +340,7 @@ public:
 
     timer_t& get_timer()
     {
-        return timer;
+        return timer_;
     }
 
 private:
@@ -449,7 +453,7 @@ private:
         return true;
     }
 
-    timer_t timer;
+    timer_t timer_;
     socket wake_sock;
     sockaddr_in wake_addr{};
     SemaphoreHandle_t lock = nullptr;

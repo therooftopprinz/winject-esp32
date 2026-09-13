@@ -31,7 +31,8 @@ struct upstream_config_s
 {
     size_t index = 0;
     upstream_mode_e mode = upstream_mode_e::udp_generic;
-    // Host TX bus (UDP→air / sut) and RX bus (air→UDP / sur). Must differ.
+    // Host TX / RX buses (0 = unset). Map to set_upstream_tx / set_upstream_rx.
+    // UDP may set only one direction; TCP ARQ needs both.
     uint8_t bus_tx = 0;
     uint8_t bus_rx = 0;
     size_t scheduler_budget = 256;
@@ -61,6 +62,10 @@ struct config
     std::string local_ip;
     uint16_t forward_base = 9210;
     bool skip_console = false;
+    // Local UDP management console. Empty = disabled. Both required together.
+    // console_in = bind (recv commands); console_out = dest (send replies).
+    std::string manager_console_in;
+    std::string manager_console_out;
     std::vector<upstream_config_s> upstreams;
 
     bool load(const std::string& path, std::string* error);
@@ -69,6 +74,11 @@ struct config
     // PHY air rate (kbps) for a modulation name, or 0 if unknown.
     static uint32_t phy_rate_kbps(const std::string& modulation);
     static uint32_t derive_max_rate_kbps(const std::string& modulation);
+    // Canonical firmware name (e.g. OFDM_24M), or empty if unknown.
+    static std::string canonical_modulation(const std::string& modulation);
+    // Channel 14 is DSSS/CCK only. Unknown names are not ok.
+    static bool modulation_ok_for_channel(const std::string& modulation,
+                                          uint8_t channel);
 
     // Periodic stats to stderr (0 = disabled). Also WINJECT_STATS_SEC env.
     unsigned stats_sec = 0;

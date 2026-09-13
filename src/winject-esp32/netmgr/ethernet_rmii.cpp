@@ -194,7 +194,8 @@ void ethernet_rmii::begin()
     power.mode = GPIO_MODE_OUTPUT;
     gpio_config(&power);
     gpio_set_level(static_cast<gpio_num_t>(ETH_PHY_POWER), 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // LAN8720 + RMII clock need settle time; 50ms was racing EMAC reset.
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netif = esp_netif_new(&netif_cfg);
@@ -203,10 +204,16 @@ void ethernet_rmii::begin()
         ESP_LOGE(TAG, "ETH netif alloc failed");
         return;
     }
-    ESP_ERROR_CHECK(esp_netif_set_hostname(eth_netif, DEVICE_HOSTNAME));
+    if (esp_netif_set_hostname(eth_netif, DEVICE_HOSTNAME) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "ETH hostname set failed");
+    }
     dhcp_server.bind_netif(eth_netif);
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    // Oscillator (GPIO16-gated) can take >100ms to be accepted on GPIO0,
+    // especially with a USB-UART auto-reset load on the strapping pin.
+    mac_config.sw_reset_timeout_ms = 1000;
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
     emac_config.smi_gpio.mdc_num = ETH_PHY_MDC;
@@ -225,6 +232,9 @@ void ethernet_rmii::begin()
     emac_config.clock_config.rmii.clock_gpio = 0;
 #endif
 
+    // Ensure GPIO0 is free for RMII REF_CLK before EMAC grabs it.
+    gpio_reset_pin(GPIO_NUM_0);
+
     esp_eth_mac_t* eth_mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr = ETH_PHY_ADDR;
@@ -237,7 +247,19 @@ void ethernet_rmii::begin()
     }
 
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(eth_mac, phy);
-    if (esp_eth_driver_install(&eth_config, &eth_handle) != ESP_OK)
+    esp_err_t install_err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        install_err = esp_eth_driver_install(&eth_config, &eth_handle);
+        if (install_err == ESP_OK)
+        {
+            break;
+        }
+        ESP_LOGW(TAG, "ETH driver install attempt %d failed: %s", attempt + 1,
+                 esp_err_to_name(install_err));
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (install_err != ESP_OK)
     {
         ESP_LOGE(TAG, "ETH driver install failed");
         return;
@@ -249,12 +271,24 @@ void ethernet_rmii::begin()
         ESP_LOGE(TAG, "ETH glue alloc failed");
         return;
     }
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, eth_glue));
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
-                                               &eth_event_handler, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
-                                               &got_ip_event_handler, this));
-    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
+    if (esp_netif_attach(eth_netif, eth_glue) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "ETH attach failed");
+        return;
+    }
+    if (esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
+                                   &eth_event_handler, this) != ESP_OK ||
+        esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                   &got_ip_event_handler, this) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "ETH event register failed");
+        return;
+    }
+    if (esp_eth_start(eth_handle) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "ETH start failed");
+        return;
+    }
     ready_.store(true, std::memory_order_relaxed);
 }
 

@@ -3,22 +3,44 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 struct stream_stats_s
 {
     const char* proto = nullptr;
-    // STREAM-N: unfecced / decoded payload bytes.
+    // STREAM-N interval: unfecced / decoded payload bytes (reset by take_stats).
     uint64_t tx_bytes = 0;
     uint64_t rx_bytes = 0;
-    // STREAM TOTAL: on-air datagram bytes (FEC shards, TCP headers).
+    // Lifetime unfecced / decoded payload bytes (never reset).
+    uint64_t tx_bytes_life = 0;
+    uint64_t rx_bytes_life = 0;
+    // STREAM TOTAL interval: on-air datagram bytes (FEC shards, TCP headers).
     uint64_t air_tx_bytes = 0;
     uint64_t air_rx_bytes = 0;
     size_t queue = 0;
     size_t unacked = 0;
     bool tcp = false;
+    int fec_k = 0;
+    int fec_n = 0;
     uint64_t fec_recovered = 0;
     uint64_t fec_fail = 0;
 };
+
+inline void format_fec(char* buf, size_t n, int k, int n_shards)
+{
+    if (buf == nullptr || n == 0)
+    {
+        return;
+    }
+    if (k > 0 && n_shards > k)
+    {
+        snprintf(buf, n, "block(%d,%d)", k, n_shards);
+    }
+    else
+    {
+        snprintf(buf, n, "none");
+    }
+}
 
 class stream
 {
@@ -43,6 +65,11 @@ public:
     virtual uint64_t take_rx_bytes()
     {
         return 0;
+    }
+    // Current interval counters. Does not reset.
+    virtual stream_stats_s peek_stats() const
+    {
+        return stream_stats_s{};
     }
     // Interval counters for periodic STREAM stats. Zeros payload and air totals.
     virtual stream_stats_s take_stats()

@@ -127,7 +127,8 @@ static bool parse_channel(const char* text, uint8_t* channel)
     }
     char* end = nullptr;
     const long value = strtol(text, &end, 10);
-    if (end == text || *end != '\0' || value < 1 || value > 13)
+    if (end == text || *end != '\0' || value < WIFI_CHANNEL_MIN ||
+        value > WIFI_CHANNEL_MAX)
     {
         return false;
     }
@@ -478,9 +479,10 @@ void console::print_help(const out_s& out)
     write(out, "set_network|sn <STATIC|AUTO>\n");
     write(out, "set_enable_dhcp_server|sed <0|1>\n");
     write(out, "set_ip|sfi <ip>\n");
-    write(out, "save|sv [0-9]\n");
+    write(out, "save|sv [0-9]  (network/ethernet/radio/upstreams)\n");
     write(out, "use|u <0-9>\n");
     write(out, "status|s\n");
+    write(out, "ping  (rsp: pong)\n");
     write(out, "reset|r\n");
     write(out, "help\n");
     write(out, "modulations: ");
@@ -585,7 +587,7 @@ void console::print_status(const out_s& out)
     wifi_status_s radio = {};
     static lc_tx_bind_s sut[WIFI_AIRPORT_MAX];
     static lc_rx_bind_s sur[WIFI_AIRPORT_MAX];
-    static ip_port_t ci[WIFI_AIRPORT_MAX];
+    static ip_port_t ci_binds[WIFI_AIRPORT_MAX];
     uint8_t sut_count = 0;
     uint8_t sur_count = 0;
     uint8_t ci_count = 0;
@@ -596,7 +598,7 @@ void console::print_status(const out_s& out)
         wifi::instance().get_status(&radio);
         tx_ep->get_status(sut, &sut_count);
         rx_ep->fill_status(sur, &sur_count);
-        ci->fill_status(ci, &ci_count);
+        ci->fill_status(ci_binds, &ci_count);
     }
 
     write(out, "# device\n");
@@ -736,9 +738,9 @@ void console::print_status(const out_s& out)
         for (uint8_t i = 0; i < ci_count; i++)
         {
             char host_str[16];
-            ipv4_to_string(ci[i].host, host_str, sizeof(host_str));
+            ipv4_to_string(ci_binds[i].host, host_str, sizeof(host_str));
             n = snprintf(line + used, sizeof(line) - used, "%s%s:%u",
-                         i == 0 ? "" : ",", host_str, ci[i].port);
+                         i == 0 ? "" : ",", host_str, ci_binds[i].port);
             if (n < 0 || static_cast<size_t>(n) >= sizeof(line) - used)
             {
                 break;
@@ -771,6 +773,17 @@ void console::handle_line(const char* line, const out_s& out)
     if (cmd_is(cmd, "status", "s"))
     {
         print_status(out);
+        return;
+    }
+    if (cmd_is(cmd, "ping", "ping"))
+    {
+        char* extra = strtok_r(nullptr, " \t", &save);
+        if (extra != nullptr)
+        {
+            write(out, "error: usage ping\n");
+            return;
+        }
+        write(out, "pong\n");
         return;
     }
 
@@ -1072,7 +1085,7 @@ void console::handle_line(const char* line, const out_s& out)
         uint8_t channel = 0;
         if (!parse_channel(arg1, &channel) || arg2 != nullptr)
         {
-            write(out, "error: usage set_channel <1-13>\n");
+            write(out, "error: usage set_channel <1-14>\n");
             return;
         }
         if (!wifi::instance().set_channel(channel))

@@ -40,8 +40,8 @@ host TCP :9001  ← manager A ← radio A sur bus=d4 ← air ← radio B sut bus
 | Item | Value |
 |------|--------|
 | Mode / domain | `STANDALONE` / `1234` (`scripts/prepare_radios_for_manager.py`) |
-| Pair 1 (A→B) | A `bus_tx=b2` `bus_rx=a1`; B swapped |
-| Pair 2 (B→A) | A `bus_tx=c3` `bus_rx=d4`; B swapped |
+| Pair 1 (A→B) | A `upstream_tx=b2` `upstream_rx=a1`; B swapped |
+| Pair 2 (B→A) | A `upstream_tx=c3` `upstream_rx=d4`; B swapped |
 | Inject / forward | A `9000`/`9010` → host `9210`/`9211`; B → `9220`/`9221` |
 | Configs | `configuration/winject-tests/bw_a.cfg` / `bw_b.cfg` |
 
@@ -57,8 +57,8 @@ host TCP :9001  ← manager A ← radio A sur bus=d4 ← air ← radio B sut bus
 ```bash
 python3 tools/bw_test.py
 python3 tools/bw_test.py --all
-python3 tools/bw_test.py --bidir --modulation DSS_1M_L
-python3 tools/bw_test.py --bidir-only --modulation OFDM_24M
+python3 tools/bw_test.py --test-integ --test-ab --test-ba --test-bidir --modulation DSS_1M_L
+python3 tools/bw_test.py --test-bidir --modulation OFDM_24M
 python3 tools/bw_test.py --modulation OFDM_6M,OFDM_24M,OFDM_54M --channel 6
 python3 tools/bw_test.py --kbps 400 --modulation CCK_11M_S
 python3 tools/bw_test.py --no-cca --modulation OFDM_24M
@@ -71,20 +71,23 @@ python3 tools/bw_test.py --no-cca --modulation OFDM_24M
 | `--domain` | `1234` | Shared air domain (hex, 1–ffff) |
 | `--bus-ab` | `b2` | Bus A injects / B filters |
 | `--bus-ba` | `a1` | Bus B injects / A filters |
-| `--channel` | omit | `set_channel` on **both** radios (1–13). Omit to keep the radios’ current channel |
+| `--channel` | omit | `set_channel` on **both** radios (1–14; 14 is 802.11b-only). Omit to keep the radios’ current channel |
 | `--modulation` | omit | One name or comma-separated list. Omit to keep the radios’ current modulation |
 | `--all` | off | Sweep every firmware modulation (`set_modulation` on both radios). Not with `--modulation` |
 | `--size` | `1400` | UDP payload bytes (16–1476) |
 | `--duration` | `5` | Seconds per bandwidth phase |
 | `--drain` | `1` | Wait after sending for late frames |
 | `--kbps` | auto | Payload offer in kbit/s. `-1` (default) is 85% of estimated 802.11 goodput for **that** modulation. `0` floods the Ethernet inject path (not a goodput test) |
-| `--integrity` | `20` | Packets per direction before bandwidth |
+| `--integrity` | `20` | Packets per direction for `--test-integ` |
 | `--cca` / `--no-cca` | enabled | `set_cca_enabled` on both radios. `--no-cca` skips wait-for-idle |
 | `--skip-config` | off | Do not send console commands |
-| `--bidir` | off | Run the simultaneous A+B phase |
-| `--bidir-only` | off | Skip unidirectional; run only the simultaneous A+B phase |
+| `--test-integ` | on* | Integrity check (both directions) |
+| `--test-ab` | on* | Unidirectional A→B bandwidth |
+| `--test-ba` | on* | Unidirectional B→A bandwidth |
+| `--test-bidir` | off | Simultaneous A+B bandwidth |
 | `--verbose` | off | Print full console replies |
 
+\* If no `--test-*` flag is given, defaults to `--test-integ --test-ab --test-ba`.
 Each rate step sends `set_cca_enabled <0|1>` on both radios. If `--modulation` or `--all` is given, `set_modulation <modulation>` is sent first. If `--channel` is given, `set_channel <channel>` is sent first.
 
 Mode, domain, and upstream buses are configured once at the start (`sut` = UDP→air, `sur` = air→UDP). After a channel or modulation change the runner waits 1.2 s so `esp_wifi` can reapply rate/channel/monitor.
@@ -99,21 +102,20 @@ Do not use `--kbps 0` to measure air rate. The ESP32 poll loop will drop UDP bef
 
 ## Unidirectional bandwidth
 
-`--duration` seconds of `--size` payloads, A→B then B→A, at the auto (or `--kbps`) offer for that modulation.
+`--test-ab` / `--test-ba`: `--duration` seconds of `--size` payloads at the auto (or `--kbps`) offer for that modulation.
 
 ## Simultaneous bidirectional bandwidth
 
-Only with `--bidir` or `--bidir-only`. Both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit. `--bidir-only` skips the unidirectional phases.
+`--test-bidir`: both directions send at once. Each direction is offered **half** the unidirectional rate. Both must stay within the loss limit.
 
 # Pass criteria (per modulation)
 
 | Check | Pass |
 |-------|------|
 | Config | `set_cca_enabled` returns `ok` on both radios (`set_channel` / `set_modulation` too if those flags were given) |
-| Integrity | 20/20 each way (after retry) |
-| Unidirectional | each direction `loss%` ≤ 5 at the auto/`--kbps` offer |
-| Simultaneous | `--bidir` / `--bidir-only`; each direction `loss%` ≤ 10 at half uni offer |
-
+| Integrity | `--test-integ`; 20/20 each way (after retry) |
+| Unidirectional | `--test-ab` / `--test-ba`; each selected direction `loss%` ≤ 5 at the auto/`--kbps` offer |
+| Simultaneous | `--test-bidir`; each direction `loss%` ≤ 10 at half uni offer |
 Sweep exit status is 0 only if **every** listed modulation passes. High PHY rates can fail the loss limit because the ESP32 inject path cannot offer the estimated air goodput; the table still records delivered **goodput kbps**.
 
 CRC-fail DATA is queued to upstream only if `set_allow_failed_crc 1`. Packet counters and air snapshots are not currently reported.
@@ -129,7 +131,7 @@ Same names as `set_modulation` / `help`:
 Historical bench (pre-refactor airport addressing), 2026-08-30, channel 1, 1400-byte payload, 5 s phases, auto offer. `set_channel 1` and `set_modulation` applied on both radios before each row.
 
 ```bash
-python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --all --bidir
+python3 tools/bw_test.py --a 192.168.253.11 --b 192.168.253.12 --channel 1 --all --test-integ --test-ab --test-ba --test-bidir
 ```
 
 | modulation      | ch | offer kbps |  int A->B |  int B->A | A->B kbps | A->B loss | B->A kbps | B->A loss | A+B A kbps | A+B B kbps | A+B A loss | A+B B loss | result |

@@ -5,16 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include(FetchContent)
-FetchContent_Declare(bfc
-    GIT_REPOSITORY https://github.com/therooftopprinz/BFC.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-)
-FetchContent_GetProperties(bfc)
-if(NOT bfc_POPULATED)
-    FetchContent_Populate(bfc)
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../bfc_fetch.cmake)
 
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(googletest
@@ -44,8 +35,11 @@ add_executable(winject-tests
     basic_fec_test.cpp
     net_util_test.cpp
     tcp_stream_test.cpp
+    air_seq_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/frames/basic_fec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/frames/air_seq.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../manager/log.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/net_util.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../manager/stream/tcp_stream.cpp
     $<TARGET_OBJECTS:winject_esp32_frame>

@@ -29,6 +29,10 @@ cmake -S src/manager -B src/manager/build && cmake --build src/manager/build
 
 See [docs/manager.md](docs/manager.md), [docs/flashing.md](docs/flashing.md). Two-radio air tests: [docs/tests_wt32_eth01.md](docs/tests_wt32_eth01.md).
 
+Rover uses this radio as an opaque pipe (WG, camera, future drive-console
+text). Vehicle **master/slave** and the UART proxy are **not** this firmware.
+See [docs/rover.md](docs/rover.md).
+
 ## Build and flash
 
 The WT32-ETH01 has no USB port. Connect a 3.3 V USB-UART adapter to `TXD`/`RXD`/`GND`, hold `BOOT` (IO0) to GND, then apply power:

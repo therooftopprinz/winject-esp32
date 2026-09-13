@@ -33,6 +33,11 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
 CONFIG_LWIP_SO_RCVBUF=y
 
+# App needs: HTTP OTA (+3 internal), console listen+clients, reactor wake
+# socks, 3x sut UDP, sur/ci/logger UDP. Default 10 is exhausted by OTA's
+# max_open_sockets=7 alone (7+3).
+CONFIG_LWIP_MAX_SOCKETS=20
+
 CONFIG_LWIP_DHCPS=y
 CONFIG_LWIP_DHCPS_MAX_STATION_NUM=64
 

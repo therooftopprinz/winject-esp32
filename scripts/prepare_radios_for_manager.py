@@ -39,11 +39,17 @@ def main() -> int:
         default=DEFAULT_DOMAIN,
         help=f"shared air domain, hex 1..ffff (default {DEFAULT_DOMAIN})",
     )
-    p.add_argument("--channel", type=int, default=1, help="set_channel (default 1)")
+    p.add_argument(
+        "--channel",
+        type=int,
+        default=1,
+        help=f"set_channel {bw.CHANNEL_MIN}-{bw.CHANNEL_MAX} "
+        f"(default 1; 14 is 802.11b-only)",
+    )
     p.add_argument(
         "--modulation",
         default="OFDM_24M",
-        help="set_modulation (default OFDM_24M)",
+        help="set_modulation (default OFDM_24M; DSSS/CCK required on channel 14)",
     )
     p.add_argument("--verbose", action="store_true")
     p.add_argument(
@@ -53,8 +59,13 @@ def main() -> int:
         help="set_cca_enabled on both radios (default: on)",
     )
     args = p.parse_args()
-    if args.channel < 1 or args.channel > 13:
-        raise SystemExit("--channel must be 1-13")
+    if not bw.channel_ok(args.channel):
+        raise SystemExit(f"--channel must be {bw.CHANNEL_MIN}-{bw.CHANNEL_MAX}")
+    if not bw.modulation_ok_for_channel(args.modulation, args.channel):
+        raise SystemExit(
+            "channel 14 rejects OFDM/MCS; use a DSSS/CCK --modulation "
+            f"(got {args.modulation})"
+        )
     host = args.host or bw.detect_host(args.a)
     quiet = not args.verbose
     cca = 1 if args.cca else 0
@@ -75,10 +86,20 @@ def main() -> int:
     ]
 
     def configure_radio(ip: str, binds: list[tuple[str, str, int, int]]) -> bool:
+        # Channel 14: modulation before channel (802.11b-only).
+        if args.channel == 14:
+            phy_cmds = [
+                f"set_modulation {args.modulation}",
+                f"set_channel {args.channel}",
+            ]
+        else:
+            phy_cmds = [
+                f"set_channel {args.channel}",
+                f"set_modulation {args.modulation}",
+            ]
         cmds = [
             "set_mode STANDALONE",
-            f"set_channel {args.channel}",
-            f"set_modulation {args.modulation}",
+            *phy_cmds,
             "set_tx_power 20",
             f"set_cca_enabled {cca}",
             f"set_domain {domain}",

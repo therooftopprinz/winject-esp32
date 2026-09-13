@@ -85,7 +85,8 @@ def parse_args() -> argparse.Namespace:
         "--channel",
         type=int,
         default=None,
-        help="set_channel on both radios (1-13); omit to keep existing",
+        help=f"set_channel on both radios ({bw.CHANNEL_MIN}-{bw.CHANNEL_MAX}; "
+        "14 is 802.11b-only); omit to keep existing",
     )
     p.add_argument(
         "--modulation",
@@ -110,11 +111,25 @@ def parse_args() -> argparse.Namespace:
         help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
     )
     p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
-    p.add_argument("--bidir", action="store_true", help="run simultaneous A+B phase after unidirectional")
     p.add_argument(
-        "--bidir-only",
+        "--test-integ",
         action="store_true",
-        help="run only the simultaneous A+B phase (skip unidirectional)",
+        help="run integrity check (both directions)",
+    )
+    p.add_argument(
+        "--test-ab",
+        action="store_true",
+        help="run unidirectional A->B bandwidth phase",
+    )
+    p.add_argument(
+        "--test-ba",
+        action="store_true",
+        help="run unidirectional B->A bandwidth phase",
+    )
+    p.add_argument(
+        "--test-bidir",
+        action="store_true",
+        help="run simultaneous A+B bandwidth phase",
     )
     p.add_argument("--skip-mux", action="store_true", help="skip self-loop / dual isolation checks")
     p.add_argument(
@@ -306,12 +321,14 @@ def run_mux_checks(
 
 def main() -> int:
     args = parse_args()
-    if args.bidir_only:
-        args.bidir = True
+    if not (args.test_integ or args.test_ab or args.test_ba or args.test_bidir):
+        args.test_integ = True
+        args.test_ab = True
+        args.test_ba = True
     if args.size < 16 or args.size > bw.MAX_PAYLOAD:
         raise SystemExit(f"--size must be 16..{bw.MAX_PAYLOAD}")
-    if args.channel is not None and (args.channel < 1 or args.channel > 13):
-        raise SystemExit("--channel must be 1-13")
+    if args.channel is not None and not bw.channel_ok(args.channel):
+        raise SystemExit(f"--channel must be {bw.CHANNEL_MIN}-{bw.CHANNEL_MAX}")
     if args.all and args.modulation is not None:
         raise SystemExit("use --all or --modulation, not both")
     args.domain = bw.fmt_domain(args.domain)
@@ -331,9 +348,14 @@ def main() -> int:
 
     apply_modulation = args.all or args.modulation is not None
     if args.all:
-        mods = list(bw.MODULATIONS)
+        mods = list(bw.MODULATIONS_11B if args.channel == 14 else bw.MODULATIONS)
     elif args.modulation is not None:
         mods = bw.parse_modulations(args.modulation)
+        bad = [m for m in mods if not bw.modulation_ok_for_channel(m, args.channel)]
+        if bad:
+            raise SystemExit(
+                f"channel 14 rejects OFDM/MCS; not allowed: {', '.join(bad)}"
+            )
     else:
         mods = []
 
@@ -365,6 +387,11 @@ def main() -> int:
         current = mod_a or mod_b
         if current is None:
             raise SystemExit("could not read existing modulation; pass --modulation or --all")
+        if not bw.modulation_ok_for_channel(current, args.channel):
+            raise SystemExit(
+                f"channel 14 rejects OFDM/MCS; radios are {current} — "
+                "pass --modulation DSS_1M_L (or another DSSS/CCK rate)"
+            )
         mods = [current]
 
     channel_label = str(display_channel) if display_channel is not None else "existing"
@@ -507,39 +534,42 @@ def main() -> int:
             )
             mux_ran = True
 
-        print("-- integrity")
-        a_to_b, b_to_a = run_integrity()
-        print(f"A -> B  {a_to_b}/{args.integrity}")
-        print(f"B -> A  {b_to_a}/{args.integrity}")
-        if a_to_b != args.integrity or b_to_a != args.integrity:
-            print("integrity retry")
-            time.sleep(0.5)
+        if args.test_integ:
+            print("-- integrity")
             a_to_b, b_to_a = run_integrity()
             print(f"A -> B  {a_to_b}/{args.integrity}")
             print(f"B -> A  {b_to_a}/{args.integrity}")
-        result.integrity_ab = a_to_b
-        result.integrity_ba = b_to_a
-        result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
+            if a_to_b != args.integrity or b_to_a != args.integrity:
+                print("integrity retry")
+                time.sleep(0.5)
+                a_to_b, b_to_a = run_integrity()
+                print(f"A -> B  {a_to_b}/{args.integrity}")
+                print(f"B -> A  {b_to_a}/{args.integrity}")
+            result.integrity_ab = a_to_b
+            result.integrity_ba = b_to_a
+            result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
+        else:
+            result.integrity_ok = True
 
-        if not args.bidir_only:
+        result.uni_ok = True
+        if args.test_ab or args.test_ba:
             print("-- unidirectional")
+        if args.test_ab:
             result.uni_ab = phase([(dest_a, b"A", listen_b)], offer)[0]
-            result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
             print(
                 f"A->B sent {result.uni_ab.sent} recv {result.uni_ab.recv}  "
                 f"{result.uni_ab.kbps:.1f} kbps  loss {result.uni_ab.loss:.1f}%"
             )
+            result.uni_ok = result.uni_ok and bw.loss_ok(result.uni_ab, 5.0, paced)
+        if args.test_ba:
+            result.uni_ba = phase([(dest_b, b"B", listen_a)], offer)[0]
             print(
                 f"B->A sent {result.uni_ba.sent} recv {result.uni_ba.recv}  "
                 f"{result.uni_ba.kbps:.1f} kbps  loss {result.uni_ba.loss:.1f}%"
             )
-            result.uni_ok = bw.loss_ok(result.uni_ab, 5.0, paced) and bw.loss_ok(
-                result.uni_ba, 5.0, paced
-            )
-        else:
-            result.uni_ok = True
+            result.uni_ok = result.uni_ok and bw.loss_ok(result.uni_ba, 5.0, paced)
 
-        if args.bidir:
+        if args.test_bidir:
             bidir_offer = (offer / 2.0) if paced else offer
             print(f"-- simultaneous ({bidir_offer:.0f} kbps each)")
             snaps = phase(
@@ -567,7 +597,6 @@ def main() -> int:
         result.overall = (
             result.config_ok and result.integrity_ok and result.uni_ok and result.bidir_ok
         )
-        print("PASS" if result.overall else "FAIL")
         all_results.append(result)
 
     listen_a.stop()
@@ -578,12 +607,20 @@ def main() -> int:
 
     print("\n=== result ===")
     paced = args.kbps != 0
-    print(bw.fmt_summary(all_results, paced, args.bidir, uni=not args.bidir_only))
+    print(
+        bw.fmt_summary(
+            all_results,
+            paced,
+            integ=args.test_integ,
+            ab=args.test_ab,
+            ba=args.test_ba,
+            bidir=args.test_bidir,
+        )
+    )
 
     passed = sum(1 for r in all_results if r.overall)
-    print(f"\n{passed}/{len(all_results)} modulations PASS  channel {channel_label}")
     if not args.skip_mux:
-        print(f"standalone mux  {'PASS' if mux_ok else 'FAIL'}")
+        print(f"\nstandalone mux  {'PASS' if mux_ok else 'FAIL'}")
 
     if not args.skip_config:
         if args.restore_tunnel:

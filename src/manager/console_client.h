@@ -2,13 +2,13 @@
 #define WINJECT_MANAGER_CONSOLE_CLIENT_H_
 
 #include "config.h"
-#include "net_util.h"
 
 #include <netinet/in.h>
 #include <stdint.h>
-
 #include <string>
 #include <vector>
+
+#include "net_util.h"
 
 class console_client
 {
@@ -30,9 +30,19 @@ public:
     bool apply_upstream(const config& cfg, const upstream_config_s& up,
                         uint16_t inject_port, uint16_t forward_port,
                         in_addr local_ip, std::string* error);
+    bool apply_ci(in_addr local_ip, uint16_t ci_port, std::string* error);
     bool program(const config& cfg, const std::vector<uint16_t>& inject_ports,
-                 const std::vector<uint16_t>& forward_ports, in_addr* local_ip,
-                 std::string* error);
+                 const std::vector<uint16_t>& forward_ports, uint16_t ci_port,
+                 in_addr* local_ip, std::string* error);
+    bool set_modulation(const std::string& name, std::string* error);
+
+    // Nonblocking keepalive helpers (socket must already be connected).
+    bool send_ping(std::string* error);
+    void append_recv(const char* data, size_t n);
+    bool pop_line(std::string* line);
+    void clear_pending();
+    // True if send_cmd consumed a keepalive pong while waiting for a reply.
+    bool take_pong();
 
 private:
     bool send_cmd(const std::string& cmd, std::string* error);
@@ -44,6 +54,7 @@ private:
     bfc::socket sock;
     in_addr local_ip_{};
     std::string pending;
+    bool pong_seen_ = false;
 };
 
 #endif  // WINJECT_MANAGER_CONSOLE_CLIENT_H_

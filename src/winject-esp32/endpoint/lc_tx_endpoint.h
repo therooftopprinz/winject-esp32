@@ -54,7 +54,7 @@ private:
     void on_readable(entry_s& e);
     bool drop_datagram(entry_s& e);
     void watch(entry_s& e);
-    void unwatch(entry_s& e);
+    void release_sock(bfc::socket sock);
     void clear_slot(entry_s& e);
     int find_bus(bus_t bus) const;
     int find_port(uint16_t port, int except) const;

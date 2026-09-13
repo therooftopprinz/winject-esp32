@@ -73,8 +73,28 @@ static const modulation_entry_s* find_modulation(const char* name)
     return nullptr;
 }
 
-static uint8_t protocol_for_rate(wifi_phy_rate_t rate)
+static bool is_11b_rate(wifi_phy_rate_t rate)
 {
+    return rate < WIFI_PHY_RATE_48M;
+}
+
+static bool channel_in_range(uint8_t channel)
+{
+    return channel >= WIFI_CHANNEL_MIN && channel <= WIFI_CHANNEL_MAX;
+}
+
+static bool modulation_ok_for_channel(wifi_phy_rate_t rate, uint8_t channel)
+{
+    return channel != 14 || is_11b_rate(rate);
+}
+
+static uint8_t protocol_for_rate(wifi_phy_rate_t rate, uint8_t channel)
+{
+    if (channel == 14)
+    {
+        return WIFI_PROTOCOL_11B;
+    }
+
     if (rate >= WIFI_PHY_RATE_MCS0_LGI)
     {
         return WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
@@ -148,11 +168,25 @@ void wifi::init_activity_leds()
 esp_err_t wifi::apply_country()
 {
     wifi_country_t country = {};
+    country.max_tx_power = static_cast<int8_t>(tx_.power_dbm() * 4);
+    country.policy = WIFI_COUNTRY_POLICY_MANUAL;
+
+    // JP PHY includes 2484 MHz (channel 14). Fall back to world-safe "01"
+    // (channels 1–13) if the radio rejects JP — never abort boot on this.
+    memcpy(country.cc, "JP", 2);
+    country.schan = WIFI_CHANNEL_MIN;
+    country.nchan = WIFI_CHANNEL_MAX - WIFI_CHANNEL_MIN + 1;
+    esp_err_t err = esp_wifi_set_country(&country);
+    if (err == ESP_OK)
+    {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "country JP failed (%s), falling back to 01",
+             esp_err_to_name(err));
     memcpy(country.cc, "01", 2);
     country.schan = 1;
     country.nchan = 13;
-    country.max_tx_power = static_cast<int8_t>(tx_.power_dbm() * 4);
-    country.policy = WIFI_COUNTRY_POLICY_MANUAL;
     return esp_wifi_set_country(&country);
 }
 
@@ -171,7 +205,13 @@ bool wifi::apply_channel()
 
 bool wifi::apply_modulation()
 {
-    const uint8_t proto = protocol_for_rate(modulation_rate);
+    if (!modulation_ok_for_channel(modulation_rate, channel))
+    {
+        ESP_LOGE(TAG, "channel %u is 802.11b only", channel);
+        return false;
+    }
+
+    const uint8_t proto = protocol_for_rate(modulation_rate, channel);
     esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, proto);
     if (err != ESP_OK)
     {
@@ -241,12 +281,24 @@ bool wifi::initialize()
         return false;
     }
 
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(apply_country());
-    ESP_ERROR_CHECK(esp_wifi_start());
+    if (esp_wifi_init(&cfg) != ESP_OK ||
+        esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
+        esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK ||
+        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "wifi init/mode failed");
+        return false;
+    }
+    if (apply_country() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "wifi country failed");
+        return false;
+    }
+    if (esp_wifi_start() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "wifi start failed");
+        return false;
+    }
     esp_wifi_disconnect();
     if (!tx_.apply_power())
     {
@@ -283,7 +335,7 @@ bool wifi::set_channel(uint8_t channel)
         return false;
     }
 
-    if (channel < 1 || channel > 13)
+    if (!channel_in_range(channel))
     {
         return false;
     }
@@ -294,12 +346,28 @@ bool wifi::set_channel(uint8_t channel)
         return false;
     }
 
+    if (!modulation_ok_for_channel(modulation_rate, channel))
+    {
+        ESP_LOGW(TAG, "channel 14 requires DSSS/CCK");
+        return false;
+    }
+
     const uint8_t previous = this->channel;
     this->channel = channel;
-    const bool ok = apply_channel();
+    bool ok = true;
+    if (channel == 14)
+    {
+        ok = apply_modulation();
+    }
+    if (ok)
+    {
+        ok = apply_channel();
+    }
     if (!ok)
     {
         this->channel = previous;
+        apply_modulation();
+        apply_channel();
     }
 
     return ok;
@@ -321,6 +389,12 @@ bool wifi::set_modulation(const char* name)
     bfc::semaphore::lock guard(lock, pdMS_TO_TICKS(2000));
     if (!guard)
     {
+        return false;
+    }
+
+    if (!modulation_ok_for_channel(entry->rate, channel))
+    {
+        ESP_LOGW(TAG, "channel 14 rejects OFDM");
         return false;
     }
 

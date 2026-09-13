@@ -267,6 +267,9 @@ void otaBegin(manager& netmgr)
     config.server_port = OTA_HTTP_PORT;
     config.core_id = APP_TASK_CORE;
     config.stack_size = 8192;
+    // Default 7 reserves almost all of LWIP_MAX_SOCKETS for OTA sessions.
+    // One concurrent upload is enough; leave fd budget for radio upstreams.
+    config.max_open_sockets = 2;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 30;
     config.send_wait_timeout = 30;

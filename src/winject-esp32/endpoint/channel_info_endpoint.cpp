@@ -63,8 +63,8 @@ void channel_info_endpoint::fanout(const void* data, size_t len)
     ip_port_t copy[k_subscriber_max];
     uint8_t n = 0;
     {
-        bfc::semaphore::lock lock(lock);
-        if (!lock)
+        bfc::semaphore::lock guard(lock);
+        if (!guard)
         {
             return;
         }
@@ -122,8 +122,8 @@ bool channel_info_endpoint::add_subscriber(ip_port_t subscriber)
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
@@ -145,8 +145,8 @@ bool channel_info_endpoint::rem_subscriber(ip_port_t subscriber)
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
@@ -164,22 +164,22 @@ bool channel_info_endpoint::rem_subscriber(ip_port_t subscriber)
     return true;
 }
 
-bool channel_info_endpoint::load(const ip_port_t* subs, uint8_t count)
+bool channel_info_endpoint::load(const ip_port_t* incoming, uint8_t count)
 {
     if (!lock.ready() || count > k_subscriber_max ||
-        (count > 0 && subs == nullptr))
+        (count > 0 && incoming == nullptr))
     {
         return false;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return false;
     }
     n_subs = count;
     if (count > 0)
     {
-        memcpy(subs, subs, count * sizeof(ip_port_t));
+        memcpy(subs, incoming, count * sizeof(ip_port_t));
     }
     for (uint8_t i = count; i < k_subscriber_max; i++)
     {
@@ -199,8 +199,8 @@ void channel_info_endpoint::fill_status(ip_port_t* out, uint8_t* count)
     {
         return;
     }
-    bfc::semaphore::lock lock(lock);
-    if (!lock)
+    bfc::semaphore::lock guard(lock);
+    if (!guard)
     {
         return;
     }
@@ -211,10 +211,10 @@ void channel_info_endpoint::fill_status(ip_port_t* out, uint8_t* count)
     }
 }
 
-void channel_info_endpoint::on_rx_air_info(int8_t rssi, int8_t snr)
+void channel_info_endpoint::on_rx_air_info(int8_t rssi_dbm, int8_t snr_db)
 {
-    rssi.store(rssi, std::memory_order_relaxed);
-    snr.store(snr, std::memory_order_relaxed);
+    rssi.store(rssi_dbm, std::memory_order_relaxed);
+    snr.store(snr_db, std::memory_order_relaxed);
     air_valid.store(true, std::memory_order_relaxed);
 }
 

@@ -18,9 +18,13 @@ class tx_scheduler
 public:
     void configure(uint32_t max_rate_kbps);
     void add(stream* up, wifi_udp* radio, size_t budget);
+    // Update per-upstream inject budget (bytes per scheduler wakeup).
+    bool set_budget(size_t index, size_t budget);
+    bool get_budget(size_t index, size_t* budget) const;
     void tick();
     void log_stats(double interval_sec, const std::vector<stream*>& ups);
     uint64_t take_air_bytes();
+    uint64_t peek_air_bytes() const;
 
 private:
     void refill();

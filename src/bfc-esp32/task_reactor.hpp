@@ -50,7 +50,7 @@ public:
 
     timer_t& get_timer()
     {
-        return timer;
+        return timer_;
     }
 
     bool add_read_rdy(context& ctx, cb_t cb)
@@ -86,8 +86,8 @@ public:
 
     bool is_reactor_thread() const
     {
-        const TaskHandle_t task = task.load(std::memory_order_acquire);
-        return task != nullptr && xTaskGetCurrentTaskHandle() == task;
+        const TaskHandle_t handle = task.load(std::memory_order_acquire);
+        return handle != nullptr && xTaskGetCurrentTaskHandle() == handle;
     }
 
     bool start_pinned(const char* name, BaseType_t core, UBaseType_t prio,
@@ -119,7 +119,7 @@ public:
         {
             TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
             int64_t next_deadline_us = 0;
-            if (timer.get_next_deadline_us(next_deadline_us))
+            if (timer_.get_next_deadline_us(next_deadline_us))
             {
                 const int64_t diff =
                     next_deadline_us - timer_t::current_time_us();
@@ -185,7 +185,7 @@ public:
                 }
             }
 
-            timer.schedule(timer_t::current_time_us());
+            timer_.schedule(timer_t::current_time_us());
         }
         task.store(nullptr, std::memory_order_release);
     }
@@ -202,10 +202,10 @@ public:
             }
         }
 
-        const TaskHandle_t task = task.load(std::memory_order_acquire);
-        if (task != nullptr)
+        const TaskHandle_t handle = task.load(std::memory_order_acquire);
+        if (handle != nullptr)
         {
-            xTaskNotifyGive(task);
+            xTaskNotifyGive(handle);
         }
         else
         {
@@ -227,7 +227,7 @@ private:
     }
 
     uint64_t timeout_ms = 100;
-    timer_t timer;
+    timer_t timer_;
     SemaphoreHandle_t ctx_lock = nullptr;
     SemaphoreHandle_t wake_lock = nullptr;
     std::vector<context*> contexts;

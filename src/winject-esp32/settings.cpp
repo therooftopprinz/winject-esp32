@@ -265,6 +265,14 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
     {
         return false;
     }
+
+    // v4: network/radio only (upstreams were runtime-only).
+    if (version == 4)
+    {
+        return p == end;
+    }
+
+    // v3 and v5: sut / sur / ci tables.
     if (!get8(&snap->sut_count) || snap->sut_count > WIFI_AIRPORT_MAX)
     {
         return false;
@@ -394,9 +402,20 @@ bool settings::apply_snapshot(const snapshot_s& snap)
     radio.set_domain(snap.domain);
     if (radio.ready())
     {
-        if (!radio.set_channel(snap.channel) ||
-            !radio.set_modulation(snap.modulation) ||
-            !radio.set_cca_enabled(snap.cca_enabled) ||
+        // Channel 14 is 802.11b-only: apply DSSS/CCK before switching to 14,
+        // and leave 14 before applying OFDM.
+        bool radio_ok;
+        if (snap.channel == 14)
+        {
+            radio_ok = radio.set_modulation(snap.modulation) &&
+                       radio.set_channel(snap.channel);
+        }
+        else
+        {
+            radio_ok = radio.set_channel(snap.channel) &&
+                       radio.set_modulation(snap.modulation);
+        }
+        if (!radio_ok || !radio.set_cca_enabled(snap.cca_enabled) ||
             !radio.set_allow_failed_crc(snap.allow_failed_crc) ||
             !radio.set_tx_power(snap.tx_power_dbm))
         {
@@ -404,6 +423,8 @@ bool settings::apply_snapshot(const snapshot_s& snap)
             return false;
         }
     }
+
+    // Terminate existing upstreams, then recreate from the snapshot.
     if (!sut.clear())
     {
         ESP_LOGE(TAG, "endpoint apply failed");
@@ -417,8 +438,7 @@ bool settings::apply_snapshot(const snapshot_s& snap)
             return false;
         }
     }
-    if (!sur.load(snap.sur, snap.sur_count) ||
-        !ci.load(snap.ci, snap.ci_count))
+    if (!sur.load(snap.sur, snap.sur_count) || !ci.load(snap.ci, snap.ci_count))
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;
@@ -445,7 +465,7 @@ bool settings::persist_mode(WinjectMode mode)
     }
     if (configured_mode() != WINJECT_MODE_OTA && wifi::instance().ready())
     {
-        // Snapshot live radio/endpoints before flipping into OTA.
+        // Snapshot live radio/ethernet/upstreams before flipping into OTA.
         if (!capture_live(&scratch))
         {
             return false;
