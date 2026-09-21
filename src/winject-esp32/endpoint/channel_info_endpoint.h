@@ -22,6 +22,8 @@ struct tx_flow_ctrl_s
     uint8_t info_type;
     uint8_t tx_queue_size;
     uint8_t tx_queue_capacity;
+    // lc_tx L2 hijack accept count (manager paces host UDP vs EMAC delivery).
+    uint32_t inject_accepted;
 } __attribute__((packed));
 
 struct rx_air_info_s
@@ -52,7 +54,8 @@ public:
     void fill_status(ip_port_t* out, uint8_t* count);
 
     void on_rx_air_info(int8_t rssi, int8_t snr);
-    void on_flow_ctrl_info(uint8_t queue_size, uint8_t queue_cap);
+    void on_flow_ctrl_info(uint8_t queue_size, uint8_t queue_cap,
+                           uint32_t inject_accepted);
 
 private:
     using reactor_t = bfc::task_reactor<>;

@@ -9,7 +9,7 @@
 #include "reactor.h"
 
 // Host-side receiver for ESP32 set_upstream_ci UDP telemetry.
-// Caches the last FLOW_CTRL and RX_AIR samples; no scheduler coupling.
+// Caches the last FLOW_CTRL and RX_AIR samples for gci / scheduler pacing.
 class channel_info
 {
 public:
@@ -24,6 +24,7 @@ public:
         uint8_t info_type;
         uint8_t tx_queue_size;
         uint8_t tx_queue_capacity;
+        uint32_t inject_accepted;
     } __attribute__((packed));
 
     struct rx_air_s
@@ -38,6 +39,8 @@ public:
         bool valid = false;
         uint8_t tx_queue_size = 0;
         uint8_t tx_queue_capacity = 0;
+        uint32_t inject_accepted = 0;
+        bool inject_accepted_valid = false;
         timespec received{};
     };
 

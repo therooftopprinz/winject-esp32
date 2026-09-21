@@ -17,6 +17,12 @@ struct stream_stats_s
     // STREAM TOTAL interval: on-air datagram bytes (FEC shards, TCP headers).
     uint64_t air_tx_bytes = 0;
     uint64_t air_rx_bytes = 0;
+    // Lifetime packet counts (UDP): app ingest, air pull, radio deliver.
+    uint64_t tx_pkt_life = 0;
+    uint64_t rx_pkt_life = 0;
+    uint64_t air_tx_pkt_life = 0;
+    // Lifetime silent drops when txq hit k_max_udp_queue.
+    uint64_t drop_txq = 0;
     size_t queue = 0;
     size_t unacked = 0;
     bool tcp = false;
@@ -53,6 +59,19 @@ public:
         return false;
     }
     virtual size_t pull_tx(uint8_t* out, size_t max, bool* is_ack) = 0;
+    // UDP-style TX queue: copy without dequeue until commit_tx after air send.
+    virtual bool supports_peek_tx() const
+    {
+        return false;
+    }
+    virtual size_t peek_tx(uint8_t* out, size_t max, bool* is_ack)
+    {
+        (void)out;
+        (void)max;
+        (void)is_ack;
+        return 0;
+    }
+    virtual void commit_tx() {}
     virtual void on_tick() {}
     // Queue a radio CLOSE/FIN. Call before the last scheduler tick on exit.
     virtual void announce_down() {}

@@ -2,7 +2,6 @@
 
 #include "config.h"
 #include "dhcp_client.h"
-#include "dhcp_server.h"
 #include "ethernet.h"
 
 #include <strings.h>
@@ -22,9 +21,7 @@ manager& manager::instance()
 }
 
 manager::manager()
-    : eth(ethernet::instance()),
-      dhcp_client(dhcp_client::instance()),
-      dhcp_server(dhcp_server::instance())
+    : eth(ethernet::instance()), dhcp_client(dhcp_client::instance())
 {
 }
 
@@ -65,13 +62,6 @@ uint32_t manager::static_ip() const
     return static_ip_.load(std::memory_order_relaxed);
 }
 
-bool manager::dhcp_server_should_run() const
-{
-    auto is_static = network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_STATIC;
-    auto is_wanted = dhcp_server_wanted.load(std::memory_order_relaxed);
-    return is_static && is_wanted;
-}
-
 bool manager::apply_network_locked()
 {
     if (!eth.ready())
@@ -83,50 +73,20 @@ bool manager::apply_network_locked()
     if (network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_AUTO)
     {
         auto_gen.fetch_add(1, std::memory_order_relaxed);
-        if (eth.netif_is_dhcp_server())
-        {
-            if (!eth.rebuild_dhcp_client())
-            {
-                return false;
-            }
-            netif = eth.netif();
-        }
-        else if (!dhcp_server.stop(netif) || !dhcp_client.start(netif))
+        if (!dhcp_client.start(netif))
         {
             return false;
         }
         eth.set_using_static(false);
         eth.set_connected(eth.has_ipv4());
-        ESP_LOGI(TAG, "network AUTO (dhcp client; dhcps blocked)");
+        ESP_LOGI(TAG, "network AUTO (dhcp client)");
         schedule_static_fallback();
         return true;
     }
 
     cancel_static_fallback();
     auto_gen.fetch_add(1, std::memory_order_relaxed);
-    const uint32_t ip = static_ip();
-    if (dhcp_server_should_run())
-    {
-        if (!eth.netif_is_dhcp_server())
-        {
-            return eth.rebuild_dhcp_server(ip);
-        }
-        return eth.apply_static_ip(ip) && dhcp_server.start(netif, ip);
-    }
-
-    if (eth.netif_is_dhcp_server())
-    {
-        if (!eth.rebuild_dhcp_client())
-        {
-            return false;
-        }
-        netif = eth.netif();
-    }
-    else if (!dhcp_server.stop(netif))
-    {
-        return false;
-    }
-    return eth.apply_static_ip(ip);
+    return eth.apply_static_ip(static_ip());
 }
 
 bool manager::apply_network()
@@ -201,7 +161,6 @@ void manager::bring_up()
 {
     ensure_static_ip();
     eth.begin();
-    dhcp_server.register_events();
     if (!apply_network())
     {
         ESP_LOGE(TAG, "network apply failed");
@@ -330,28 +289,6 @@ bool manager::set_network_mode(NetmgrMode mode)
     return apply_network();
 }
 
-bool manager::dhcp_server_enabled() const
-{
-    return dhcp_server_wanted.load(std::memory_order_relaxed);
-}
-
-bool manager::dhcp_server_active() const
-{
-    return dhcp_server.active();
-}
-
-bool manager::set_dhcp_server_enabled(bool enabled)
-{
-    dhcp_server_wanted.store(enabled, std::memory_order_relaxed);
-    if (network_mode_.load(std::memory_order_relaxed) == NETMGR_MODE_AUTO)
-    {
-        ESP_LOGI(TAG, "dhcps %s (blocked in AUTO)",
-                 enabled ? "enabled" : "disabled");
-        return true;
-    }
-    return apply_network();
-}
-
 bool manager::set_ip(uint32_t ip)
 {
     if (!staticIpValid(ip))
@@ -387,11 +324,6 @@ bool manager::static_ipv4(uint32_t* out) const
     }
     *out = static_ip();
     return true;
-}
-
-bool manager::dhcp_pool(uint32_t* start, uint32_t* end) const
-{
-    return dhcp_server.pool_range(static_ip(), start, end);
 }
 
 bool manager::local_ipv4(uint32_t* out) const

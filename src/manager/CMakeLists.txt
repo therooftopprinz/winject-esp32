@@ -21,6 +21,7 @@ add_executable(winject-manager
     frames/air_seq.cpp
     net_util.cpp
     radio/channel_info.cpp
+    radio/mpdu.cpp
     radio/wifi_udp.cpp
     tx_scheduler.cpp
     endpoint/tcp_endpoint.cpp
@@ -28,12 +29,19 @@ add_executable(winject-manager
     endpoint/tcp_server_endpoint.cpp
     endpoint/udp_endpoint.cpp
     stream/tcp_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../winject-esp32/radio/frame.cpp
 )
 
 target_include_directories(winject-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../winject-esp32
+    ${CMAKE_CURRENT_SOURCE_DIR}/../winject-esp32/radio
+    ${CMAKE_CURRENT_SOURCE_DIR}/../test
     ${bfc_SOURCE_DIR}/src
 )
+
+target_compile_definitions(winject-manager PRIVATE WINJECT_HOST_TEST)
 
 target_compile_options(winject-manager PRIVATE
     -Wall

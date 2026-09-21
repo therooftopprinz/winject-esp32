@@ -7,7 +7,7 @@
 
 namespace
 {
-constexpr size_t k_max_udp_queue = 256;
+constexpr size_t k_max_udp_queue = 1024;
 }
 
 udp_endpoint::~udp_endpoint()
@@ -109,6 +109,7 @@ void udp_endpoint::enqueue_air(std::vector<uint8_t> pkt)
     if (txq.size() >= k_max_udp_queue)
     {
         txq.pop_front();
+        drop_txq++;
     }
     txq.push_back(std::move(pkt));
 }
@@ -152,6 +153,7 @@ void udp_endpoint::on_app()
         app_rx_pkt_interval++;
         app_rx_bytes_interval += static_cast<uint64_t>(n);
         app_rx_bytes_life += static_cast<uint64_t>(n);
+        app_rx_pkt_life++;
         if (fec.enabled())
         {
             std::vector<std::vector<uint8_t>> encoded;
@@ -190,6 +192,7 @@ void udp_endpoint::on_radio_rx(const uint8_t* data, size_t len)
         radio_rx_pkt_interval++;
         radio_rx_bytes_interval += p.size();
         radio_rx_bytes_life += p.size();
+        radio_rx_pkt_life++;
         udp_send_to(sock.fd(), dest, p.data(), p.size());
     }
 }
@@ -286,6 +289,11 @@ stream_stats_s udp_endpoint::peek_stats() const
     s.rx_bytes_life = radio_rx_bytes_life;
     s.air_tx_bytes = air_tx_bytes_interval;
     s.air_rx_bytes = air_rx_bytes_interval;
+    s.tx_pkt_life = app_rx_pkt_life;
+    s.rx_pkt_life = radio_rx_pkt_life;
+    s.air_tx_pkt_life = air_tx_pkt_life;
+    s.drop_txq = drop_txq;
+    s.queue = txq.size();
     s.fec_k = fec.enabled() ? fec.k() : 0;
     s.fec_n = fec.enabled() ? fec.n() : 0;
     s.fec_recovered = fec.recovered();
@@ -312,7 +320,7 @@ bool udp_endpoint::has_tx() const
     return !txq.empty();
 }
 
-size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
+size_t udp_endpoint::peek_tx(uint8_t* out, size_t max, bool* is_ack)
 {
     if (is_ack != nullptr)
     {
@@ -322,14 +330,33 @@ size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
     {
         return 0;
     }
-    auto& pkt = txq.front();
+    const auto& pkt = txq.front();
     if (pkt.size() > max)
     {
         return 0;
     }
     memcpy(out, pkt.data(), pkt.size());
-    const size_t n = pkt.size();
+    return pkt.size();
+}
+
+void udp_endpoint::commit_tx()
+{
+    if (txq.empty())
+    {
+        return;
+    }
+    const size_t n = txq.front().size();
     txq.pop_front();
     air_tx_bytes_interval += n;
+    air_tx_pkt_life++;
+}
+
+size_t udp_endpoint::pull_tx(uint8_t* out, size_t max, bool* is_ack)
+{
+    const size_t n = peek_tx(out, max, is_ack);
+    if (n > 0)
+    {
+        commit_tx();
+    }
     return n;
 }

@@ -15,7 +15,7 @@
 // Local UDP console for runtime manager controls (not the radio console).
 // Binds console_in for commands; always sends replies to console_out.
 // One command datagram = one line. Responses: "ok\n", "ok <args>\n", or
-// "nok:<msg>\n". gci args may span multiple lines in one reply datagram.
+// "nok <msg>\n". gci args may span multiple lines in one reply datagram.
 struct stream_rate_view_s
 {
     size_t index = 0;
@@ -25,6 +25,8 @@ struct stream_rate_view_s
     uint64_t tx_pkt = 0;
     uint64_t rx_pkt = 0;
     uint64_t rx_pkt_loss = 0;
+    uint64_t air_tx_pkt = 0;
+    uint64_t drop_txq = 0;
     char fec[32] = "none";
     bool tcp = false;
     size_t queue = 0;

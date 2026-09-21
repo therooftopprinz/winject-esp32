@@ -11,26 +11,32 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+# Put WiFi on core 1 with tcpip; leave core 0 freer for EMAC DMA/ISR.
 CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
 
 # Keep RF on while STA is disconnected (monitor/inject, no AP association).
 # CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set
 
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+# Legacy OFDM_54M inject delivers shorter, burstier MPDUs; default 4+16 RX
+# buffers drops promisc callbacks before wifi_rx (USB mon0 still sees air).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
-# Raw 802.11 inject is one MPDU per datagram; AMPDU RX/TX is unused and
-# can confuse promiscuous HT decode.
-CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+# Cap WiFi TX DMA buffers — large rings contend with EMAC RX under inject.
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# Raw inject is one MPDU per datagram (TX AMPDU off). RX AMPDU must stay on so
+# HT MCS frames reach promiscuous with Addr3 at offset 16 (off → MCS4 peer RX=0).
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_AMSDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_IRAM_OPT=y
 CONFIG_ESP_WIFI_RX_IRAM_OPT=y
 CONFIG_LWIP_IRAM_OPTIMIZATION=y
 
-CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
+# Inject floods ~90 pkt/s×burst under WiFi NO_MEM; 64 mbox ≈ 64×MTU and
+# caps SO_RCVBUF usefulness. 128 matches LC_TX_SOCK_RCVBUF ≈ 128 KiB.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_SO_RCVBUF=y
 
 # App needs: HTTP OTA (+3 internal), console listen+clients, reactor wake
@@ -43,7 +49,9 @@ CONFIG_LWIP_DHCPS_MAX_STATION_NUM=64
 
 CONFIG_ETH_USE_ESP32_EMAC=y
 CONFIG_ETH_DMA_BUFFER_SIZE=1600
-CONFIG_ETH_DMA_RX_BUFFER_NUM=16
+# Extra RX descriptors so EMAC can hold frames while WiFi TX owns the bus.
+# 24 + deep staging starved heap (~5KB) and hung .9 — keep at 20.
+CONFIG_ETH_DMA_RX_BUFFER_NUM=28
 CONFIG_ETH_DMA_TX_BUFFER_NUM=16
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -52,3 +60,4 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ETH_SOFT_FLOW_CONTROL=y

@@ -5,15 +5,19 @@
 
 #define DEVICE_HOSTNAME "winject-esp32"
 
-// WT32-ETH01 LAN8720 wiring.
-// If link never comes up, set ETH_CLK_GPIO17_OUT instead of ETH_CLK_GPIO0_IN.
+// LAN8720 RMII wiring (PHY addr / MDC / MDIO / power shared).
+// RMII REF_CLK is selected by PlatformIO env (see platformio.ini):
+//   wt32-eth01  → ETH_CLK_GPIO0_IN   (external 50 MHz into GPIO0)
+//   lan-module  → ETH_CLK_GPIO17_OUT (ESP32 APLL clock out on GPIO17)
 #define ETH_PHY_ADDR 1
 #define ETH_PHY_MDC 23
 #define ETH_PHY_MDIO 18
 #define ETH_PHY_POWER 16
 #define ETH_CLK_GPIO0_IN 0
 #define ETH_CLK_GPIO17_OUT 1
+#ifndef ETH_CLK_MODE
 #define ETH_CLK_MODE ETH_CLK_GPIO0_IN
+#endif
 
 // WT32-ETH01 UART2 LEDs, active-low (LED on when GPIO is 0).
 // LED4 / silk TXD = IO17 = WiFi TX. LED3 / silk RXD = IO5 = WiFi RX.
@@ -29,17 +33,39 @@
 // Stretch must exceed indicator_led poll (10 ms) or TX/RX pulses are invisible.
 #define WIFI_LED_STRETCH_US 1 * 1000u
 
-// TCP control-plane console.
-#define CONTROL_CONSOLE_PORT 2323
+// UDP control-plane console.
+#define CONTROL_CONSOLE_PORT 22
+// Max ether_test_* binary payload (fits one Ethernet UDP datagram with header).
+#define ETHER_TEST_MAX 1400
+// Dedicated Ethernet flood bench (not console RTT). UDP payload incl. 8-byte hdr.
+#define ETHER_BENCH_PORT 2223
+#define ETHER_BENCH_HDR 8
+#define ETHER_BENCH_MAX 1472
+#define ETHER_BENCH_MAGIC 0xEB01u
+// Must stay below CONFIG_LWIP_TCPIP_TASK_PRIO (18) or the flood starves
+// lwIP/EMAC and exhausts RX buffers ("esp.emac: no mem for receive buffer").
+// TX stays below tcpip (18) so device→host flood does not starve lwIP/EMAC.
+// RX bench at 18 matches tcpip so host→device can dequeue as fast as UDP
+// is posted (still yields in rx_task for TWDT).
+#define ETHER_BENCH_RX_TASK_PRIO 18
+#define ETHER_BENCH_TX_TASK_PRIO 17
+#define ETHER_BENCH_TASK_STACK 2048
+#define ETHER_BENCH_SOCK_BUF 128 * 1024
+#define ETHER_BENCH_RX_YIELD_EVERY 32
 
-// AUTO: if the DHCP client has no lease by this time, apply the static
-// Ethernet address (no DHCP server). DHCP server is STATIC-only and off
-// until set_enable_dhcp_server. Pool is host .1–.64 except the device host
-// if it lands in that range. .65–.254 are for static/external use.
+// AUTO: if the DHCP client has no lease by this time, apply set_ip /
+// ETH_FALLBACK_ADDR as a static /24. Host must be on that subnet (or use
+// DHCP on a LAN that leases the radio). The radio never runs a DHCP server.
+//
+// Bench (192.168.253.0/24, server .1), 2026-09-17:
+//   DORA DISCOVER→ACK ≈ 36–50 ms (p50 ≈ 40 ms).
+// ESP-IDF then runs DHCP ARP conflict check (acd_dhcp_check.c): two probes
+// at ACD_DHCP_ARP_REPLY_TIMEOUT_MS=500 → ≈ 1000 ms before GOT_IP / has_ipv4.
+// Quiet path ≈ 1.05 s, but WiFi init overlaps DHCP on boot and can push
+// GOT_IP past ~1.5 s — a tight timer then kills dhcpc mid-ACD and pins
+// 192.168.32.1 on the LAN (unreachable). Keep several seconds of margin.
 #define DHCP_FALLBACK_MS 5000
 #define ETH_FALLBACK_ADDR 192, 168, 32, 1
-#define ETH_FALLBACK_DHCP_HOST_MIN 1
-#define ETH_FALLBACK_DHCP_HOST_MAX 64
 
 // HTTP firmware update. GET / form, POST /update blob.
 #define OTA_HTTP_PORT 80
@@ -51,15 +77,37 @@
 #define WIFI_RADIO_TASK_PRIO 20
 #define UPSTREAM_TASK_PRIO 18
 #define NETMGR_TASK_PRIO 6
+// Inject flush. Below CONFIG_LWIP_TCPIP_TASK_PRIO (18).
+#define LC_TX_DRAIN_TASK_PRIO 17
+#define LC_TX_DRAIN_TASK_STACK 4096
+// Inject UDP SO_RCVBUF (bytes). bfc::socket::open_udp defaults to 64 KiB;
+// keep this ≥ that. Pair with CONFIG_LWIP_UDP_RECVMBOX_SIZE so the mailbox
+// can hold ~RCVBUF/MTU datagrams under WiFi TX backpressure.
+#define LC_TX_SOCK_RCVBUF (64 * 1024)
+// Staging ring: raw UDP callback copies here; flush task feeds wifi_tx.
+// Must absorb short WiFi TX stalls (mbox is no longer in the path).
+#define LC_TX_STAGING_DEPTH 16
+// Upstream (sut) flush: move this many frames to wifi_tx, then pause so
+// EMAC can RX while WiFi DMA is idle. Same duty as the former wifi_tx gap
+// (~14% at MCS7) — lives on the upstream_tx path, not in the radio TX task.
+#define LC_TX_FLUSH_BATCH 8
+#define LC_TX_EMAC_GAP_TICKS 0
 
 // Raw 802.11 radio.
 #define WIFI_RADIO_MAX_FRAME 1600
 #define WIFI_RADIO_INJECT_MIN 24
 #define WIFI_RADIO_INJECT_MAX 1500
-// Pool BSS ≈ depth×1600; keep TX/RX depth matched to lc_tx / lc_rx queues.
-#define WIFI_RADIO_RX_QUEUE 16
-#define WIFI_RADIO_TX_QUEUE 16
+// Pool storage is sized per-direction (see packet_allocator init).
+#define WIFI_RADIO_RX_QUEUE 8
+#define WIFI_RADIO_TX_QUEUE 20
 #define WIFI_RADIO_INJECT_RETRIES 8
+// Cap outstanding 802.11 TX before submitting another — avoids NO_MEM storms
+// that thrash the WiFi DMA and starve EMAC RX. Do not raise without re-checking
+// ETH→sut goodput (see docs/winject.md#ethwifi-tx-performance).
+#define WIFI_RADIO_MAX_IN_FLIGHT 4
+// NO_MEM: yield this many times before a 1-tick sleep (driver ring recovery).
+// Higher helps sustain ~MCS7 30 Mbps inject without thrashing on 1 ms sleeps.
+#define WIFI_RADIO_INJECT_NOMEM_YIELD 48
 #define WIFI_CHANNEL_MIN 1
 #define WIFI_CHANNEL_MAX 14
 #define WIFI_DEFAULT_CHANNEL 1
@@ -67,6 +115,9 @@
 #define WIFI_DEFAULT_TX_POWER_DBM 20
 #define WIFI_TX_POWER_DBM_MIN 2
 #define WIFI_TX_POWER_DBM_MAX 20
+// Legacy 64-QAM (48M/54M) raw inject clips above this; peer promisc RX fails
+// while USB monitor still looks fine at 20 dBm.
+#define WIFI_TX_POWER_64QAM_LEGACY_MAX_DBM 13
 
 #define WIFI_HDR_LEN 24
 #define WIFI_QOS_HDR_LEN 26

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start winject-manager on both radios and measure TCP goodput with iperf3
-# through manager TCP forwarding (same ports as manager_tcp_bw_test.sh).
+# through manager TCP forwarding (same ports as manager_bw_test.sh --tcp).
 #
 # Why mux/demux: iperf3 opens a control socket + a data socket. The manager
 # TCP_SERVER keeps only one client (second connect replaces the first →
@@ -243,7 +243,7 @@ if [[ ! -f "$MUX_TOOL" ]]; then
 fi
 
 if [[ "$HOST_SET" -eq 0 ]]; then
-  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 2323)); print(s.getsockname()[0]); s.close()")"
+  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 22)); print(s.getsockname()[0]); s.close()")"
 fi
 
 ensure_winject_manager "$ROOT"

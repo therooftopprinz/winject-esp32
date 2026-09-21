@@ -12,7 +12,7 @@ if [[ "${1:-}" == "--all" ]]; then
   LOG_A="$(ls -td /tmp/winject-manager-*/manager_a.log 2>/dev/null | head -1)"
   LOG_B="$(ls -td /tmp/winject-manager-*/manager_b.log 2>/dev/null | head -1)"
   if [[ -z "$LOG_A" || -z "$LOG_B" ]]; then
-    echo "no /tmp/winject-manager-* logs found; start manager_tcp_bw_test.sh first" >&2
+    echo "no /tmp/winject-manager-* logs found; start manager_bw_test.sh first" >&2
     exit 1
   fi
   echo "watching A=$LOG_A  B=$LOG_B"

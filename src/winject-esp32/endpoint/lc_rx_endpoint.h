@@ -12,7 +12,6 @@
 
 struct lc_rx_bind_s
 {
-    bus_t bus;
     ip_port_t dest;
     bool active;
     uint32_t drop_send_fail;
@@ -27,30 +26,21 @@ public:
 
     bool init();
 
-    bool add_endpoint(bus_t bus, ip_port_t dest);
-    bool rem_endpoint(bus_t bus);
-    bool load(const lc_rx_bind_s* binds, uint8_t count);
-    void fill_status(lc_rx_bind_s* out, uint8_t* count);
+    bool set_endpoint(ip_port_t dest);
+    bool clear();
+    bool get_status(lc_rx_bind_s* out);
 
-    void forward(bus_t bus, packet&& pdu);
+    void forward(packet&& mpdu);
 
 private:
     lc_rx_endpoint() = default;
 
-    struct entry_s
-    {
-        bool used = false;
-        bus_t bus = 0;
-        ip_port_t dest{};
-        std::atomic<uint32_t> drop_send_fail{0};
-    };
-
     bool ensure_socket();
-    void send_one(entry_s& e, const uint8_t* data, size_t len);
-    int find_exact(bus_t bus, ip_port_t dest) const;
-    int find_free() const;
+    void send_one(ip_port_t d, const uint8_t* data, size_t len);
 
-    entry_s ep[WIFI_AIRPORT_MAX];
+    bool used = false;
+    ip_port_t dest{};
+    std::atomic<uint32_t> drop_send_fail{0};
     bfc::socket send_sock;
     bfc::semaphore lock;
 };

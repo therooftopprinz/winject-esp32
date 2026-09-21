@@ -1,0 +1,821 @@
+#!/usr/bin/env python3
+"""ESP32 wifi_bench: wifi_tx on sender, wifi_rx on peer (and optional USB monitor).
+
+Does not invoke scripts/usb_wifi_logger.py. Radio metrics come from UDP console
+(inject_ok on TX, wifi_accept on RX). With --with-usb, a minimal in-process
+AF_PACKET sniffer counts WInject Addr3 prefix bytes on a monitor iface.
+
+ESP32 inject is 2.4 GHz only (channels 1–14). Dual-band USB adapters must be
+taken out of NetworkManager client mode and tuned to the bench channel before
+sniffing (--with-usb does this; use --usb-wifi wlx… if needed).
+
+Example:
+  sudo ./scripts/esp32_wifi_bench --a 192.168.253.9 --b 192.168.253.14 \\
+      --test-ab --test-ba --with-usb --usb-wifi wlx3c789537952a \\
+      --modulation OFDM_MCS7_LGI --count 15000
+  # paced offer:
+  #   ... --paced --kbps 24000
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+ETH_P_ALL = 3
+DEFAULT_MONITOR_NAME = "mon0"
+WIFI_HDR_LEN = 24
+PREFIX_STANDALONE = bytes.fromhex("cafebabe")
+PREFIX_TUNNEL = bytes.fromhex("baddcafe")
+
+# wifi_bench → wifi_tx only (no lc_tx). Raise max_in_flight above firmware
+# default (4); no EMAC on this path so 12 is safe for peak inject.
+WIFI_BENCH_INJECT_TUNE = (
+    "set_inject_tune emac_gap_ticks=0 max_in_flight=12 staging_margin=4 flush_batch=8"
+)
+
+# Rough floor for flood-mode wait timeout (bytes / assumed Mbps).
+FLOOD_EST_MBPS = 28.0
+
+def cons(ip: str, cmd: str, timeout: float = 5.0, need_reply: bool = True) -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto((cmd + "\n").encode(), (ip, 22))
+        if not need_reply:
+            return ""
+        return s.recvfrom(65535)[0].decode(errors="replace")
+    except socket.timeout:
+        if not need_reply:
+            return ""
+        raise
+    finally:
+        s.close()
+
+
+def gi(text: str, key: str) -> int:
+    m = re.search(rf"(?:^|\s){re.escape(key)}=(\d+)", text)
+    return int(m.group(1)) if m else 0
+
+
+def gi_wifi_accept(text: str) -> int:
+    """channel_rx promisc accept counter (wifi_accept; udp_accept on older FW)."""
+    if re.search(r"(?:^|\s)wifi_accept=\d", text):
+        return gi(text, "wifi_accept")
+    return gi(text, "udp_accept")
+
+
+def wait_bench_idle(ip: str, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            wbs = cons(ip, "wifi_bench_status", timeout=8.0)
+            if "running=0" in wbs:
+                return
+        except (TimeoutError, OSError):
+            pass
+        time.sleep(0.4)
+
+
+def bench_stop(ip: str) -> None:
+    cons(ip, "wifi_bench_stop", timeout=2.0, need_reply=False)
+    wait_bench_idle(ip, timeout_s=25.0)
+
+
+def prep_radio(
+    ip: str,
+    channel: int,
+    modulation: str,
+    domain: str,
+    tx_power_dbm: int | None = None,
+    inject_tune: str | None = WIFI_BENCH_INJECT_TUNE,
+) -> None:
+    bench_stop(ip)
+    cmds: list[str] = [
+        "set_mode STANDALONE",
+        f"set_domain {domain}",
+        f"set_channel {channel}",
+        f"set_modulation {modulation}",
+    ]
+    if tx_power_dbm is not None:
+        cmds.append(f"set_tx_power {tx_power_dbm}")
+    cmds.extend(
+        (
+            "set_cca_enabled 0",
+            "set_inject_sink wifi",
+            "unset_upstream_tx",
+            "unset_upstream_rx",
+        )
+    )
+    if inject_tune:
+        cmds.append(inject_tune)
+    for cmd in cmds:
+        reply = cons(ip, cmd, timeout=8.0)
+        if not reply.strip().lower().startswith("ok"):
+            raise RuntimeError(f"{ip}: {cmd} -> {reply.strip()[:120]}")
+
+
+def payload_kbps(byte_delta: int, payload_bytes: int, elapsed_us: int) -> float:
+    if elapsed_us <= 0 or byte_delta <= 0:
+        return 0.0
+    return 8.0 * byte_delta * payload_bytes / elapsed_us * 1e6 / 1000.0
+
+
+def parse_domain_hex(text: str) -> int:
+    s = text.strip().lower()
+    return int(s, 16) if s.startswith("0x") else int(s, 16)
+
+
+def addr3_prefixes_for_mode(mode: str) -> tuple[bytes, ...]:
+    key = mode.strip().lower()
+    if key in ("tunnel", "bfc", "bfc_tunnel_device"):
+        return (PREFIX_TUNNEL,)
+    if key in ("both", "all"):
+        return (PREFIX_STANDALONE, PREFIX_TUNNEL)
+    return (PREFIX_STANDALONE,)
+
+
+def mpdu_addr3_and_body_len(pkt: bytes) -> tuple[bytes | None, int]:
+    if len(pkt) < 4:
+        return None, 0
+    rt_len = struct.unpack_from("<H", pkt, 2)[0]
+    if rt_len > len(pkt) or len(pkt) < rt_len + WIFI_HDR_LEN:
+        return None, 0
+    mpdu = pkt[rt_len:]
+    fc = struct.unpack_from("<H", mpdu, 0)[0]
+    if ((fc >> 2) & 0x3) != 2:
+        return None, 0
+    qos = ((fc >> 4) & 0xF) == 8
+    hdr_len = 26 if qos else WIFI_HDR_LEN
+    if len(mpdu) < hdr_len:
+        return None, 0
+    addr3 = mpdu[16:22]
+    body_len = len(mpdu) - hdr_len
+    if body_len > 4:
+        body_len -= 4  # FCS not in monitor capture payload length heuristic
+    return addr3, max(0, body_len)
+
+
+@dataclass(frozen=True)
+class IfaceInfo:
+    name: str
+    iftype: str
+    phy: str
+
+
+def run_cmd(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args,
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"command not found: {args[0]}") from exc
+
+
+def run_iw(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    return run_cmd(args, check=check)
+
+
+def ip_link(*args: str, check: bool = False) -> None:
+    run_cmd(["ip", "link", *args], check=check)
+
+
+def parse_iw_dev() -> list[IfaceInfo]:
+    proc = run_iw(["iw", "dev"], check=True)
+    cur_phy = ""
+    cur_name: str | None = None
+    out: list[IfaceInfo] = []
+    for line in proc.stdout.splitlines():
+        s = line.strip()
+        if s.startswith("phy#"):
+            cur_phy = "phy" + s.split("#", 1)[1]
+        elif s.startswith("Interface "):
+            cur_name = s.split()[1]
+        elif s.startswith("type ") and cur_name and cur_phy:
+            out.append(IfaceInfo(cur_name, s.split()[1], cur_phy))
+            cur_name = None
+    return out
+
+
+def iface_info_text(iface: str) -> str:
+    try:
+        return subprocess.check_output(["iw", "dev", iface, "info"], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def iface_channel(iface: str) -> int | None:
+    m = re.search(r"channel (\d+)", iface_info_text(iface))
+    return int(m.group(1)) if m else None
+
+
+def iface_freq_mhz(iface: str) -> int | None:
+    m = re.search(r"channel \d+ \((\d+) MHz\)", iface_info_text(iface))
+    return int(m.group(1)) if m else None
+
+
+def usb_adapter_description(iface: str) -> str:
+    dev = Path(f"/sys/class/net/{iface}/device")
+    if not dev.exists():
+        return f"net:{iface}"
+    prod = ""
+    uevent = dev / "uevent"
+    if uevent.is_file():
+        for line in uevent.read_text().splitlines():
+            if line.startswith("PRODUCT="):
+                prod = line.split("=", 1)[1].strip().replace("/", ":").lower()
+                break
+    if prod:
+        parts = prod.split(":")
+        vidpid = f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else prod
+        return f"USB {vidpid}"
+    return f"net:{iface}"
+
+
+def phy_for_iface(iface: str) -> str | None:
+    for info in parse_iw_dev():
+        if info.name == iface:
+            return info.phy
+    return None
+
+
+def disable_nm_autoconnect(device: str) -> None:
+    proc = run_cmd(
+        ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+        check=False,
+    )
+    for line in proc.stdout.splitlines():
+        if ":" not in line:
+            continue
+        name, dev = line.split(":", 1)
+        if dev == device and name:
+            run_cmd(
+                [
+                    "nmcli",
+                    "connection",
+                    "modify",
+                    name,
+                    "connection.autoconnect",
+                    "no",
+                ],
+                check=False,
+            )
+
+
+def delete_iface(name: str) -> None:
+    ip_link("set", name, "down")
+    run_iw(["iw", "dev", name, "del"], check=False)
+
+
+def modprobe_usb_wifi_driver() -> None:
+    run_cmd(["modprobe", "-r", "88x2bu"], check=False)
+    run_cmd(["modprobe", "-r", "rtw88_8822bu"], check=False)
+    time.sleep(0.5)
+    run_cmd(["modprobe", "rtw88_8822bu"], check=False)
+
+
+def wait_for_usb_iface(
+    wifi_iface: str | None, timeout_s: float = 10.0
+) -> IfaceInfo:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ifaces = parse_iw_dev()
+        if wifi_iface:
+            for info in ifaces:
+                if info.name == wifi_iface:
+                    return info
+        for info in ifaces:
+            if info.name.startswith(("wl", "wlan")):
+                return info
+        time.sleep(0.4)
+    names = [i.name for i in parse_iw_dev()]
+    raise RuntimeError(
+        "no USB WiFi netdev (wl*/wlan*). Plug in the dongle or pass --usb-wifi; "
+        f"try --usb-reset-driver. seen={names!r}"
+    )
+
+
+def release_nm_wifi(ifaces: list[str]) -> None:
+    """Let iw own the USB NIC (NetworkManager often blocks channel changes)."""
+    run_cmd(["rfkill", "unblock", "wifi"], check=False)
+    run_cmd(["rfkill", "unblock", "all"], check=False)
+    for name in ifaces:
+        if not name:
+            continue
+        run_cmd(["nmcli", "device", "set", name, "managed", "no"], check=False)
+        run_cmd(["nmcli", "device", "disconnect", name], check=False)
+    time.sleep(0.4)
+
+
+def on_24ghz_channel(iface: str, channel: int) -> bool:
+    freq = iface_freq_mhz(iface)
+    ch = iface_channel(iface)
+    if freq is None or freq > 3000:
+        return False
+    return ch == channel
+
+
+def configure_24ghz_monitor(iface: str, phy: str, channel: int) -> list[str]:
+    """Force dual-band USB hardware onto 2.4 GHz for ESP bench (down and up)."""
+    freq = 2407 + channel * 5
+    errors: list[str] = []
+
+    def attempt(link_up: bool) -> bool:
+        if link_up:
+            ip_link("set", iface, "up")
+            time.sleep(0.15)
+        else:
+            ip_link("set", iface, "down")
+        cmd_lists = [
+            ["iw", "dev", iface, "set", "type", "monitor"],
+            ["iw", "dev", iface, "set", "freq", str(freq), "HT20"],
+            ["iw", "dev", iface, "set", "channel", str(channel), "HT20"],
+            ["iw", "dev", iface, "set", "freq", str(freq), "NOHT"],
+            ["iw", phy, "set", "freq", str(freq), "HT20"],
+            ["iw", phy, "set", "channel", str(channel), "HT20"],
+        ]
+        for args in cmd_lists:
+            proc = run_iw(args, check=False)
+            if proc.returncode != 0:
+                msg = (proc.stderr or proc.stdout or "").strip()
+                if msg:
+                    errors.append(f"{' '.join(args)}: {msg}")
+            if on_24ghz_channel(iface, channel):
+                return True
+        return False
+
+    if attempt(False):
+        ip_link("set", iface, "up")
+        return errors
+    attempt(True)
+    return errors
+
+
+def set_monitor_channel(iface: str, channel: int) -> list[str]:
+    phy = phy_for_iface(iface)
+    if phy is None:
+        return ["no phy for interface"]
+    return configure_24ghz_monitor(iface, phy, channel)
+
+
+def assert_usb_on_esp_channel(iface: str, esp_channel: int) -> None:
+    if esp_channel > 14:
+        return
+    freq = iface_freq_mhz(iface)
+    ch = iface_channel(iface)
+    usb = usb_adapter_description(iface)
+    if freq is not None and freq > 3000:
+        raise RuntimeError(
+            f"USB monitor {iface} is still on {freq} MHz (ch {ch}); ESP bench "
+            f"needs 2.4 GHz channel {esp_channel}. {usb}. "
+            "NetworkManager may have re-associated on 5 GHz — rerun with sudo, "
+            "pass --usb-wifi, or try --usb-reset-driver."
+        )
+    if ch != esp_channel:
+        raise RuntimeError(
+            f"USB monitor {iface} is on channel {ch} (not {esp_channel}). "
+            f"{usb}. Check --usb-wifi and that nothing else controls the dongle."
+        )
+
+
+@dataclass
+class UsbMonitorBringup:
+    """Create or retune a USB WiFi monitor iface for the bench channel."""
+
+    monitor_iface: str
+
+    @classmethod
+    def setup(
+        cls,
+        channel: int,
+        monitor_name: str,
+        wifi_iface: str | None,
+        reset_driver: bool = False,
+    ) -> UsbMonitorBringup:
+        if reset_driver:
+            modprobe_usb_wifi_driver()
+            time.sleep(1.5)
+
+        usb = wait_for_usb_iface(wifi_iface)
+        phy = usb.phy
+        names_on_phy = [i.name for i in parse_iw_dev() if i.phy == phy]
+        release_nm_wifi(names_on_phy + [monitor_name, DEFAULT_MONITOR_NAME])
+        for name in names_on_phy:
+            disable_nm_autoconnect(name)
+
+        # One netdev per phy: drop stale mon0/wlan_tmp duplicates, then monitor.
+        for info in list(parse_iw_dev()):
+            if info.phy == phy:
+                delete_iface(info.name)
+        time.sleep(0.35)
+
+        proc = run_iw(
+            ["iw", phy, "interface", "add", monitor_name, "type", "monitor"],
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"iw {phy} interface add {monitor_name}: {err}")
+
+        iw_errs = configure_24ghz_monitor(monitor_name, phy, channel)
+        ch = iface_channel(monitor_name)
+        freq = iface_freq_mhz(monitor_name)
+        usb_desc = usb_adapter_description(monitor_name)
+        print(
+            f"USB monitor: {monitor_name}  {usb_desc}  "
+            f"channel={ch} freq={freq}MHz (target 2.4GHz ch {channel})",
+            flush=True,
+        )
+        for line in iw_errs[-6:]:
+            print(f"USB iw: {line}", file=sys.stderr)
+        assert_usb_on_esp_channel(monitor_name, channel)
+        return cls(monitor_name)
+
+
+class UsbWinjectSniffer:
+    """Minimal WInject frame counter on a monitor iface (no usb_wifi_logger)."""
+
+    def __init__(
+        self,
+        iface: str,
+        channel: int,
+        prefixes: tuple[bytes, ...],
+        domain: int,
+    ) -> None:
+        self.iface = iface
+        self.channel = channel
+        self.prefixes = prefixes
+        self.domain = domain
+        self.body_bytes = 0
+        self.frames = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._err: str | None = None
+
+    def start(self) -> None:
+        set_monitor_channel(self.iface, self.channel)
+        self._thread = threading.Thread(target=self._run, name="usb_sniff", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+    def _matches(self, addr3: bytes) -> bool:
+        matched = False
+        for p in self.prefixes:
+            if len(p) == 4 and addr3[:4] == p:
+                matched = True
+                break
+            if len(p) == 6 and addr3 == p:
+                matched = True
+                break
+        if not matched:
+            return False
+        if self.domain:
+            got = (addr3[4] << 8) | addr3[5]
+            return got == self.domain
+        return True
+
+    def _run(self) -> None:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
+            sock.bind((self.iface, 0))
+            sock.settimeout(0.25)
+            while not self._stop.is_set():
+                try:
+                    pkt = sock.recv(65535)
+                except socket.timeout:
+                    continue
+                addr3, body_len = mpdu_addr3_and_body_len(pkt)
+                if addr3 is None or not self._matches(addr3):
+                    continue
+                self.frames += 1
+                self.body_bytes += body_len
+        except OSError as exc:
+            self._err = str(exc)
+        finally:
+            if sock is not None:
+                sock.close()
+
+
+@dataclass
+class BenchRow:
+    sender: str
+    receiver: str
+    tx_inject_kbps: float
+    rx_kbps: float
+    usb_rx_kbps: float | None
+    inject_delta: int
+    rx_delta: int
+    elapsed_us: int
+    enq_ok: int
+    enq_fail: int
+
+
+def run_direction(
+    sender: str,
+    receiver: str,
+    *,
+    size: int,
+    count: int,
+    kbps: int,
+    channel: int,
+    modulation: str,
+    domain: str,
+    with_usb: bool,
+    usb_monitor_iface: str | None,
+    usb_prefixes: tuple[bytes, ...],
+    air_domain: int,
+    tx_power_dbm: int | None = None,
+    inject_tune: str | None = WIFI_BENCH_INJECT_TUNE,
+) -> BenchRow:
+    prep_radio(sender, channel, modulation, domain, tx_power_dbm, inject_tune)
+    prep_radio(receiver, channel, modulation, domain, tx_power_dbm, inject_tune)
+    cons(receiver, "reset_promisc_stats", timeout=8.0)
+
+    inj0 = gi(cons(sender, "status", timeout=10.0), "inject_ok")
+    acc0 = gi_wifi_accept(cons(receiver, "status", timeout=10.0))
+
+    usb: UsbWinjectSniffer | None = None
+    if with_usb and usb_monitor_iface:
+        set_monitor_channel(usb_monitor_iface, channel)
+        usb = UsbWinjectSniffer(
+            usb_monitor_iface, channel, usb_prefixes, air_domain
+        )
+        usb.start()
+        time.sleep(0.2)
+
+    cons(
+        sender,
+        f"wifi_bench_tx size={size} count={count} kbps={kbps}",
+        timeout=1.0,
+        need_reply=False,
+    )
+    if kbps <= 0:
+        est_s = (count * size * 8) / (FLOOD_EST_MBPS * 1e6) + 5.0
+    else:
+        est_s = (count * size * 8) / (kbps * 1000.0) + 2.0
+    wait_bench_idle(sender, timeout_s=est_s + 45.0)
+    wbs = cons(sender, "wifi_bench_status", timeout=20.0)
+
+    if usb:
+        usb.stop()
+        if usb._err:
+            print(f"warning: USB sniff on {usb.iface}: {usb._err}", file=sys.stderr)
+        elif usb.frames == 0:
+            print(
+                f"warning: USB monitor {usb.iface} saw 0 WInject frames "
+                f"(channel {channel} — check antenna / band)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"USB monitor {usb.iface}: {usb.frames} frames, "
+                f"{usb.body_bytes} payload bytes",
+                flush=True,
+            )
+
+    inj1 = gi(cons(sender, "status", timeout=20.0), "inject_ok")
+    acc1 = gi_wifi_accept(cons(receiver, "status", timeout=20.0))
+
+    el_m = re.search(r"elapsed_us=(-?\d+)", wbs)
+    enq_m = re.search(r"enq_ok=(\d+)", wbs)
+    fail_m = re.search(r"enq_fail=(\d+)", wbs)
+    elapsed_us = int(el_m.group(1)) if el_m else 0
+    enq_ok = int(enq_m.group(1)) if enq_m else 0
+    enq_fail = int(fail_m.group(1)) if fail_m else 0
+
+    inject_delta = inj1 - inj0
+    rx_delta = acc1 - acc0
+    payload = size - 24
+    tx_kbps = payload_kbps(inject_delta, payload, elapsed_us)
+    rx_kbps = payload_kbps(rx_delta, payload, elapsed_us)
+
+    usb_kbps: float | None = None
+    if usb is not None:
+        if elapsed_us > 0 and usb.body_bytes > 0:
+            usb_kbps = 8.0 * usb.body_bytes / elapsed_us * 1e6 / 1000.0
+        else:
+            usb_kbps = 0.0
+
+    return BenchRow(
+        sender=sender,
+        receiver=receiver,
+        tx_inject_kbps=tx_kbps,
+        rx_kbps=rx_kbps,
+        usb_rx_kbps=usb_kbps,
+        inject_delta=inject_delta,
+        rx_delta=rx_delta,
+        elapsed_us=elapsed_us,
+        enq_ok=enq_ok,
+        enq_fail=enq_fail,
+    )
+
+
+def print_results_table(rows: list[BenchRow], with_usb: bool) -> None:
+    headers = ["Sender", "Receiver", "TX inject kbps", "RX kbps"]
+    if with_usb:
+        headers.append("USB RX kbps")
+
+    data: list[list[str]] = []
+    for r in rows:
+        line = [
+            r.sender,
+            r.receiver,
+            f"{r.tx_inject_kbps:.1f}",
+            f"{r.rx_kbps:.1f}",
+        ]
+        if with_usb:
+            if r.usb_rx_kbps is None:
+                line.append("—")
+            else:
+                line.append(f"{r.usb_rx_kbps:.1f}")
+        data.append(line)
+
+    widths = [len(h) for h in headers]
+    for line in data:
+        for i, cell in enumerate(line):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt_row(cells: list[str], numeric_from: int = 2) -> str:
+        parts: list[str] = []
+        for i, cell in enumerate(cells):
+            if i >= numeric_from:
+                parts.append(cell.rjust(widths[i]))
+            else:
+                parts.append(cell.ljust(widths[i]))
+        return "| " + " | ".join(parts) + " |"
+
+    rule = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+    print("=== results ===")
+    print(fmt_row(headers, numeric_from=len(headers)))
+    print(rule)
+    for line in data:
+        print(fmt_row(line))
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="ESP32 wifi_bench A↔B (radio counters + optional USB)")
+    p.add_argument("--a", required=True, help="sender IP for A→B (and receiver for B→A)")
+    p.add_argument("--b", required=True, help="receiver IP for A→B (and sender for B→A)")
+    p.add_argument("--test-ab", action="store_true", help="run A → B")
+    p.add_argument("--test-ba", action="store_true", help="run B → A")
+    p.add_argument(
+        "--with-usb",
+        action="store_true",
+        help="bring USB WiFi to monitor mode and count WInject frames",
+    )
+    p.add_argument(
+        "--iface",
+        default=DEFAULT_MONITOR_NAME,
+        help=f"monitor iface name to use or create (default: {DEFAULT_MONITOR_NAME})",
+    )
+    p.add_argument(
+        "--usb-wifi",
+        default=None,
+        metavar="IFACE",
+        help="USB netdev (e.g. wlx…) before monitor setup; default: first wl*/wlan*",
+    )
+    p.add_argument(
+        "--usb-reset-driver",
+        action="store_true",
+        help="reload rtw88_8822bu (clears stuck 5 GHz client / duplicate ifaces)",
+    )
+    p.add_argument("--modulation", default="OFDM_24M")
+    p.add_argument(
+        "--tx-power",
+        type=int,
+        default=None,
+        metavar="DBM",
+        help="set_tx_power on both radios (2–20 dBm; omit to keep current). "
+        "OFDM_48M/54M firmware may cap effective TX below this.",
+    )
+    p.add_argument(
+        "--paced",
+        action="store_true",
+        help="pace at --kbps (default: flood kbps=0, max wifi_tx throughput)",
+    )
+    p.add_argument(
+        "--kbps",
+        type=int,
+        default=24000,
+        help="paced offer when --paced (ignored in default flood mode)",
+    )
+    p.add_argument("--size", type=int, default=1424, help="full MPDU size (bytes)")
+    p.add_argument(
+        "--count",
+        type=int,
+        default=15000,
+        metavar="N",
+        help="number of MPDU frames per direction (default: 15000)",
+    )
+    p.add_argument("--channel", type=int, default=1)
+    p.add_argument("--domain", default="1234", help="hex domain for set_domain")
+    p.add_argument(
+        "--usb-bssid",
+        default="standalone",
+        help="Addr3 prefix filter for USB: standalone | tunnel | both",
+    )
+    p.add_argument(
+        "--no-inject-tune",
+        action="store_true",
+        help="skip set_inject_tune (firmware default max_in_flight=4)",
+    )
+    p.add_argument(
+        "--inject-tune",
+        default=WIFI_BENCH_INJECT_TUNE,
+        metavar="CMD",
+        help="console set_inject_tune line (default: max_in_flight=6 for wifi_bench)",
+    )
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.tx_power is not None and not (2 <= args.tx_power <= 20):
+        print("error: --tx-power must be 2–20 dBm", file=sys.stderr)
+        return 2
+    run_ab = args.test_ab or (not args.test_ab and not args.test_ba)
+    run_ba = args.test_ba or (not args.test_ab and not args.test_ba)
+    inject_tune: str | None = None if args.no_inject_tune else args.inject_tune
+    bench_kbps = args.kbps if args.paced else 0
+    if not args.paced:
+        print("wifi_bench: flood mode (kbps=0); use --paced --kbps N for offer tests")
+    usb_prefixes = addr3_prefixes_for_mode(args.usb_bssid)
+
+    usb_monitor_iface: str | None = None
+    air_domain = parse_domain_hex(args.domain)
+    if args.with_usb:
+        try:
+            release_nm_wifi(
+                [args.usb_wifi or "", args.iface, DEFAULT_MONITOR_NAME]
+            )
+            session = UsbMonitorBringup.setup(
+                args.channel,
+                args.iface,
+                args.usb_wifi,
+                reset_driver=args.usb_reset_driver,
+            )
+            usb_monitor_iface = session.monitor_iface
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"error: --with-usb: {exc}", file=sys.stderr)
+            return 2
+
+    rows: list[BenchRow] = []
+    plan: list[tuple[str, str, str]] = []
+    if run_ab:
+        plan.append((args.a, args.b, f"{args.a} → {args.b}"))
+    if run_ba:
+        plan.append((args.b, args.a, f"{args.b} → {args.a}"))
+
+    for sender, receiver, label in plan:
+        print(f"--- {label} ---", flush=True)
+        try:
+            row = run_direction(
+                sender,
+                receiver,
+                size=args.size,
+                count=args.count,
+                kbps=bench_kbps,
+                channel=args.channel,
+                modulation=args.modulation,
+                domain=args.domain,
+                with_usb=args.with_usb,
+                usb_monitor_iface=usb_monitor_iface,
+                usb_prefixes=usb_prefixes,
+                air_domain=air_domain,
+                tx_power_dbm=args.tx_power,
+                inject_tune=inject_tune,
+            )
+        except Exception as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"inject_ok Δ={row.inject_delta}  wifi_accept Δ={row.rx_delta}  "
+            f"enq_ok={row.enq_ok} enq_fail={row.enq_fail}  "
+            f"elapsed={row.elapsed_us / 1e6:.2f}s",
+            flush=True,
+        )
+        rows.append(row)
+        print()
+
+    print_results_table(rows, with_usb=args.with_usb)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

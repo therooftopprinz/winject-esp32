@@ -3,12 +3,14 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #include "endpoint/tcp_client_endpoint.h"
 #include "endpoint/tcp_server_endpoint.h"
 #include "endpoint/udp_endpoint.h"
 #include "log.h"
 #include "net_util.h"
+#include "radio/mpdu.h"
 
 bool app::load(const std::string& path)
 {
@@ -33,31 +35,10 @@ bool app::load(const std::string& path)
 
 bool app::add_upstream(const upstream_config_s& uc)
 {
-    const size_t i = upstreams.size();
-    auto radio = std::make_unique<wifi_udp>();
-    sockaddr_in inject = {};
-    inject.sin_family = AF_INET;
-    inject.sin_addr = device_ip;
-    inject.sin_port = htons(static_cast<uint16_t>(9000 + i * 10));
-    const uint16_t fwd = static_cast<uint16_t>(cfg.forward_base + i);
-    wifi_udp* radio_ptr = radio.get();
-    if (!radio->open(
-            reactor, inject, fwd,
-            [this, i](const uint8_t* data, size_t len)
-            {
-                if (i < upstreams.size() && upstreams[i])
-                {
-                    upstreams[i]->on_radio_rx(data, len);
-                }
-            },
-            [this]()
-            {
-                scheduler.tick();
-            }))
+    if (!radio)
     {
         return false;
     }
-
     std::unique_ptr<stream> up;
     if (uc.mode == upstream_mode_e::tcp_client ||
         uc.mode == upstream_mode_e::tcp_server)
@@ -91,17 +72,84 @@ bool app::add_upstream(const upstream_config_s& uc)
         }
         up = std::move(udp);
     }
-    scheduler.add(up.get(), radio_ptr, uc.scheduler_budget);
-    radios.push_back(std::move(radio));
+    scheduler.add(up.get(), radio.get(), uc.bus_tx, uc.bus_rx,
+                  uc.scheduler_budget);
     upstreams.push_back(std::move(up));
-    LOG_INF("upstream-%zu radio inject=%u forward=%u", i,
-            radios.back()->inject_port(), radios.back()->forward_port());
+    LOG_INF("upstream-%zu bus_tx=%s bus_rx=%s", uc.index,
+            uc.bus_tx ? bus_to_string(uc.bus_tx).c_str() : "-",
+            uc.bus_rx ? bus_to_string(uc.bus_rx).c_str() : "-");
+    return true;
+}
+
+bool app::setup_radio()
+{
+    WinjectMode mode = WINJECT_MODE_STANDALONE;
+    if (cfg.radio_mode == radio_mode_e::bfc_tunnel_device)
+    {
+        mode = WINJECT_MODE_BFC_TUNNEL_DEVICE;
+    }
+    if (!mpdu_init_rules(mode))
+    {
+        LOG_ERR("mpdu frame rules init failed");
+        return false;
+    }
+    radio = std::make_unique<wifi_udp>();
+    sockaddr_in inject = {};
+    inject.sin_family = AF_INET;
+    inject.sin_addr = device_ip;
+    inject.sin_port = htons(cfg.inject_port);
+    if (!radio->open(
+            reactor, inject, cfg.forward_port,
+            [this](const uint8_t* data, size_t len)
+            {
+                scheduler.on_mpdu_rx(data, len);
+            },
+            [this]()
+            {
+                scheduler.tick();
+            }))
+    {
+        return false;
+    }
+    LOG_INF("radio inject=%u forward=%u", radio->inject_port(),
+            radio->forward_port());
     return true;
 }
 
 bool app::setup_upstreams()
 {
-    scheduler.configure(cfg.max_rate_kbps);
+    scheduler.configure(cfg.max_rate_kbps, cfg.domain, cfg.max_data_per_tick);
+    scheduler.set_may_emit_data(
+        [this]()
+        {
+            if (!cfg.ci_pace_inject)
+            {
+                return true;
+            }
+            if (tx_grant_credits_ > 0)
+            {
+                return true;
+            }
+            maybe_send_grant_request();
+            return false;
+        });
+    scheduler.set_on_data_mpdu_sent(
+        [this]()
+        {
+            if (!cfg.ci_pace_inject || tx_grant_credits_ == 0)
+            {
+                return;
+            }
+            tx_grant_credits_--;
+            if (tx_grant_credits_ < k_grant_low_water)
+            {
+                maybe_send_grant_request();
+            }
+        });
+    if (!setup_radio())
+    {
+        return false;
+    }
     for (const auto& uc : cfg.upstreams)
     {
         if (!add_upstream(uc))
@@ -320,20 +368,25 @@ void app::fill_ci_view(channel_info_view_s* out) const
         format_fec(row.fec, sizeof(row.fec), st.fec_k, st.fec_n);
         row.tx_byte = st.tx_bytes_life;
         row.rx_byte = st.rx_bytes_life;
-        if (i < radios.size() && radios[i])
+        row.tx_pkt = st.tx_pkt_life;
+        row.rx_pkt = st.rx_pkt_life;
+        row.air_tx_pkt = st.air_tx_pkt_life;
+        row.drop_txq = st.drop_txq;
+        uint64_t seq_lost = 0;
+        if (scheduler.peek_seq_lost(i, &seq_lost))
         {
-            const auto c = radios[i]->peek_counters();
-            row.tx_pkt = c.tx_pkt;
-            row.rx_pkt = c.rx_pkt;
-            row.rx_pkt_loss = c.rx_pkt_loss;
-            out->tx_pkt += c.tx_pkt;
-            out->rx_pkt += c.rx_pkt;
-            out->rx_pkt_loss += c.rx_pkt_loss;
-            // Total `stream` line: radio on-air bytes (FEC shards + seq).
-            out->tx_byte += c.tx_byte;
-            out->rx_byte += c.rx_byte;
+            row.rx_pkt_loss = seq_lost;
+            out->rx_pkt_loss += seq_lost;
         }
         out->streams.push_back(row);
+    }
+    if (radio)
+    {
+        const auto c = radio->peek_counters();
+        out->tx_pkt = c.tx_pkt;
+        out->rx_pkt = c.rx_pkt;
+        out->tx_byte = c.tx_byte;
+        out->rx_byte = c.rx_byte;
     }
 }
 
@@ -413,15 +466,16 @@ bool app::apply_console()
         LOG_ERR("%s", err.c_str());
         return false;
     }
-    for (size_t i = 0; i < cfg.upstreams.size(); i++)
+    if (!radio)
     {
-        if (!console.apply_upstream(cfg, cfg.upstreams[i],
-                                    radios[i]->inject_port(),
-                                    radios[i]->forward_port(), local_ip, &err))
-        {
-            LOG_ERR("%s", err.c_str());
-            return false;
-        }
+        LOG_ERR("radio not open");
+        return false;
+    }
+    if (!console.apply_upstream(cfg, radio->inject_port(), radio->forward_port(),
+                                local_ip, &err))
+    {
+        LOG_ERR("%s", err.c_str());
+        return false;
     }
     if (!console.apply_ci(local_ip, ci.port(), &err))
     {
@@ -442,7 +496,6 @@ bool app::hold_console()
         return false;
     }
     console_ok = true;
-    console_connecting = false;
     if (!reactor.add_read_rdy(console.fd(),
                               [this]()
                               {
@@ -465,52 +518,26 @@ void app::drop_console()
     }
     console.close();
     console_ok = false;
-    console_connecting = false;
     awaiting_pong = false;
     heartbeat_ticks = 0;
 }
 
 void app::begin_console()
 {
-    if (console_ok || console_connecting)
+    if (console_ok)
     {
         return;
     }
     std::string err;
-    if (!console.start_connect(cfg, &err))
+    if (!console.start_connect(cfg, &err) || !console.finish_connect(&err))
     {
         LOG_ERR("console: %s", err.c_str());
+        drop_console();
         return;
     }
-    console_connecting = true;
     reconnect_ticks = 0;
-    if (!reactor.add_write_rdy(console.fd(),
-                               [this]()
-                               {
-                                   on_console_connecting();
-                               }) ||
-        !reactor.req_write(console.fd()))
-    {
-        drop_console();
-    }
-}
-
-void app::on_console_connecting()
-{
-    if (!console_connecting)
-    {
-        return;
-    }
-    std::string err;
-    if (!console.finish_connect(&err))
-    {
-        LOG_ERR("console: %s", err.c_str());
-        drop_console();
-        return;
-    }
-    LOG_INF("console connected %s:%u local %s", cfg.device.c_str(),
+    LOG_INF("console ready %s:%u local %s", cfg.device.c_str(),
             cfg.console_port, ipv4_to_string(console.local_ip()).c_str());
-    reactor.rem_write_rdy(console.fd());
     if (!apply_console())
     {
         drop_console();
@@ -527,17 +554,21 @@ void app::on_console()
     }
     while (true)
     {
-        char buf[256];
+        char buf[2048];
         const ssize_t n = recv(console.fd(), buf, sizeof(buf), 0);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             break;
         }
-        if (n <= 0)
+        if (n < 0)
         {
-            LOG_WRN("console disconnected");
+            LOG_WRN("console recv: %s", strerror(errno));
             drop_console();
             return;
+        }
+        if (n == 0)
+        {
+            continue;
         }
         console.append_recv(buf, static_cast<size_t>(n));
     }
@@ -551,7 +582,7 @@ void app::on_console()
             heartbeat_ticks = 0;
             continue;
         }
-        // Ignore banner / unsolicited lines while holding the console.
+        // Ignore unsolicited lines while holding the console.
     }
 }
 
@@ -588,6 +619,18 @@ void app::heartbeat_tick()
 
 void app::reconnect_tick()
 {
+    if (cfg.ci_pace_inject && grant_outstanding_ > 0)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - grant_sent_at_)
+                            .count();
+        if (ms >= 200)
+        {
+            grant_outstanding_ = 0;
+            maybe_send_grant_request();
+        }
+    }
     if (cfg.skip_console)
     {
         return;
@@ -599,15 +642,6 @@ void app::reconnect_tick()
         return;
     }
     reconnect_ticks++;
-    if (console_connecting)
-    {
-        if (reconnect_ticks >= k_reconnect_ticks)
-        {
-            LOG_ERR("console connect timeout");
-            drop_console();
-        }
-        return;
-    }
     if (reconnect_ticks < k_reconnect_ticks)
     {
         return;
@@ -619,8 +653,8 @@ void app::reconnect_tick()
 
 void app::arm_tick()
 {
-    // Match original winject DEFAULT_SLOT_INTERVAL_US (500 us).
-    reactor.get_timer().wait_us(500,
+    // 250 us tick: drain host UDP txq faster under OFDM_24M line-rate offers.
+    reactor.get_timer().wait_us(250,
                                 [this]()
                                 {
                                     reconnect_tick();
@@ -706,6 +740,80 @@ void app::flush_shutdown()
     scheduler.tick();
 }
 
+void app::maybe_send_grant_request()
+{
+    if (!cfg.ci_pace_inject || console.grant_fd() < 0)
+    {
+        return;
+    }
+    if (tx_grant_credits_ >= k_grant_low_water &&
+        grant_outstanding_ >= k_max_outstanding_grants)
+    {
+        return;
+    }
+    while (grant_outstanding_ < k_max_outstanding_grants &&
+           tx_grant_credits_ < k_grant_low_water)
+    {
+        std::string err;
+        if (!console.send_tx_grant_request(&err))
+        {
+            break;
+        }
+        grant_outstanding_++;
+        grant_sent_at_ = std::chrono::steady_clock::now();
+    }
+}
+
+void app::on_grant_io()
+{
+    uint8_t n = 0;
+    bool got = false;
+    while (console.try_consume_tx_grant(&n))
+    {
+        got = true;
+        const uint16_t sum =
+            static_cast<uint16_t>(tx_grant_credits_) + static_cast<uint16_t>(n);
+        tx_grant_credits_ =
+            sum > 255u ? static_cast<uint8_t>(255) : static_cast<uint8_t>(sum);
+        if (grant_outstanding_ > 0)
+        {
+            grant_outstanding_--;
+        }
+    }
+    if (got)
+    {
+        maybe_send_grant_request();
+    }
+}
+
+void app::arm_grant_io()
+{
+    if (!cfg.ci_pace_inject || grant_io_armed_)
+    {
+        return;
+    }
+    const int fd = console.grant_fd();
+    if (fd < 0)
+    {
+        return;
+    }
+    if (!set_nonblock(fd))
+    {
+        LOG_WRN("grant channel nonblock failed");
+        return;
+    }
+    if (!reactor.add_read_rdy(fd,
+                              [this]()
+                              {
+                                  on_grant_io();
+                              }))
+    {
+        LOG_WRN("grant channel epoll add failed");
+        return;
+    }
+    grant_io_armed_ = true;
+}
+
 int app::run()
 {
     if (!setup_upstreams())
@@ -722,14 +830,14 @@ int app::run()
     }
     std::vector<uint16_t> inject_ports;
     std::vector<uint16_t> forward_ports;
-    for (const auto& radio : radios)
+    if (radio)
     {
         inject_ports.push_back(radio->inject_port());
         forward_ports.push_back(radio->forward_port());
     }
     if (!cfg.local_ip.empty() && parse_host(cfg.local_ip, &local_ip))
     {
-        // keep configured local_ip for set_upstream_tx
+        // keep configured local_ip for set_upstream_rx
     }
     std::string err;
     if (!cfg.skip_console)
@@ -755,7 +863,7 @@ int app::run()
         }
         if (held)
         {
-            LOG_INF("console held %s:%u", cfg.device.c_str(), cfg.console_port);
+            LOG_INF("console ready %s:%u", cfg.device.c_str(), cfg.console_port);
         }
         else
         {
@@ -773,6 +881,20 @@ int app::run()
         LOG_ERR("winject.skip_console requires winject.local_ip");
         return 1;
     }
+    if (cfg.ci_pace_inject && console.grant_fd() < 0)
+    {
+        if (!console.connect_grant_peer(cfg, &err))
+        {
+            LOG_WRN("tx_grant channel: %s", err.c_str());
+        }
+        else
+        {
+            LOG_INF("tx_grant channel %s:%u", cfg.device.c_str(),
+                    cfg.console_port);
+        }
+    }
+    arm_grant_io();
+    maybe_send_grant_request();
     LOG_INF("manager running local %s forward_base %u max_rate %u kbps (%s)",
             ipv4_to_string(local_ip).c_str(), cfg.forward_base,
             cfg.max_rate_kbps, cfg.modulation.c_str());

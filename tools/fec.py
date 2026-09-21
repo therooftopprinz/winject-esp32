@@ -24,6 +24,8 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
+import mpdu as air_mpdu
+
 try:
     from reedsolo import ReedSolomonError, RSCodec
 except ImportError:
@@ -461,12 +463,26 @@ def run_encode(args: argparse.Namespace, dest: tuple[str, int]) -> None:
             elif state.pending:
                 to_send.extend(encode_flush(state))
             for pkt in to_send:
+                if getattr(args, "mpdu_bus", None) is not None:
+                    pkt = air_mpdu.build_mpdu(
+                        pkt,
+                        args.mpdu_bus,
+                        args.mpdu_domain,
+                        args.mpdu_mode,
+                    )
                 sock.sendto(pkt, dest)
             extra = f"pending={len(state.pending)}" if not args.intra else ""
             maybe_print_stats("encode", state.stats, args.verbose, last_stats, extra)
     except KeyboardInterrupt:
         if state.pending:
             for pkt in encode_flush(state):
+                if getattr(args, "mpdu_bus", None) is not None:
+                    pkt = air_mpdu.build_mpdu(
+                        pkt,
+                        args.mpdu_bus,
+                        args.mpdu_domain,
+                        args.mpdu_mode,
+                    )
                 sock.sendto(pkt, dest)
         print(state.stats.line("encode"), file=sys.stderr)
     finally:
@@ -489,8 +505,16 @@ def run_decode(args: argparse.Namespace, dest: tuple[str, int]) -> None:
                 try:
                     while True:
                         data, _addr = sock.recvfrom(RECV_MAX)
-                        for payload in decode_feed(state, data):
-                            sock.sendto(payload, dest)
+                        bodies = [data]
+                        if getattr(args, "mpdu_filter_bus", None) is not None:
+                            bodies = [
+                                body
+                                for bus, body in air_mpdu.unpack_mpdu(data)
+                                if bus == args.mpdu_filter_bus
+                            ]
+                        for body in bodies:
+                            for payload in decode_feed(state, body):
+                                sock.sendto(payload, dest)
                 except BlockingIOError:
                     pass
             maybe_print_stats(
@@ -625,6 +649,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bind", default="0.0.0.0", help="bind address (default 0.0.0.0)")
     p.add_argument("--verbose", action="store_true", help="print stats every 2s")
     p.add_argument("--self-test", action="store_true", help="run encode/decode checks and exit")
+    p.add_argument("--mpdu-bus", default=None, help="wrap encode output as MPDU with this bus (hex)")
+    p.add_argument("--mpdu-domain", default="1234", help="MPDU domain (hex, with --mpdu-bus)")
+    p.add_argument(
+        "--mpdu-mode",
+        default="BFC_TUNNEL_DEVICE",
+        help="MPDU Addr3 mode prefix (BFC_TUNNEL_DEVICE|STANDALONE)",
+    )
+    p.add_argument(
+        "--mpdu-filter-bus",
+        default=None,
+        help="decode: unpack MPDU and keep only this bus (hex)",
+    )
     return p
 
 
@@ -650,7 +686,12 @@ def main() -> int:
     validate_kn(args.k, args.n)
     try:
         dest = parse_endpoint(args.to_ep)
-    except argparse.ArgumentTypeError as exc:
+        if args.mpdu_bus is not None:
+            args.mpdu_bus = air_mpdu.parse_bus_int(args.mpdu_bus)
+            args.mpdu_domain = air_mpdu.parse_domain_int(args.mpdu_domain)
+        if args.mpdu_filter_bus is not None:
+            args.mpdu_filter_bus = air_mpdu.parse_bus_int(args.mpdu_filter_bus)
+    except (argparse.ArgumentTypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if args.encode:

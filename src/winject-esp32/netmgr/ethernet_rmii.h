@@ -9,7 +9,6 @@
 #include "esp_event.h"
 
 class dhcp_client;
-class dhcp_server;
 
 class ethernet_rmii : public ethernet
 {
@@ -24,14 +23,11 @@ public:
     void set_connected(bool connected) override;
     bool using_static() const override;
     void set_using_static(bool using_static) override;
-    bool netif_is_dhcp_server() const override;
     esp_netif_t* netif() override;
     bfc::semaphore& mutex() override;
 
     bool has_ipv4() const override;
     bool apply_static_ip(uint32_t ip) override;
-    bool rebuild_dhcp_client() override;
-    bool rebuild_dhcp_server(uint32_t ip) override;
 
     bool local_ipv4(uint32_t* out) override;
     bool mac(uint8_t mac[6]) override;
@@ -45,11 +41,8 @@ private:
                                      int32_t event_id, void* event_data);
 
     ethernet_rmii();
-    bool destroy_netif();
-    bool attach_and_start();
 
     class dhcp_client& dhcp_client;
-    class dhcp_server& dhcp_server;
     std::atomic<bool> connected_{false};
     std::atomic<bool> using_static_{false};
     std::atomic<bool> ready_{false};
@@ -57,7 +50,6 @@ private:
     esp_eth_handle_t eth_handle = nullptr;
     esp_eth_netif_glue_handle_t eth_glue = nullptr;
     esp_netif_t* eth_netif = nullptr;
-    bool netif_is_dhcp_server_ = false;
 };
 
 #endif  // WINJECT_ETHERNET_RMII_H_

@@ -1,6 +1,6 @@
-WInject manager is a helper app that runs outside the ESP32. It programs the radio over the TCP console and bridges other apps onto one host stream per `upstream-N`. Firmware TX and RX are independent (`set_upstream_tx` / `set_upstream_rx`); the manager does not force-pair them.
+WInject manager is a helper app that runs outside the ESP32. It programs the radio over the UDP console, stamps full 802.11 MPDUs (bus slots + Addr3), and bridges other apps onto one host stream per `upstream-N`. The radio has a single inject/forward UDP pair; bus demux is host-side.
 
-UDP apps send and receive datagrams unchanged on the host sockets. Over the air each inject datagram is prefixed with a per-TX `uint16` sequence (see [Air sequence](#air-sequence)). TCP apps are terminated here; the byte stream is carried as UDP payloads on that upstream’s inject/forward ports.
+UDP apps send and receive datagrams unchanged on the host sockets. Over the air each LCP body is prefixed with a per-TX `uint16` sequence (see [Air sequence](#air-sequence)) before MPDU packing. TCP apps are terminated here; the byte stream is carried as UDP payloads inside MPDU slots.
 
 # Sample config
 
@@ -12,6 +12,10 @@ winject.modulation    = OFDM_24M
 winject.power         = 20
 winject.mode          = STANDALONE
 winject.domain        = 1234
+# Optional. Default inject 9000 / forward 9210.
+# winject.inject_port   = 9000
+# winject.forward_port  = 9210
+# winject.forward_base  = 9210   # legacy alias for forward_port
 # Optional. Default 10000 kbps if omitted.
 # winject.max_rate_kbps = 10000
 # Optional local UDP management console (both required together).
@@ -63,34 +67,41 @@ upstream-0.tx_bus           = d4
 upstream-0.rx_bus           = c3
 ```
 
-`winject.device` / `winject.console` are the ESP32 Ethernet address and TCP console (firmware default 2323). Optional `winject.local_ip` overrides the address used in `set_upstream_rx`; otherwise it is inferred from the console socket. Radio commands (`sc` / `sd` / `sut` / `sur` / …) stay on that TCP socket; see [winject.md](winject.md).
+`winject.device` / `winject.console` are the ESP32 Ethernet address and UDP console (firmware default 22). Optional `winject.local_ip` overrides the address used in `set_upstream_rx`; otherwise it is inferred from the console socket. Radio commands (`sc` / `sd` / `sut` / `sur` / …) stay on that UDP socket; see [winject.md](winject.md). `winject.mode` is used when the manager stamps Addr3; it is **not** sent as `set_mode` by the manager. Prepare (`prepare_radios_for_manager.py`) still issues `set_mode STANDALONE` so the radio's RX Addr3 filter matches.
 
-If the radio console is down at startup, the manager stays running and retries until it accepts connections. After the console is held, every **500 ms** it sends `ping` and expects `pong`. On disconnect or missed pong it closes the socket, retries until the radio accepts connections again, then re-applies radio settings and all upstreams (`sut`/`sur`) plus channel-info subscribe (`suc`).
+If the radio console is down at startup, the manager stays running and retries until commands succeed. After the UDP console is open, every **500 ms** it sends `ping` and expects `pong`. On missed pong or send/recv error it closes the socket, retries, then re-applies radio settings, the single `sut`/`sur` pair, plus channel-info subscribe (`suc`).
 
 Optional `manager.console_in` / `manager.console_out` start a **local UDP** management console (FEC, scheduler budget, modulation, channel info). See [Manager console](#manager-console).
 
 # Domain and bus
 
-Each `upstream-N` owns one host socket and one ESP32 inject/forward port pair. Firmware bindings are separate keys that match [winject.md](winject.md): a shared **domain** on Addr3 and a **bus** (`lcid`) per direction.
+Each `upstream-N` owns one host socket. All streams share one ESP32 inject/forward port pair. The manager stamps buses into MPDU slots and demuxes RX by `rx_bus`.
 
 - `winject.domain` — hex `1`…`ffff` (required). Both managers on a link must use the same domain.
-- `upstream-N.tx_bus` — bus stamped on UDP→air (`set_upstream_tx` / `sut`). 1–2 hex digits, not `0`. Optional.
-- `upstream-N.rx_bus` — bus filtered on air→UDP (`set_upstream_rx` / `sur`). Optional.
+- `winject.inject_port` / `winject.forward_port` — radio UDP ports (defaults `9000` / `9210`). `forward_base` is a legacy alias for `forward_port`.
+- `upstream-N.tx_bus` — bus stamped on host→air PDUs. 1–2 hex digits, not `0`. Optional.
+- `upstream-N.rx_bus` — bus filtered on air→host PDUs. Optional.
 - At least one of `tx_bus` / `rx_bus` is required. TCP modes require both (ARQ). When both are set they must differ.
 - All configured `tx_bus` / `rx_bus` values on one manager must be unique.
 - Bidirectional peers swap: A’s TX bus is B’s RX bus, and vice versa. Unidirectional peers share one bus (source TX, sink RX).
 - `BFC_TUNNEL_DEVICE`: `upstream.size` must be 1 (same domain/bus rules).
 
-The manager issues `set_domain`, then for each upstream with a TX bus `set_upstream_tx bus=<bus> <inject_port>`, and for each with an RX bus `set_upstream_rx bus=<bus> <local_ip> <forward_port>`. Inject and forward UDP ports are assigned automatically. It also binds an ephemeral UDP port and issues `set_upstream_ci to=<local_ip>:<ci_port>` so the radio fans out channel-info (TX flow-control queue depth and RX rssi/snr). The manager caches the last samples with their receive times and prints them (`flow_t` / `rssi_t`) from `gci` and periodic `winject.stats_sec` logging; they are not yet used for backpressure.
+The manager issues PHY knobs (`set_channel` / `set_modulation` / `set_tx_power`), then `set_domain`, then once `set_upstream_tx port=<inject>` and `set_upstream_rx host=<local_ip> port=<forward>`. It also binds an ephemeral UDP port and issues `set_upstream_ci to=<local_ip>:<ci_port>` so the radio fans out channel-info (TX flow-control queue depth and RX rssi/snr). The manager caches the last samples with their receive times and prints them (`flow_t` / `rssi_t`) from `gci` and periodic `winject.stats_sec` logging; the TX scheduler gates DATA MPDUs when a fresh FLOW_CTRL sample shows the
+radio TX queue above half full (`skip_console` tests use
+`tools/configure_manager_ci.py` to subscribe the radio to the manager CI port).
 
-Rover vehicle control does not use this TCP console. Drive-console text is an
+UDP upstream TX uses `peek_tx` / `commit_tx` so a failed non-blocking
+`sendto` to the radio inject port does not drop payloads that were already
+dequeued from the host txq.
+
+Rover vehicle control does not use this UDP console. Drive-console text is an
 extra **UDP** upstream (buses `72`/`81`); see [rover.md](rover.md).
 
 # Air sequence
 
-Every datagram the manager injects is prefixed with a big-endian `uint16` sequence number. Each upstream TX has its own counter (starts at 0, wraps). The peer strips the prefix on forward RX before FEC/TCP/UDP handling. A forward gap (wrapping subtract, less than 32768) is counted as `rx_pkt_loss`. The first received seq seeds the expected value (joining mid-stream is not a gap). Duplicates and backward seqs are ignored. Host app payloads are unchanged.
+Every LCP body the manager places in an MPDU slot is prefixed with a big-endian `uint16` sequence number. Each upstream TX has its own counter (starts at 0, wraps). The peer strips the prefix after MPDU unpack / bus demux before FEC/TCP/UDP handling. A forward gap (wrapping subtract, less than 32768) is counted as `rx_pkt_loss`. The first received seq seeds the expected value (joining mid-stream is not a gap). Duplicates and backward seqs are ignored. Host app payloads are unchanged.
 
-Firmware is unchanged (still a raw UDP body, max 1476). Stream payloads are therefore at most 1474 bytes. Both managers on a link must run this version.
+The radio forwards/injects opaque full MPDUs (max 1500). Stream payloads are therefore at most 1474 bytes inside an LCP body. Both managers on a link must run this version.
 
 # Modes
 
@@ -108,7 +119,7 @@ Host TCP receive for the TCP modes runs on a dedicated blocking-read thread per 
 
 # Manager console
 
-Optional **UDP** console on the host, separate from the radio TCP console. Runtime only: `suf` / `sus` / `sd` update the live streams / radio and the in-memory config; they are not written back to the cfg file. Omit both keys to disable. If one is set, the other is required.
+Optional **UDP** console on the host, separate from the radio UDP console. Runtime only: `suf` / `sus` / `sd` update the live streams / radio and the in-memory config; they are not written back to the cfg file. Omit both keys to disable. If one is set, the other is required.
 
 ```
 manager.console_in  = 127.0.0.1:2424   # bind; receive commands
@@ -140,20 +151,20 @@ Replies:
 |------|------|
 | Success, no payload | `ok` |
 | Success with args | `ok <args>` (`gci` args may span several lines in **one** datagram) |
-| Failure | `nok:<msg>` |
+| Failure | `nok <msg>` |
 | `ping` | `pong` |
 | `help` / `?` | command list (no `ok` prefix) |
 
 | Command | Short | Action |
 |---------|-------|--------|
 | `help` | `?` | list commands |
-| `ping` | | `pong` (manager console keepalive; not the radio TCP ping) |
+| `ping` | | `pong` (manager console keepalive; not the radio UDP ping) |
 | `get_channel_info` | `gci` | last radio channel-info plus cumulative on-air total / unfecced per-stream counters |
 | `get_upstream_fec <index>` | `guf` | TX FEC on that upstream |
 | `set_upstream_fec <index> <NONE\|RS_BLOCK_ERASURE> <k> <n>` | `suf` | TX encode; UDP only |
 | `get_upstream_scheduler_budget <index>` | `gus` | bytes per scheduler wakeup |
 | `set_upstream_scheduler_budget <index> <budget>` | `sus` | budget `> 0` |
-| `set_modulation <modulation>` | `sd` | radio TX rate (`set_modulation` on the held TCP console) |
+| `set_modulation <modulation>` | `sd` | radio TX rate (`set_modulation` on the radio UDP console) |
 | `get_modulation` | `gd` | last applied / configured modulation |
 
 `help` prints:
@@ -172,7 +183,7 @@ help
 
 ## FEC (`suf` / `guf`)
 
-UDP upstreams only. TCP or a missing index replies `nok:fec only valid for UDP upstreams` / `nok:invalid upstream index`.
+UDP upstreams only. TCP or a missing index replies `nok fec only valid for UDP upstreams` / `nok invalid upstream index`.
 
 `NONE` (or `none`) disables TX encode. `k` and `n` are still required on the line; use `0 0`. RX still auto-decodes shard headers on every UDP upstream.
 
@@ -197,14 +208,14 @@ gus 1
 
 ## Modulation (`sd` / `gd`)
 
-TX PHY rate on this manager’s radio (same names as radio TCP `set_modulation`). Names are case-insensitive. Channel 14 still requires DSSS/CCK. Needs the radio TCP console held; otherwise `nok:console not connected`. Getter is the in-memory value (config, then last successful `sd`). Not written back to the cfg file; reconnect re-applies it.
+TX PHY rate on this manager’s radio (same names as radio UDP `set_modulation`). Names are case-insensitive. Channel 14 still requires DSSS/CCK. Needs the radio UDP console open; otherwise `nok console not connected`. Getter is the in-memory value (config, then last successful `sd`). Not written back to the cfg file; reconnect re-applies it.
 
 ```text
 sd OFDM_24M
 gd
 ```
 
-Getter: `ok OFDM_24M`. Unknown name: `nok:unknown modulation`. Channel 14 + OFDM/MCS: `nok:channel 14 requires DSSS/CCK modulation`.
+Getter: `ok OFDM_24M`. Unknown name: `nok unknown modulation`. Channel 14 + OFDM/MCS: `nok channel 14 requires DSSS/CCK modulation`.
 
 ## Channel info (`gci`)
 
@@ -243,7 +254,7 @@ stream-2 type=TCP fec=none tx_byte=5000 rx_byte=4000 tx_pkt=8 rx_pkt=7 rx_pkt_lo
 
 The console is a normal UDP bind/send pair, so another `upstream-N` can bridge it. Typical rover pairing: this manager `console_in=:2424` / `console_out=:2425`, plus a `UDP_GENERIC_FORWARDING` upstream `rx=:2425` `tx=:2424` (replies onto the air, air commands into the bind). The peer binds a `UDP_SERVER_FORWARDING` port and `nc`s that bind (last-sender replies). While that upstream is up it owns `:2425` — do not also `nc -l` the reply port on the same host.
 
-This is not vehicle control and not the radio TCP console.
+This is not vehicle control and not the radio UDP console.
 
 # UDP FEC (`RS_BLOCK_ERASURE`)
 
@@ -292,19 +303,18 @@ The manager fetches official [BFC](https://github.com/therooftopprinz/BFC) into 
 
 Build: `cmake -S src/manager -B build_manager_arm && cmake --build build_manager_arm`. Run: `./build_manager_arm/winject-manager src/manager/winject.conf.example`. Host tests: see `.cursor/skills/build/SKILL.md`. Radio console commands are in [winject.md](winject.md).
 
-# TCP bandwidth test (bw_test)
+# Bandwidth test (bw_test)
 
-Use manager TCP forwarding via `scripts/manager_tcp_bw_test.sh` (length-prefixed records over manager TCP). Radios are `STANDALONE` with domain `1234` and two bus pairs (`b2`/`a1` for A→B, `c3`/`d4` for B→A); `prepare_radios_for_manager.py` programs `sut`/`sur` before managers start.
+Use `scripts/manager_bw_test.sh` (UDP forwarding by default; `--tcp` for length-prefixed ARQ). Radios are `STANDALONE` with domain `1234` and two bus pairs (`b2`/`a1` for A→B, `c3`/`d4` for B→A); `prepare_radios_for_manager.py` programs `sut`/`sur` before managers start.
 
 ```bash
-chmod +x scripts/manager_tcp_bw_test.sh
-./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M
-./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M --kbps 1500 --no-cca
-./scripts/manager_tcp_bw_test.sh -- --modulation OFDM_24M --test-bidir
-./scripts/manager_tcp_bw_test.sh --modulation OFDM_24M --test-bidir
+chmod +x scripts/manager_bw_test.sh
+./scripts/manager_bw_test.sh --modulation OFDM_6M
+./scripts/manager_bw_test.sh --modulation OFDM_6M --kbps 2000 --no-cca
+./scripts/manager_bw_test.sh --tcp --modulation OFDM_6M --test-bidir
 ```
 
-Configs: `configuration/winject-tests/bw_a.cfg` (radio A) and `bw_b.cfg` (radio B). Host sends A→B via manager A `:29000`, receives on TCP `:9002`; B→A uses `:29001` and listen `:9001`. Managers use `winject.skip_console` so the script programs the radios first. `bw_test --tcp` does not rebind upstreams but still applies `--channel` / `--modulation` / CCA. Auto TCP offer is ~55% of the UDP estimate (original winject AM target). Prefer `--kbps 7000`–`8000` or `--no-cca` when measuring; if the air path is lossy, step down.
+UDP configs: `configuration/winject-tests/lat_udp_a.cfg` / `lat_udp_b.cfg`. TCP configs: `bw_a.cfg` / `bw_b.cfg`. Host sends A→B via manager A `:29000`, receives on `:9002`; B→A uses `:29001` and listen `:9001`. Managers use `winject.skip_console` so the script programs the radios first. `tools/bw_test.py --udp` / `--tcp` does not rebind upstreams but still applies `--channel` / `--modulation` / CCA. TCP auto offer is ~55% of the UDP air estimate (ARQ headroom). Prefer `--kbps` pacing or `--no-cca` when measuring; if the air path is lossy, step down. `scripts/manager_tcp_bw_test.sh` remains a thin `--tcp` wrapper.
 
 # Air TX-RX latency (lat_test)
 

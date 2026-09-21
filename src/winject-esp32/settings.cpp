@@ -48,7 +48,6 @@ void settings::snapshot_defaults(snapshot_s* snap)
     snap->allow_failed_crc = false;
     snap->tx_power_dbm = WIFI_DEFAULT_TX_POWER_DBM;
     snap->network_mode = NETMGR_MODE_AUTO;
-    snap->dhcp_server_enabled = false;
     snap->domain = 0;
 }
 
@@ -89,20 +88,20 @@ bool settings::capture_live(snapshot_s* snap)
         snap->fallback_ip = fallback;
     }
     snap->network_mode = netmgr.network_mode();
-    snap->dhcp_server_enabled = netmgr.dhcp_server_enabled();
 
-    snap->sut_count = WIFI_AIRPORT_MAX;
-    sut.get_status(snap->sut, &snap->sut_count);
-    sur.fill_status(snap->sur, &snap->sur_count);
+    lc_tx_bind_s tx = {};
+    if (sut.get_status(&tx))
+    {
+        snap->has_sut = true;
+        snap->sut_port = tx.udp_port;
+    }
+    lc_rx_bind_s rx = {};
+    if (sur.get_status(&rx))
+    {
+        snap->has_sur = true;
+        snap->sur_dest = rx.dest;
+    }
     ci.fill_status(snap->ci, &snap->ci_count);
-    for (uint8_t i = 0; i < snap->sut_count; i++)
-    {
-        snap->sut[i].socket_open = false;
-    }
-    for (uint8_t i = 0; i < snap->sur_count; i++)
-    {
-        snap->sur[i].active = false;
-    }
     return true;
 }
 
@@ -112,8 +111,17 @@ bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
     {
         return false;
     }
-    if (snap.sut_count > WIFI_AIRPORT_MAX || snap.sur_count > WIFI_AIRPORT_MAX ||
-        snap.ci_count > WIFI_AIRPORT_MAX)
+    if (snap.ci_count > WIFI_AIRPORT_MAX)
+    {
+        return false;
+    }
+    if (snap.has_sut && snap.sut_port == 0)
+    {
+        return false;
+    }
+    if (snap.has_sur &&
+        (snap.sur_dest.port == 0 || snap.sur_dest.host == 0 ||
+         snap.sur_dest.host == 0xFFFFFFFFu))
     {
         return false;
     }
@@ -144,20 +152,19 @@ bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
     p += SETTINGS_MODULATION_MAX;
     put32(snap.fallback_ip);
     put8(static_cast<uint8_t>(snap.network_mode));
-    put8(snap.dhcp_server_enabled ? 1 : 0);
+    put8(0);  // legacy dhcp_server byte; always off
     put16(snap.domain);
-    put8(snap.sut_count);
-    for (uint8_t i = 0; i < snap.sut_count; i++)
+
+    put8(snap.has_sut ? 1 : 0);
+    if (snap.has_sut)
     {
-        put8(snap.sut[i].bus);
-        put16(snap.sut[i].udp_port);
+        put16(snap.sut_port);
     }
-    put8(snap.sur_count);
-    for (uint8_t i = 0; i < snap.sur_count; i++)
+    put8(snap.has_sur ? 1 : 0);
+    if (snap.has_sur)
     {
-        put8(snap.sur[i].bus);
-        put32(snap.sur[i].dest.host);
-        put16(snap.sur[i].dest.port);
+        put32(snap.sur_dest.host);
+        put16(snap.sur_dest.port);
     }
     put8(snap.ci_count);
     for (uint8_t i = 0; i < snap.ci_count; i++)
@@ -250,17 +257,17 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
         return false;
     }
     uint8_t network_mode = 0;
-    uint8_t dhcp_server = 0;
-    if (!get8(&network_mode) || !get8(&dhcp_server))
+    uint8_t dhcp_server_legacy = 0;
+    if (!get8(&network_mode) || !get8(&dhcp_server_legacy))
     {
         return false;
     }
+    (void)dhcp_server_legacy;  // ignored; radio never runs a DHCP server
     if (network_mode != NETMGR_MODE_STATIC && network_mode != NETMGR_MODE_AUTO)
     {
         return false;
     }
     snap->network_mode = static_cast<NetmgrMode>(network_mode);
-    snap->dhcp_server_enabled = dhcp_server != 0;
     if (!get16(&snap->domain))
     {
         return false;
@@ -272,31 +279,89 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
         return p == end;
     }
 
-    // v3 and v5: sut / sur / ci tables.
-    if (!get8(&snap->sut_count) || snap->sut_count > WIFI_AIRPORT_MAX)
+    // Legacy multi-bind tables: consume and clear (manager reprograms).
+    if (version == 3 || version == 5)
     {
-        return false;
-    }
-    for (uint8_t i = 0; i < snap->sut_count; i++)
-    {
-        if (!get8(&snap->sut[i].bus) || !get16(&snap->sut[i].udp_port))
+        uint8_t sut_count = 0;
+        uint8_t sur_count = 0;
+        if (!get8(&sut_count) || sut_count > WIFI_AIRPORT_MAX)
         {
             return false;
         }
-        snap->sut[i].socket_open = false;
-    }
-    if (!get8(&snap->sur_count) || snap->sur_count > WIFI_AIRPORT_MAX)
-    {
-        return false;
-    }
-    for (uint8_t i = 0; i < snap->sur_count; i++)
-    {
-        if (!get8(&snap->sur[i].bus) || !get32(&snap->sur[i].dest.host) ||
-            !get16(&snap->sur[i].dest.port))
+        for (uint8_t i = 0; i < sut_count; i++)
+        {
+            uint8_t bus = 0;
+            uint16_t port = 0;
+            if (!get8(&bus) || !get16(&port))
+            {
+                return false;
+            }
+            (void)bus;
+            (void)port;
+        }
+        if (!get8(&sur_count) || sur_count > WIFI_AIRPORT_MAX)
         {
             return false;
         }
-        snap->sur[i].active = false;
+        for (uint8_t i = 0; i < sur_count; i++)
+        {
+            uint8_t bus = 0;
+            uint32_t host = 0;
+            uint16_t port = 0;
+            if (!get8(&bus) || !get32(&host) || !get16(&port))
+            {
+                return false;
+            }
+            (void)bus;
+            (void)host;
+            (void)port;
+        }
+        if (!get8(&snap->ci_count) || snap->ci_count > WIFI_AIRPORT_MAX)
+        {
+            return false;
+        }
+        for (uint8_t i = 0; i < snap->ci_count; i++)
+        {
+            if (!get32(&snap->ci[i].host) || !get16(&snap->ci[i].port))
+            {
+                return false;
+            }
+        }
+        snap->has_sut = false;
+        snap->sut_port = 0;
+        snap->has_sur = false;
+        snap->sur_dest = {};
+        return p == end;
+    }
+
+    // v6: single upstream_tx / upstream_rx.
+    uint8_t has_sut = 0;
+    uint8_t has_sur = 0;
+    if (!get8(&has_sut))
+    {
+        return false;
+    }
+    snap->has_sut = has_sut != 0;
+    if (snap->has_sut)
+    {
+        if (!get16(&snap->sut_port) || snap->sut_port == 0)
+        {
+            return false;
+        }
+    }
+    if (!get8(&has_sur))
+    {
+        return false;
+    }
+    snap->has_sur = has_sur != 0;
+    if (snap->has_sur)
+    {
+        if (!get32(&snap->sur_dest.host) || !get16(&snap->sur_dest.port) ||
+            snap->sur_dest.port == 0 || snap->sur_dest.host == 0 ||
+            snap->sur_dest.host == 0xFFFFFFFFu)
+        {
+            return false;
+        }
     }
     if (!get8(&snap->ci_count) || snap->ci_count > WIFI_AIRPORT_MAX)
     {
@@ -387,7 +452,6 @@ bool settings::apply_snapshot(const snapshot_s& snap)
     {
         netmgr.set_ip(snap.fallback_ip);
     }
-    netmgr.set_dhcp_server_enabled(snap.dhcp_server_enabled);
     if (!netmgr.set_network_mode(snap.network_mode))
     {
         ESP_LOGE(TAG, "network apply failed");
@@ -424,21 +488,22 @@ bool settings::apply_snapshot(const snapshot_s& snap)
         }
     }
 
-    // Terminate existing upstreams, then recreate from the snapshot.
-    if (!sut.clear())
+    if (!sut.clear() || !sur.clear())
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;
     }
-    for (uint8_t i = 0; i < snap.sut_count; i++)
+    if (snap.has_sut && !sut.set_endpoint(snap.sut_port))
     {
-        if (!sut.add_endpoint(snap.sut[i].bus, snap.sut[i].udp_port))
-        {
-            ESP_LOGE(TAG, "endpoint apply failed");
-            return false;
-        }
+        ESP_LOGE(TAG, "endpoint apply failed");
+        return false;
     }
-    if (!sur.load(snap.sur, snap.sur_count) || !ci.load(snap.ci, snap.ci_count))
+    if (snap.has_sur && !sur.set_endpoint(snap.sur_dest))
+    {
+        ESP_LOGE(TAG, "endpoint apply failed");
+        return false;
+    }
+    if (!ci.load(snap.ci, snap.ci_count))
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;
@@ -505,7 +570,6 @@ bool settings::save(uint8_t slot)
             scratch.fallback_ip = fallback;
         }
         scratch.network_mode = netmgr.network_mode();
-        scratch.dhcp_server_enabled = netmgr.dhcp_server_enabled();
     }
     else if (!capture_live(&scratch))
     {
@@ -584,7 +648,6 @@ bool settings::load_current()
         {
             netmgr.set_ip(loaded.fallback_ip);
         }
-        netmgr.set_dhcp_server_enabled(loaded.dhcp_server_enabled);
         netmgr.set_network_mode(loaded.network_mode);
         ESP_LOGI(TAG, "loaded slot %u", current_slot_);
     }

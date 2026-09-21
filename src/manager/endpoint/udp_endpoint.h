@@ -23,6 +23,12 @@ public:
 
     void on_radio_rx(const uint8_t* data, size_t len) override;
     bool has_tx() const override;
+    bool supports_peek_tx() const override
+    {
+        return true;
+    }
+    size_t peek_tx(uint8_t* out, size_t max, bool* is_ack) override;
+    void commit_tx() override;
     size_t pull_tx(uint8_t* out, size_t max, bool* is_ack) override;
     void on_tick() override;
     void announce_down() override;
@@ -49,11 +55,15 @@ private:
     uint64_t radio_rx_pkt_interval = 0;
     uint64_t radio_rx_bytes_interval = 0;
     uint64_t radio_rx_bytes_life = 0;
+    uint64_t radio_rx_pkt_life = 0;
     uint64_t air_tx_bytes_interval = 0;
     uint64_t air_rx_bytes_interval = 0;
+    uint64_t air_tx_pkt_life = 0;
     uint64_t app_rx_pkt_interval = 0;
     uint64_t app_rx_bytes_interval = 0;
     uint64_t app_rx_bytes_life = 0;
+    uint64_t app_rx_pkt_life = 0;
+    uint64_t drop_txq = 0;
     rs_block_erasure fec;
     int fec_timeout_ms = rs_block_erasure::k_default_timeout_ms;
 };

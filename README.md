@@ -4,7 +4,7 @@ Firmware for the Wireless-Tag **WT32-ETH01** (ESP32 + LAN8720 Ethernet), built w
 
 This board is a **bfc-tunnel external multicast** radio: Ethernet UDP in/out, raw 802.11 monitor/inject on WiFi. See [docs/winject.md](docs/winject.md). It is not a copy of original WInject.
 
-WiFi driver and the inject task run on **CPU0**. Ethernet, lwIP, the TCP console, and HTTP OTA run on **CPU1**.
+WiFi driver and the inject task run on **CPU0**. Ethernet, lwIP, the UDP console, and HTTP OTA run on **CPU1**.
 
 ## Layout
 
@@ -49,9 +49,9 @@ Set `upload_port` in `platformio.ini` only if auto-detect picks the wrong COM po
 
 ## Ethernet
 
-Default PHY wiring matches the WT32-ETH01: LAN8720 at address `1`, MDC `23`, MDIO `18`, oscillator enable `16`, RMII clock `GPIO0` in. Hostname is set in `src/winject-esp32/config.h`. Wi-Fi and Ethernet MACs are the chip-unique factory addresses. If the link never comes up, set `ETH_CLK_MODE` to `ETH_CLK_GPIO17_OUT`.
+Default PHY wiring matches the WT32-ETH01: LAN8720 at address `1`, MDC `23`, MDIO `18`, oscillator enable `16`. RMII REF_CLK is a build env: `wt32-eth01` uses `GPIO0` in; `lan-module` uses `GPIO17` out (`pio run -e lan-module`). Hostname is set in `src/winject-esp32/config.h`. Wi-Fi and Ethernet MACs are the chip-unique factory addresses.
 
-Default Ethernet mode is `AUTO`: DHCP client, then static `192.168.32.1/24` if no lease in 5 seconds. The DHCP server is off until `set_enable_dhcp_server` and only runs in `STATIC`. WiFi stays in BFC/standalone monitor/inject. See [docs/winject.md](docs/winject.md).
+Default Ethernet mode is `AUTO`: DHCP client, then static `192.168.32.1/24` if no lease in 1.5 seconds. There is no DHCP server on the radio — the host must reach that address (or the lease). WiFi stays in BFC/standalone monitor/inject. See [docs/winject.md](docs/winject.md).
 
 ## PlatformIO install (Windows)
 

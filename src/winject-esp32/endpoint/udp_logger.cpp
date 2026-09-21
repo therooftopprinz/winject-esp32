@@ -193,7 +193,7 @@ void udp_logger::log(log_level_e level, const char* fmt, ...)
 
 void udp_logger::vlog(log_level_e level, const char* fmt, va_list args)
 {
-    if (fmt == nullptr || !lock.ready())
+    if (fmt == nullptr || !lock.ready() || !configured)
     {
         return;
     }

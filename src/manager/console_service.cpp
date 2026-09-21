@@ -204,7 +204,7 @@ void console_service::reply_ok_args(const char* args)
 void console_service::reply_nok(const char* msg)
 {
     char buf[320];
-    snprintf(buf, sizeof(buf), "nok:%s\n", msg != nullptr ? msg : "error");
+    snprintf(buf, sizeof(buf), "nok %s\n", msg != nullptr ? msg : "error");
     reply(buf);
 }
 
@@ -492,13 +492,15 @@ void console_service::handle_line(const char* line)
             int n = snprintf(
                 line, sizeof(line),
                 "\nstream-%zu type=%s fec=%s tx_byte=%llu rx_byte=%llu "
-                "tx_pkt=%llu rx_pkt=%llu rx_pkt_loss=%llu fec_rec=%llu "
-                "fec_lost=%llu",
+                "tx_pkt=%llu rx_pkt=%llu air_tx_pkt=%llu drop_txq=%llu "
+                "rx_pkt_loss=%llu fec_rec=%llu fec_lost=%llu",
                 row.index, type, fec,
                 static_cast<unsigned long long>(row.tx_byte),
                 static_cast<unsigned long long>(row.rx_byte),
                 static_cast<unsigned long long>(row.tx_pkt),
                 static_cast<unsigned long long>(row.rx_pkt),
+                static_cast<unsigned long long>(row.air_tx_pkt),
+                static_cast<unsigned long long>(row.drop_txq),
                 static_cast<unsigned long long>(row.rx_pkt_loss),
                 static_cast<unsigned long long>(row.fec_recovered),
                 static_cast<unsigned long long>(row.fec_fail));

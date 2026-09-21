@@ -3,7 +3,7 @@
 
 Same-host timestamps (time.monotonic_ns), so A->B / B->A do not need clock sync.
 UDP: datagrams to manager bind ports. TCP: uint16 BE length-prefixed records
-(same framing as tools/bw_test.py --tcp).
+(same framing as tools/bw_test.py manager TCP).
 """
 
 from __future__ import annotations

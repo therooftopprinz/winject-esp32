@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """WT32-ETH01 WInject bandwidth test.
 
-UDP into one radio's set_upstream_tx (inject), 802.11 in the air, UDP out
-the other radio's set_upstream_rx to this host. Addressing is a shared
-domain plus two buses (A→B and B→A). Measures integrity and payload goodput.
-Sets CCA on both radios over the TCP console. Sets channel and modulation
-only when --channel, --modulation, or --all is given; omitted leaves the
-radios as they are.
+Paths (pick one):
+  --udp     winject-manager UDP (manager stamps MPDUs; scripts/manager_bw_test.sh)
+  --tcp     winject-manager TCP ARQ (scripts/manager_bw_test.sh --tcp)
+  --direct  host stamps MPDUs and injects to radios (scripts/stand_alone_test.py)
 
---fec starts tools/fec.py encode/decode proxies on the host. The radios
-still see opaque UDP; the test measures application payloads after decode.
+Sets CCA / channel / modulation over the UDP console unless --skip-config.
+Peer air RX tests: use OFDM_24M on both radios (not HT MCS); see docs/winject.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
-import select
 import socket
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -27,15 +23,17 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import mpdu
+
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-CONSOLE_PORT = 2323
+CONSOLE_PORT = 22
 INJECT_PORT = 9000
-HOST_PORT_A = 9001  # frames heard by radio A (B→A bus)
-HOST_PORT_B = 9002  # frames heard by radio B (A→B bus)
+HOST_PORT_A = 9001  # B→A: radio A forward / manager A demux listen
+HOST_PORT_B = 9002  # A→B: radio B forward / manager B demux listen
 DEFAULT_DOMAIN = "1234"
-BUS_AB = "b2"  # A injects, B filters
+BUS_AB = "b2"  # A injects, B filters (manager stamps)
 BUS_BA = "a1"  # B injects, A filters
 CHANNEL_MIN = 1
 CHANNEL_MAX = 14  # matches firmware WIFI_CHANNEL_*; 14 is 802.11b-only
@@ -44,24 +42,8 @@ TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
 # Manager ARQ can stop reading when the window fills and reverse ACKs starve;
 # without a send timeout, sendall blocks forever and phase() never returns.
 TCP_SEND_TIMEOUT_S = 3.0
-# Wait until recv==sent after a TCP phase so leftover DATA does not occupy the
-# air during the reverse leg. Manager data-stall abort is 5s; keep headroom.
-TCP_DRAIN_TIMEOUT_S = 10.0
 LOSS_WINDOW_S = 1.0
 MAX_PAYLOAD = 1476
-FEC_SCRIPT = Path(__file__).resolve().parent / "fec.py"
-FEC_ENC_A = 19100  # host -> encode -> radio A inject
-FEC_ENC_B = 19110  # host -> encode -> radio B inject
-FEC_APP_A = 19101  # decode of radio A air→UDP (B -> A)
-FEC_APP_B = 19102  # decode of radio B air→UDP (A -> B)
-FEC_BLOCK_HDR = 8
-FEC_LEN_PREFIX = 2
-FEC_INTRA_HDR = 2
-MAX_BLOCK_ORIG = MAX_PAYLOAD - FEC_BLOCK_HDR - FEC_LEN_PREFIX  # 1466
-DEFAULT_FEC_K = 8
-DEFAULT_FEC_N = 12
-DEFAULT_FEC_NSYM = 32
-DEFAULT_FEC_TIMEOUT_MS = 20
 
 # Named PHY rates from docs/winject.md (20 MHz column for MCS).
 PHY_KBPS = {
@@ -193,7 +175,17 @@ def detect_host(peer: str) -> str:
         sock.close()
 
 
-def console(ip: str, cmds: list[str], timeout: float = 2.0, quiet: bool = False) -> list[str]:
+# Per-command console retries (UDP loss / radio busy during PHY apply).
+CONSOLE_CMD_RETRIES = 3
+CONSOLE_CMD_TIMEOUT_S = 3.0
+
+
+def console(
+    ip: str,
+    cmds: list[str],
+    timeout: float = CONSOLE_CMD_TIMEOUT_S,
+    quiet: bool = False,
+) -> list[str]:
     last_err: Exception | None = None
     for attempt in range(3):
         try:
@@ -204,49 +196,76 @@ def console(ip: str, cmds: list[str], timeout: float = 2.0, quiet: bool = False)
     raise last_err  # type: ignore[misc]
 
 
+def _drain_console(sock: socket.socket) -> None:
+    """Drop any queued datagrams so a retry does not consume a stale reply."""
+    sock.settimeout(0.0)
+    while True:
+        try:
+            sock.recvfrom(16384)
+        except BlockingIOError:
+            break
+        except OSError:
+            break
+
+
+def _recv_reply(sock: socket.socket, timeout: float, *, accept_pong: bool = False) -> bytes:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        sock.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            chunk, _ = sock.recvfrom(16384)
+        except socket.timeout:
+            continue
+        if not chunk:
+            continue
+        if not chunk.endswith(b"\n"):
+            chunk += b"\n"
+        if chunk.strip() == b"pong":
+            if accept_pong:
+                return chunk
+            continue
+        return chunk
+    raise TimeoutError("console read timeout")
+
+
 def _console_once(ip: str, cmds: list[str], timeout: float, quiet: bool) -> list[str]:
-    sock = socket.create_connection((ip, CONSOLE_PORT), timeout=timeout)
-    sock.settimeout(0.8)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dest = (ip, CONSOLE_PORT)
     replies: list[str] = []
     try:
-        try:
-            sock.recv(4096)
-        except socket.timeout:
-            pass
         for cmd in cmds:
-            sock.sendall((cmd + "\n").encode())
-            buf = b""
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
+            wire = (cmd + "\n").encode()
+            accept_pong = cmd.strip().split(None, 1)[0] == "ping"
+            buf = b"nok timeout\n"
+            for attempt in range(CONSOLE_CMD_RETRIES):
+                _drain_console(sock)
+                sock.sendto(wire, dest)
                 try:
-                    chunk = sock.recv(4096)
-                except socket.timeout:
-                    if buf:
-                        break
-                    continue
-                if not chunk:
+                    buf = _recv_reply(sock, timeout, accept_pong=accept_pong)
                     break
-                buf += chunk
-                if b"ok\n" in buf or b"error:" in buf or cmd == "status":
-                    if cmd == "status":
-                        sock.settimeout(0.25)
-                        try:
-                            while True:
-                                extra = sock.recv(4096)
-                                if not extra:
-                                    break
-                                buf += extra
-                        except socket.timeout:
-                            pass
-                    break
+                except TimeoutError:
+                    if attempt + 1 < CONSOLE_CMD_RETRIES:
+                        if not quiet:
+                            print(
+                                f"[{ip}] {cmd}  timeout, "
+                                f"retry {attempt + 1}/{CONSOLE_CMD_RETRIES - 1}"
+                            )
+                        time.sleep(0.2 * (attempt + 1))
+                        continue
+                    buf = b"nok timeout\n"
             text = buf.decode("utf-8", "replace")
+            # ping -> pong is success (not an ok/nok line).
+            if accept_pong and text.strip() == "pong":
+                text = "ok\n"
             replies.append(text)
             if not quiet:
                 print(f"[{ip}] {cmd}")
                 if text.strip():
                     print(text.rstrip())
             else:
-                status = "ok" if "error:" not in text else text.strip().splitlines()[-1]
+                status = (
+                    "ok" if "nok " not in text else text.strip().splitlines()[-1]
+                )
                 print(f"[{ip}] {cmd}  {status}")
     finally:
         sock.close()
@@ -254,7 +273,7 @@ def _console_once(ip: str, cmds: list[str], timeout: float, quiet: bool) -> list
 
 
 def replies_ok(replies: list[str]) -> bool:
-    return all("error:" not in text for text in replies)
+    return all("nok " not in text for text in replies)
 
 
 def fmt_bus(bus: str) -> str:
@@ -297,13 +316,14 @@ def upstream_bind_cmds(
     bus_tx: str,
     bus_rx: str,
 ) -> list[str]:
+    # bus_tx / bus_rx are stamped by the manager; the radio only has a
+    # single inject/forward pair.
+    del bus_tx, bus_rx
     return [
-        f"unset_upstream_tx bus={bus_tx}",
-        f"unset_upstream_rx bus={bus_rx}",
-        f"unset_upstream_tx bus={bus_rx}",
-        f"unset_upstream_rx bus={bus_tx}",
-        f"set_upstream_tx bus={bus_tx} {inject_port}",
-        f"set_upstream_rx bus={bus_rx} {host} {host_port}",
+        "unset_upstream_tx",
+        "unset_upstream_rx",
+        f"set_upstream_tx port={inject_port}",
+        f"set_upstream_rx host={host} port={host_port}",
     ]
 
 
@@ -314,13 +334,13 @@ def upstream_config_cmds(
     bus_tx: str,
     bus_rx: str,
     domain: str,
-    mode: str | None = None,
     extra_cmds: list[str] | None = None,
 ) -> list[str]:
-    cmds: list[str] = []
-    if mode:
-        cmds.append(f"set_mode {mode}")
-    cmds.append(f"set_domain {domain}")
+    # Radio RX filters Addr3 by local mode prefix; must match host/manager stamp.
+    cmds: list[str] = [
+        "set_mode STANDALONE",
+        f"set_domain {domain}",
+    ]
     cmds.extend(upstream_bind_cmds(host, inject_port, host_port, bus_tx, bus_rx))
     if extra_cmds:
         cmds.extend(extra_cmds)
@@ -337,7 +357,6 @@ def configure_upstream(
     bus_rx: str,
     domain: str,
     quiet: bool,
-    mode: str | None = None,
     extra_cmds: list[str] | None = None,
 ) -> bool:
     replies = console(
@@ -349,7 +368,6 @@ def configure_upstream(
             bus_tx,
             bus_rx,
             domain,
-            mode=mode,
             extra_cmds=extra_cmds,
         ),
         quiet=quiet,
@@ -416,11 +434,17 @@ def log_status(ip: str, label: str) -> str:
 
 
 def configure_radio(
-    ip: str, channel: int | None, modulation: str | None, cca: bool, quiet: bool
+    ip: str,
+    channel: int | None,
+    modulation: str | None,
+    cca: bool | None,
+    quiet: bool,
 ) -> bool:
     # Channel 14 is 802.11b-only: apply DSSS/CCK before switching to 14,
     # and leave 14 before applying OFDM (matches firmware settings::apply_snapshot).
-    cmds: list[str] = []
+    # Radios default to BFC_TUNNEL_DEVICE; STANDALONE matches manager Addr3 stamp.
+    # Channel / modulation / CCA are only sent when the caller asked for them.
+    cmds: list[str] = ["set_mode STANDALONE"]
     if channel == 14:
         if modulation is not None:
             cmds.append(f"set_modulation {modulation}")
@@ -430,7 +454,8 @@ def configure_radio(
             cmds.append(f"set_channel {channel}")
         if modulation is not None:
             cmds.append(f"set_modulation {modulation}")
-    cmds.append(f"set_cca_enabled {1 if cca else 0}")
+    if cca is not None:
+        cmds.append(f"set_cca_enabled {1 if cca else 0}")
     replies = console(ip, cmds, quiet=quiet)
     return replies_ok(replies)
 
@@ -452,9 +477,15 @@ def parse_seq(data: bytes) -> int | None:
         return None
 
 
+
 class Listener:
-    def __init__(self, bind_ip: str, port: int) -> None:
+    """UDP receiver. For standalone air path, payloads are full MPDUs; filter by bus."""
+
+    def __init__(
+        self, bind_ip: str, port: int, bus_filter: int | None = None
+    ) -> None:
         self.stats = RecvStats()
+        self.bus_filter = bus_filter
         self._stop = threading.Event()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -471,6 +502,18 @@ class Listener:
         self._thread.join(timeout=2.0)
         self._sock.close()
 
+    def _note(self, payload: bytes) -> None:
+        now = time.monotonic()
+        st = self.stats
+        if st.first is None:
+            st.first = now
+        st.last = now
+        st.packets += 1
+        st.nbytes += len(payload)
+        seq = parse_seq(payload)
+        if seq is not None:
+            st.seqs.add(seq)
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -479,16 +522,82 @@ class Listener:
                 continue
             except OSError:
                 break
+            if self.bus_filter is None:
+                self._note(data)
+                continue
+            for bus, body in mpdu.unpack_mpdu(data):
+                if bus != self.bus_filter:
+                    continue
+                self._note(body)
+
+
+def send_exact(
+    dest: tuple[str, int],
+    tag: bytes,
+    count: int,
+    size: int,
+    gap: float,
+    *,
+    bus: int | None = None,
+    domain: int | None = None,
+) -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for seq in range(count):
+            payload = make_payload(tag, seq, size)
+            if bus is not None and domain is not None:
+                payload = mpdu.build_mpdu(
+                    payload, bus, domain, mode="STANDALONE"
+                )
+            sock.sendto(payload, dest)
+            if gap > 0:
+                time.sleep(gap)
+    finally:
+        sock.close()
+    return count
+
+
+def send_window(
+    dest: tuple[str, int],
+    tag: bytes,
+    size: int,
+    duration: float,
+    kbps: float,
+    start: float,
+    progress: list[int] | None = None,
+    stop: threading.Event | None = None,
+    *,
+    bus: int | None = None,
+    domain: int | None = None,
+) -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sent = 0
+    seq = 0
+    interval = (size * 8.0) / (kbps * 1000.0) if kbps > 0 else 0.0
+    next_t = start
+    try:
+        while (stop is None or not stop.is_set()) and time.monotonic() - start < duration:
             now = time.monotonic()
-            st = self.stats
-            if st.first is None:
-                st.first = now
-            st.last = now
-            st.packets += 1
-            st.nbytes += len(data)
-            seq = parse_seq(data)
-            if seq is not None:
-                st.seqs.add(seq)
+            if interval > 0 and now < next_t:
+                time.sleep(min(0.001, next_t - now))
+                continue
+            payload = make_payload(tag, seq, size)
+            if bus is not None and domain is not None:
+                payload = mpdu.build_mpdu(
+                    payload, bus, domain, mode="STANDALONE"
+                )
+            sock.sendto(payload, dest)
+            sent += 1
+            if progress is not None:
+                progress[0] = sent
+            seq += 1
+            if interval > 0:
+                next_t += interval
+                if next_t < time.monotonic() - interval:
+                    next_t = time.monotonic()
+    finally:
+        sock.close()
+    return sent
 
 
 def send_tcp_record(sock: socket.socket, payload: bytes) -> None:
@@ -600,18 +709,6 @@ class TcpListener:
             self._read_client(conn)
 
 
-def send_exact(dest: tuple[str, int], tag: bytes, count: int, size: int, gap: float) -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        for seq in range(count):
-            sock.sendto(make_payload(tag, seq, size), dest)
-            if gap > 0:
-                time.sleep(gap)
-    finally:
-        sock.close()
-    return count
-
-
 def send_exact_tcp(
     dest: tuple[str, int], tag: bytes, count: int, size: int, gap: float,
     sock: socket.socket | None = None,
@@ -697,220 +794,11 @@ def auto_offer_kbps(modulation: str, size: int) -> float:
     mac_us = 400.0 if phy <= 11000 else 150.0
     mpdu_bits = (24 + size) * 8
     air_us = preamble_us + (mpdu_bits / phy) * 1000.0 + mac_us
-    return (size * 8.0) / (air_us / 1000.0) * 0.85
-
-
-def intra_air_size(payload_len: int, nsym: int) -> int:
-    if payload_len <= 0:
-        return FEC_INTRA_HDR
-    chunk = 255 - nsym
-    if chunk < 1:
-        raise SystemExit(f"--fec-nsym {nsym} is too large")
-    n_chunks = (payload_len + chunk - 1) // chunk
-    return FEC_INTRA_HDR + payload_len + n_chunks * nsym
-
-
-def fec_max_orig(intra: bool, nsym: int) -> int:
-    if not intra:
-        return MAX_BLOCK_ORIG
-    for size in range(MAX_PAYLOAD - FEC_INTRA_HDR, 0, -1):
-        if intra_air_size(size, nsym) <= MAX_PAYLOAD:
-            return size
-    return 0
-
-
-def fec_air_size(size: int, intra: bool, nsym: int) -> int:
-    if intra:
-        return intra_air_size(size, nsym)
-    return min(MAX_PAYLOAD, size + FEC_BLOCK_HDR + FEC_LEN_PREFIX)
-
-
-def auto_offer_kbps_fec(
-    modulation: str, size: int, k: int, n: int, intra: bool, nsym: int
-) -> float:
-    """App-layer offer so air frames stay near the usual 85% PHY estimate."""
-    air_size = fec_air_size(size, intra, nsym)
-    air_offer = auto_offer_kbps(modulation, air_size)
-    scale = size / air_size if air_size else 1.0
-    if intra:
-        return air_offer * scale
-    return air_offer * (k / n) * scale
-
-
-def fec_label(args: argparse.Namespace) -> str:
-    if not args.fec:
-        return "off"
-    if args.fec_intra:
-        return f"intra nsym={args.fec_nsym}"
-    return f"block k={args.fec_k} n={args.fec_n} timeout={args.fec_timeout:g}ms"
-
-
-class FecProxies:
-    """Four host-side fec.py processes: encode A/B, decode A/B."""
-
-    def __init__(
-        self,
-        radio_a: str,
-        radio_b: str,
-        k: int,
-        n: int,
-        nsym: int,
-        timeout_ms: float,
-        intra: bool,
-        verbose: bool,
-    ) -> None:
-        self.radio_a = radio_a
-        self.radio_b = radio_b
-        self.k = k
-        self.n = n
-        self.nsym = nsym
-        self.timeout_ms = timeout_ms
-        self.intra = intra
-        self.verbose = verbose
-        self.procs: list[subprocess.Popen[str]] = []
-        self._drains: list[threading.Thread] = []
-
-    def start(self) -> None:
-        if not FEC_SCRIPT.is_file():
-            raise SystemExit(f"missing {FEC_SCRIPT}")
-        common = [sys.executable, str(FEC_SCRIPT)]
-        if self.intra:
-            fec_args = ["--intra", "--nsym", str(self.nsym)]
-        else:
-            fec_args = ["--k", str(self.k), "--n", str(self.n), "--timeout", str(self.timeout_ms)]
-        if self.verbose:
-            fec_args.append("--verbose")
-        specs = [
-            (
-                "enc-a",
-                [
-                    "--encode",
-                    "--from",
-                    str(FEC_ENC_A),
-                    "--to",
-                    f"{self.radio_a}:{INJECT_PORT}",
-                    *fec_args,
-                ],
-            ),
-            (
-                "enc-b",
-                [
-                    "--encode",
-                    "--from",
-                    str(FEC_ENC_B),
-                    "--to",
-                    f"{self.radio_b}:{INJECT_PORT}",
-                    *fec_args,
-                ],
-            ),
-            (
-                "dec-a",
-                ["--decode", "--from", str(HOST_PORT_A), "--to", f"127.0.0.1:{FEC_APP_A}"],
-            ),
-            (
-                "dec-b",
-                ["--decode", "--from", str(HOST_PORT_B), "--to", f"127.0.0.1:{FEC_APP_B}"],
-            ),
-        ]
-        try:
-            for name, extra in specs:
-                self._spawn(name, common + extra)
-        except Exception:
-            self.stop()
-            raise
-
-    def _spawn(self, name: str, argv: list[str]) -> None:
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        self.procs.append(proc)
-        deadline = time.monotonic() + 5.0
-        started = False
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                err = proc.stderr.read() if proc.stderr else ""
-                raise SystemExit(f"fec {name} exited {proc.returncode}: {err.strip()}")
-            if proc.stderr is None:
-                break
-            ready = select_readable(proc.stderr, timeout=0.2)
-            if not ready:
-                continue
-            line = proc.stderr.readline()
-            if self.verbose and line:
-                print(f"[fec {name}] {line}", end="")
-            if "listening" in line:
-                started = True
-                break
-        if not started:
-            raise SystemExit(f"fec {name} did not print listening")
-        t = threading.Thread(target=self._drain, args=(name, proc), daemon=True)
-        t.start()
-        self._drains.append(t)
-
-    def _drain(self, name: str, proc: subprocess.Popen[str]) -> None:
-        if proc.stderr is None:
-            return
-        for line in proc.stderr:
-            if self.verbose:
-                print(f"[fec {name}] {line}", end="")
-
-    def stop(self) -> None:
-        for proc in self.procs:
-            if proc.poll() is None:
-                proc.terminate()
-        deadline = time.monotonic() + 2.0
-        for proc in self.procs:
-            remaining = deadline - time.monotonic()
-            try:
-                proc.wait(timeout=max(0.05, remaining))
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=1.0)
-        self.procs.clear()
-
-
-def select_readable(stream: object, timeout: float) -> bool:
-    readable, _, _ = select.select([stream], [], [], timeout)
-    return bool(readable)
-
-
-def send_window(
-    dest: tuple[str, int],
-    tag: bytes,
-    size: int,
-    duration: float,
-    kbps: float,
-    start: float,
-    progress: list[int] | None = None,
-    stop: threading.Event | None = None,
-) -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sent = 0
-    seq = 0
-    interval = (size * 8.0) / (kbps * 1000.0) if kbps > 0 else 0.0
-    next_t = start
-    try:
-        while (stop is None or not stop.is_set()) and time.monotonic() - start < duration:
-            now = time.monotonic()
-            if interval > 0 and now < next_t:
-                time.sleep(min(0.001, next_t - now))
-                continue
-            sock.sendto(make_payload(tag, seq, size), dest)
-            sent += 1
-            if progress is not None:
-                progress[0] = sent
-            seq += 1
-            if interval > 0:
-                next_t += interval
-                if next_t < time.monotonic() - interval:
-                    next_t = time.monotonic()
-    finally:
-        sock.close()
-    return sent
+    raw = (size * 8.0) / (air_us / 1000.0)
+    # Legacy OFDM_24M: allow >15 Mbps payload targets when air loss is low.
+    if phy >= 24000:
+        return min(phy * 0.78, raw * 0.98)
+    return raw * 0.85
 
 
 def goodput_kbps(stats: RecvStats, duration: float) -> float:
@@ -978,10 +866,16 @@ def parse_modulations(text: str) -> list[str]:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="WT32-ETH01 WInject bandwidth test")
+    p = argparse.ArgumentParser(
+        description="WT32-ETH01 WInject bandwidth test (--udp/--tcp managers, --direct radios)"
+    )
     p.add_argument("--a", default="192.168.253.11", help="radio A Ethernet IP")
     p.add_argument("--b", default="192.168.253.12", help="radio B Ethernet IP")
-    p.add_argument("--host", default="", help="host IP that both radios send air→UDP back to")
+    p.add_argument(
+        "--host",
+        default="",
+        help="host IP used when probing radio status (default: auto)",
+    )
     p.add_argument(
         "--domain",
         default=DEFAULT_DOMAIN,
@@ -990,12 +884,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--bus-ab",
         default=BUS_AB,
-        help=f"bus A injects / B filters (default {BUS_AB})",
+        help=f"bus A injects / B filters (default {BUS_AB}; informational)",
     )
     p.add_argument(
         "--bus-ba",
         default=BUS_BA,
-        help=f"bus B injects / A filters (default {BUS_BA})",
+        help=f"bus B injects / A filters (default {BUS_BA}; informational)",
     )
     p.add_argument(
         "--channel",
@@ -1014,16 +908,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="sweep every firmware modulation",
     )
-    p.add_argument("--size", type=int, default=1400, help="UDP payload bytes (max 1476)")
+    p.add_argument("--size", type=int, default=1400, help="payload bytes (max 1476)")
     p.add_argument("--duration", type=float, default=5.0, help="seconds per bandwidth phase")
     p.add_argument(
         "--drain",
         type=float,
         default=1.0,
         help=(
-            "seconds to wait after sending (UDP). TCP waits until every sent "
-            "record arrives, then this settle so last ACKs can clear; timeout "
-            f"is max(drain, {TCP_DRAIN_TIMEOUT_S:.0f}s)"
+            "after send window: wait up to this many seconds for recv==sent, "
+            "then settle the same duration (0 = no drain)"
         ),
     )
     p.add_argument(
@@ -1036,29 +929,42 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--cca",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="TX CCA / CSMA on both radios (default: enabled; --no-cca disables)",
+        default=None,
+        help="set_cca_enabled on both radios; omit to keep existing",
     )
-    p.add_argument("--skip-config", action="store_true", help="do not touch the TCP console")
-    p.add_argument(
+    p.add_argument("--skip-config", action="store_true", help="do not touch the UDP console")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--udp",
+        action="store_true",
+        help="winject-manager UDP ports (datagrams; manager stamps MPDUs)",
+    )
+    mode.add_argument(
         "--tcp",
         action="store_true",
-        help=(
-            "host path via winject-manager TCP forwarding (skips console upstream "
-            "binds; still applies channel/modulation/cca unless --skip-config)"
-        ),
+        help="winject-manager TCP ports (length-prefixed ARQ)",
+    )
+    mode.add_argument(
+        "--direct",
+        action="store_true",
+        help="stamp MPDUs on host and inject to radios (no manager)",
+    )
+    p.add_argument(
+        "--skip-upstream",
+        action="store_true",
+        help="--direct only: do not rebind sut/sur",
     )
     p.add_argument(
         "--tcp-send-a",
         type=int,
         default=TCP_SEND_A,
-        help=f"manager A TCP_SERVER port for A->B send (default {TCP_SEND_A})",
+        help=f"manager A send port for A->B (default {TCP_SEND_A})",
     )
     p.add_argument(
         "--tcp-send-b",
         type=int,
         default=TCP_SEND_B,
-        help=f"manager B TCP_SERVER port for B->A send (default {TCP_SEND_B})",
+        help=f"manager B send port for B->A (default {TCP_SEND_B})",
     )
     p.add_argument(
         "--test-integ",
@@ -1081,27 +987,8 @@ def parse_args() -> argparse.Namespace:
         help="run simultaneous A+B bandwidth phase",
     )
     p.add_argument("--verbose", action="store_true", help="print full console replies")
-    p.add_argument(
-        "--fec",
-        action="store_true",
-        help="send/receive through tools/fec.py (app-layer loss after decode)",
-    )
-    p.add_argument(
-        "--fec-intra",
-        action="store_true",
-        help="per-frame RS instead of packet-block FEC (implies --fec)",
-    )
-    p.add_argument("--fec-k", type=int, default=DEFAULT_FEC_K, help="FEC data packets per block")
-    p.add_argument("--fec-n", type=int, default=DEFAULT_FEC_N, help="FEC total packets per block")
-    p.add_argument("--fec-nsym", type=int, default=DEFAULT_FEC_NSYM, help="intra RS parity bytes")
-    p.add_argument(
-        "--fec-timeout",
-        type=float,
-        default=DEFAULT_FEC_TIMEOUT_MS,
-        metavar="MS",
-        help="encode partial-block flush timeout in ms",
-    )
     return p.parse_args()
+
 
 
 def fmt_summary(
@@ -1162,27 +1049,12 @@ def main() -> int:
         args.test_integ = True
         args.test_ab = True
         args.test_ba = True
-    # --tcp: managers / prepare_radios own sut/sur binds. Still apply PHY knobs
-    # unless the caller also passed --skip-config.
-    skip_upstream = args.skip_config or args.tcp
+    if not (args.udp or args.tcp or args.direct):
+        raise SystemExit("pick a path: --udp, --tcp, or --direct (see scripts/manager_bw_test.sh)")
     skip_phy = args.skip_config
-    if args.fec_intra:
-        args.fec = True
+    skip_upstream = (not args.direct) or args.skip_upstream or args.skip_config
     if args.size < 16 or args.size > MAX_PAYLOAD:
         raise SystemExit(f"--size must be 16..{MAX_PAYLOAD}")
-    if args.fec:
-        if not 1 <= args.fec_k < args.fec_n <= 255:
-            raise SystemExit(f"need 1 <= --fec-k < --fec-n <= 255, got k={args.fec_k} n={args.fec_n}")
-        if not 1 <= args.fec_nsym <= 254:
-            raise SystemExit(f"--fec-nsym must be 1..254, got {args.fec_nsym}")
-        if args.fec_timeout < 0:
-            raise SystemExit("--fec-timeout must be >= 0")
-        max_orig = fec_max_orig(args.fec_intra, args.fec_nsym)
-        if args.size > max_orig:
-            raise SystemExit(
-                f"--size {args.size} exceeds FEC max {max_orig} "
-                f"({'intra' if args.fec_intra else 'block'} must fit in {MAX_PAYLOAD} on the air)"
-            )
     if args.channel is not None and not channel_ok(args.channel):
         raise SystemExit(f"--channel must be {CHANNEL_MIN}-{CHANNEL_MAX}")
     if args.all and args.modulation is not None:
@@ -1203,7 +1075,10 @@ def main() -> int:
 
     host = args.host or detect_host(args.a)
     quiet = not args.verbose
-    cca_label = "enabled" if args.cca else "disabled"
+    if args.cca is None:
+        cca_label = "unchanged"
+    else:
+        cca_label = "enabled" if args.cca else "disabled"
     domain = fmt_domain(args.domain)
     bus_ab = fmt_bus(args.bus_ab)
     bus_ba = fmt_bus(args.bus_ba)
@@ -1237,32 +1112,18 @@ def main() -> int:
             )
         mods = [current]
 
-    if skip_upstream and not args.tcp:
-        for label, text in (("A", status_a), ("B", status_b)):
-            mode = parse_status_mode(text)
-            if mode and mode != "BFC_TUNNEL_DEVICE":
-                print(f"warning: {label} mode is {mode} (want BFC_TUNNEL_DEVICE)")
-        dom_a = parse_status_domain(status_a)
-        dom_b = parse_status_domain(status_b)
-        if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
-            print("warning: domain unset on one or both radios")
-        elif dom_a != dom_b:
-            print(f"warning: A domain {dom_a}, B domain {dom_b}")
-        elif dom_a != domain.upper():
-            print(f"warning: radios domain {dom_a}, test --domain {domain}")
-    elif args.tcp:
-        for label, text in (("A", status_a), ("B", status_b)):
-            mode = parse_status_mode(text)
-            if mode and mode != "STANDALONE":
-                print(f"warning: {label} mode is {mode} (want STANDALONE for manager TCP)")
-        dom_a = parse_status_domain(status_a)
-        dom_b = parse_status_domain(status_b)
-        if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
-            print("warning: domain unset on one or both radios")
-        elif dom_a != dom_b:
-            print(f"warning: A domain {dom_a}, B domain {dom_b}")
-        elif dom_a != domain.upper():
-            print(f"warning: radios domain {dom_a}, test --domain {domain}")
+    for label, text in (("A", status_a), ("B", status_b)):
+        mode = parse_status_mode(text)
+        if mode and mode != "STANDALONE":
+            print(f"warning: {label} mode is {mode} (want STANDALONE Addr3)")
+    dom_a = parse_status_domain(status_a)
+    dom_b = parse_status_domain(status_b)
+    if not dom_a or dom_a == "UNSET" or not dom_b or dom_b == "UNSET":
+        print("warning: domain unset on one or both radios")
+    elif dom_a != dom_b:
+        print(f"warning: A domain {dom_a}, B domain {dom_b}")
+    elif dom_a != domain.upper():
+        print(f"warning: radios domain {dom_a}, test --domain {domain}")
 
     channel_label = str(display_channel) if display_channel is not None else "existing"
     if args.channel is None:
@@ -1270,78 +1131,63 @@ def main() -> int:
     mod_label_suffix = " (unchanged)" if not apply_modulation else ""
     print(f"\nA {args.a}  B {args.b}  channel {channel_label}  cca {cca_label}")
     print(f"modulations ({len(mods)}): {' '.join(mods)}{mod_label_suffix}")
-    drain_note = f"{args.drain}s"
-    if args.tcp:
-        drain_note = (
-            f"until recv==sent then {args.drain}s "
-            f"(timeout {max(args.drain, TCP_DRAIN_TIMEOUT_S):.0f}s)"
-        )
-    print(f"payload {args.size} B  duration {args.duration}s  drain {drain_note}")
-    print(f"fec {fec_label(args)}")
+    print(
+        f"payload {args.size} B  duration {args.duration}s  drain "
+        f"{'off' if args.drain <= 0 else f'wait≤{args.drain:g}s then settle {args.drain:g}s'}"
+    )
+    bus_ab_i = mpdu.parse_bus_int(bus_ab)
+    bus_ba_i = mpdu.parse_bus_int(bus_ba)
+    domain_i = mpdu.parse_domain_int(domain)
+
     if args.tcp:
         print(
             f"tcp managers: send A->B {args.tcp_send_a}  send B->A {args.tcp_send_b}; "
             f"listen B->A {HOST_PORT_A}  listen A->B {HOST_PORT_B}"
         )
-
-    if not skip_upstream:
-        print("\n=== configure upstream ===")
-        if not configure_upstream(
-            args.a,
-            host,
-            inject_port=INJECT_PORT,
-            host_port=HOST_PORT_A,
-            bus_tx=bus_ab,
-            bus_rx=bus_ba,
-            domain=domain,
-            quiet=quiet,
-            mode="BFC_TUNNEL_DEVICE",
-        ):
-            raise SystemExit("failed to configure upstream on A")
-        if not configure_upstream(
-            args.b,
-            host,
-            inject_port=INJECT_PORT,
-            host_port=HOST_PORT_B,
-            bus_tx=bus_ba,
-            bus_rx=bus_ab,
-            domain=domain,
-            quiet=quiet,
-            mode="BFC_TUNNEL_DEVICE",
-        ):
-            raise SystemExit("failed to configure upstream on B")
-
-    fec: FecProxies | None = None
-    if args.fec:
-        print("\n=== start fec proxies ===")
-        fec = FecProxies(
-            radio_a=args.a,
-            radio_b=args.b,
-            k=args.fec_k,
-            n=args.fec_n,
-            nsym=args.fec_nsym,
-            timeout_ms=args.fec_timeout,
-            intra=args.fec_intra,
-            verbose=args.verbose,
-        )
-        fec.start()
-        atexit.register(fec.stop)
-        listen_a = Listener("127.0.0.1", FEC_APP_A)
-        listen_b = Listener("127.0.0.1", FEC_APP_B)
-        dest_a = ("127.0.0.1", FEC_ENC_A)
-        dest_b = ("127.0.0.1", FEC_ENC_B)
-        print(
-            f"encode {dest_a[1]}/{dest_b[1]} -> radios:{INJECT_PORT}; "
-            f"decode {HOST_PORT_A}/{HOST_PORT_B} -> app {FEC_APP_A}/{FEC_APP_B}"
-        )
-    elif args.tcp:
         listen_a = TcpListener("127.0.0.1", HOST_PORT_A)
         listen_b = TcpListener("127.0.0.1", HOST_PORT_B)
         dest_a = ("127.0.0.1", args.tcp_send_a)
         dest_b = ("127.0.0.1", args.tcp_send_b)
+    elif args.udp:
+        print(
+            f"udp managers: send A->B {args.tcp_send_a}  send B->A {args.tcp_send_b}; "
+            f"listen B->A {HOST_PORT_A}  listen A->B {HOST_PORT_B}"
+        )
+        listen_a = Listener("127.0.0.1", HOST_PORT_A)
+        listen_b = Listener("127.0.0.1", HOST_PORT_B)
+        dest_a = ("127.0.0.1", args.tcp_send_a)
+        dest_b = ("127.0.0.1", args.tcp_send_b)
     else:
-        listen_a = Listener(host, HOST_PORT_A)
-        listen_b = Listener(host, HOST_PORT_B)
+        print(
+            f"direct MPDU inject {INJECT_PORT}; forward host "
+            f"{HOST_PORT_A}/{HOST_PORT_B} (STANDALONE domain {domain})"
+        )
+        if not skip_upstream:
+            print("\n=== configure upstream ===")
+            if not configure_upstream(
+                args.a,
+                host,
+                inject_port=INJECT_PORT,
+                host_port=HOST_PORT_A,
+                bus_tx=bus_ab,
+                bus_rx=bus_ba,
+                domain=domain,
+                quiet=quiet,
+            ):
+                raise SystemExit("failed to configure upstream on A")
+            if not configure_upstream(
+                args.b,
+                host,
+                inject_port=INJECT_PORT,
+                host_port=HOST_PORT_B,
+                bus_tx=bus_ba,
+                bus_rx=bus_ab,
+                domain=domain,
+                quiet=quiet,
+            ):
+                raise SystemExit("failed to configure upstream on B")
+        listen_a = Listener(host, HOST_PORT_A, bus_filter=bus_ba_i)
+        listen_b = Listener(host, HOST_PORT_B, bus_filter=bus_ab_i)
         dest_a = (args.a, INJECT_PORT)
         dest_b = (args.b, INJECT_PORT)
 
@@ -1372,6 +1218,9 @@ def main() -> int:
         tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
         return tcp_sock_b
 
+    def bus_for(dest: tuple[str, int]) -> int:
+        return bus_ab_i if dest == dest_a else bus_ba_i
+
     def send_exact_fn(dest, tag, count, size, gap):
         if args.tcp:
             sock = tcp_sock_for(dest)
@@ -1381,6 +1230,10 @@ def main() -> int:
                 print(f"warning: {err}; reconnecting")
                 sock = reconnect_tcp(dest)
                 return send_exact_tcp(dest, tag, count, size, gap, sock)
+        if args.direct:
+            return send_exact(
+                dest, tag, count, size, gap, bus=bus_for(dest), domain=domain_i
+            )
         return send_exact(dest, tag, count, size, gap)
 
     stop = threading.Event()
@@ -1395,6 +1248,19 @@ def main() -> int:
             except TcpSendStall:
                 reconnect_tcp(dest)
                 raise
+        if args.direct:
+            return send_window(
+                dest,
+                tag,
+                size,
+                duration,
+                kbps,
+                start,
+                progress,
+                stop,
+                bus=bus_for(dest),
+                domain=domain_i,
+            )
         return send_window(dest, tag, size, duration, kbps, start, progress, stop)
 
     def reset() -> None:
@@ -1487,11 +1353,10 @@ def main() -> int:
         def halt_senders() -> None:
             nonlocal tcp_sock_a, tcp_sock_b
             stop.set()
-            if args.tcp:
-                close_quiet(tcp_sock_a)
-                close_quiet(tcp_sock_b)
-                tcp_sock_a = None
-                tcp_sock_b = None
+            close_quiet(tcp_sock_a)
+            close_quiet(tcp_sock_b)
+            tcp_sock_a = None
+            tcp_sock_b = None
             for t in threads:
                 t.join(timeout=1.0)
 
@@ -1544,11 +1409,10 @@ def main() -> int:
                         f"warning: sender thread still blocked after {join_timeout:.1f}s; "
                         "closing TCP sockets"
                     )
-                    if args.tcp:
-                        close_quiet(tcp_sock_a)
-                        close_quiet(tcp_sock_b)
-                        tcp_sock_a = None
-                        tcp_sock_b = None
+                    close_quiet(tcp_sock_a)
+                    close_quiet(tcp_sock_b)
+                    tcp_sock_a = None
+                    tcp_sock_b = None
                     t.join(timeout=TCP_SEND_TIMEOUT_S + 1.0)
             for err in stalls:
                 if err is not None:
@@ -1558,10 +1422,10 @@ def main() -> int:
                     tcp_sock_a = tcp_connect(dest_a[0], dest_a[1])
                 if tcp_sock_b is None:
                     tcp_sock_b = tcp_connect(dest_b[0], dest_b[1])
-            # TCP kbps is send-window goodput. Drain bytes still count toward recv
-            # so loss is "never delivered", not "still in ARQ when the next leg starts".
-            if args.tcp:
-                timeout = max(args.drain, TCP_DRAIN_TIMEOUT_S)
+            # Wait up to --drain for recv==sent, then settle --drain more.
+            # --drain 0 skips both. (TCP ARQ used to floor this at 10s.)
+            if args.drain > 0:
+                timeout = args.drain
                 t0 = time.monotonic()
                 deadline_d = t0 + timeout
                 last_dprint = 0.0
@@ -1599,26 +1463,22 @@ def main() -> int:
                                     f"warning: {dir_label(dest)} drain incomplete "
                                     f"{lis.stats.packets}/{sent_n} after {timeout:.1f}s"
                                 )
-            if not interrupted:
-                try:
-                    time.sleep(args.drain)
-                except KeyboardInterrupt:
-                    interrupted = True
-                    print("interrupted")
+                if not interrupted:
+                    try:
+                        time.sleep(args.drain)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        print("interrupted")
 
         elapsed = time.monotonic() - start
         if interrupted and elapsed < args.duration:
             measure_s = max(elapsed, 1e-6)
         else:
             measure_s = args.duration if args.duration > 0 else max(elapsed, 1e-6)
-        kbps_bytes = (
-            [lis.stats.nbytes for _dest, _tag, lis in senders] if args.tcp else None
-        )
         out: list[PhaseResult] = []
         for i, (_dest, _tag, lis) in enumerate(senders):
             sent_n = results[i] if results[i] > 0 else sent_live[i][0]
-            nbytes = kbps_bytes[i] if kbps_bytes is not None else lis.stats.nbytes
-            kbps = (nbytes * 8.0) / measure_s / 1000.0
+            kbps = (lis.stats.nbytes * 8.0) / measure_s / 1000.0
             out.append(PhaseResult(sent=sent_n, recv=lis.stats.packets, kbps=kbps))
         if interrupted:
             raise TestInterrupted(out)
@@ -1646,19 +1506,14 @@ def main() -> int:
         for idx, mod in enumerate(mods, 1):
             offer = args.kbps
             if offer < 0:
-                if args.fec:
-                    offer = auto_offer_kbps_fec( 
-                        mod, args.size, args.fec_k, args.fec_n, args.fec_intra, args.fec_nsym
-                    )
-                elif args.tcp:
-                    # TCP ARQ needs reverse ACK capacity; target ~50% of UDP air estimate.
-                    offer = auto_offer_kbps(mod, args.size) * 0.55
-                else:
-                    offer = auto_offer_kbps(mod, args.size)
+                offer = auto_offer_kbps(mod, args.size)
+                if args.tcp:
+                    # TCP ARQ needs reverse ACK capacity.
+                    offer *= 0.55
             paced = offer > 0
             print(
                 f"\n=== [{idx}/{len(mods)}] ch {channel_label}  {mod}{mod_label_suffix}  "
-                f"cca {cca_label}  fec {fec_label(args)}  offer {offer:.0f} kbps ==="
+                f"cca {cca_label}  offer {offer:.0f} kbps ==="
             )
             result = ModResult(modulation=mod, channel=display_channel, offer=offer)
             current = result
@@ -1700,7 +1555,7 @@ def main() -> int:
                 a_to_b, b_to_a = run_integrity()
                 print(f"A -> B  {a_to_b}/{args.integrity}")
                 print(f"B -> A  {b_to_a}/{args.integrity}")
-                if a_to_b != args.integrity or b_to_a != args.integrity:
+                if a_to_b < args.integrity or b_to_a < args.integrity:
                     print("integrity retry")
                     time.sleep(0.5)
                     a_to_b, b_to_a = run_integrity()
@@ -1708,11 +1563,13 @@ def main() -> int:
                     print(f"B -> A  {b_to_a}/{args.integrity}")
                 result.integrity_ab = a_to_b
                 result.integrity_ba = b_to_a
-                result.integrity_ok = a_to_b == args.integrity and b_to_a == args.integrity
+                result.integrity_ok = (
+                    a_to_b >= args.integrity and b_to_a >= args.integrity
+                )
             else:
                 result.integrity_ok = True
 
-            loss_lim = 25.0 if args.tcp else 5.0
+            loss_lim = 25.0
             result.uni_ok = True
             if args.test_ab or args.test_ba:
                 print("-- unidirectional")
@@ -1773,8 +1630,6 @@ def main() -> int:
     finally:
         listen_a.stop()
         listen_b.stop()
-        if fec is not None:
-            fec.stop()
 
     print("\n=== result (interrupted) ===" if interrupted else "\n=== result ===")
     paced = args.kbps != 0

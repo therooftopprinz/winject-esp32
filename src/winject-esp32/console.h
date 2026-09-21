@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "bfc-esp32/select_reactor.hpp"
-#include "bfc-esp32/timer.hpp"
+#include "lwip/sockets.h"
 
 class lc_tx_endpoint;
 class lc_rx_endpoint;
@@ -28,54 +28,48 @@ public:
 
 private:
     using reactor_t = bfc::select_reactor<>;
-    using timer_id_t = bfc::timer<>::timer_id_t;
 
-    struct out_s
-    {
-        int fd;
-    };
-
-    struct tcp_client_s
-    {
-        int fd = -1;
-        char line[128]{};
-        size_t len = 0;
-    };
-
-    static constexpr size_t k_max_tcp_clients = 4;
     static constexpr int k_sync_ms = 250;
+    // One Ethernet MTU UDP datagram (IP+UDP headers leave ~1472).
+    static constexpr size_t k_datagram_max = 1500;
+    static constexpr size_t k_reply_max = 16384;
+    static constexpr int64_t k_send_timeout_us = 2000000;
 
+    bool init_common(manager& netmgr);
     void attach_reactor();
     void schedule_sync();
-    void sync_tcp();
-    void watch_client(int fd);
+    void sync_udp();
+    void start_udp();
+    void stop_udp();
+    void unwatch_fd(int fd);
+    void on_datagram();
 
-    tcp_client_s* client_by_fd(int fd);
-    size_t client_count() const;
-    bool attach_client(int fd);
-    void close_client(int fd);
-    void close_all_clients();
-    void write(const out_s& out, const char* text);
-    void print(const out_s& out, const char* fmt, ...);
-    void print_banner(const out_s& out);
-    void print_help(const out_s& out);
-    void print_upstreams(const out_s& out, const lc_tx_bind_s* sut,
-                         uint8_t sut_count, const lc_rx_bind_s* sur,
-                         uint8_t sur_count);
-    void print_channel_metrics(const out_s& out, const wifi_status_s& radio,
-                               const lc_tx_bind_s* sut, uint8_t sut_count,
-                               const lc_rx_bind_s* sur, uint8_t sur_count);
-    void print_status(const out_s& out);
-    void handle_line(const char* line, const out_s& out);
-    void feed_char(char c, char* line, size_t* len, size_t max_len,
-                   const out_s& out);
-    void start_tcp();
-    void stop_tcp();
-    void accept_clients();
-    void poll_client(int fd);
+    void write(const char* text);
+    void write_bytes(const void* data, size_t n);
+    void flush_reply();
+    void print(const char* fmt, ...);
+    void reply_ok();
+    void reply_ok_args(const char* args);
+    void reply_nok(const char* msg);
+    void reply_usage(const char* usage);
+    void reply_done(bool ok, const char* fail);
+
+    void print_help();
+    void print_upstreams(const lc_tx_bind_s* sut, bool have_sut,
+                         const lc_rx_bind_s* sur, bool have_sur);
+    void print_channel_metrics(const wifi_status_s& radio,
+                               const lc_tx_bind_s* sut, bool have_sut,
+                               const lc_rx_bind_s* sur, bool have_sur);
+    void print_hardware();
+    void print_status();
+    void handle_datagram(char* buf, size_t n);
+    void handle_line(char* line);
+    void handle_ether_test_tx(char* arg1, char* extra);
+    void handle_ether_test_rx(char* buf, size_t n);
+
     bool radio_ready() const;
-    bool require_radio(const out_s& out);
-    void reboot_after_ok(const out_s& out);
+    bool require_radio();
+    void reboot_after_ok();
 
     lc_tx_endpoint* tx_ep = nullptr;
     lc_rx_endpoint* rx_ep = nullptr;
@@ -83,8 +77,12 @@ private:
     manager* netmgr = nullptr;
     reactor_t* reactor = nullptr;
     bool ready = false;
-    int listen_fd = -1;
-    tcp_client_s clients[k_max_tcp_clients];
+    int sock_fd = -1;
+    sockaddr_in reply_to{};
+    bool reply_to_set = false;
+    char reply[k_reply_max]{};
+    size_t reply_len = 0;
+    char recv_buf[k_datagram_max]{};
 };
 
 #endif  // WINJECT_CONSOLE_H_

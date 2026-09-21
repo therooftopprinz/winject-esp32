@@ -36,8 +36,8 @@ def _load_compile_commands(path: Path) -> list:
 
 def _install_clangd_db() -> None:
     by_file = {}
-    # wt32-eth01 is the only firmware env; host tests use `pio run -t test`.
-    for env_name in ("wt32-eth01",):
+    # Firmware envs share sources; merge compile DBs. Host tests: `pio run -t test`.
+    for env_name in ("wt32-eth01", "lan-module"):
         src = project / ".pio" / "build" / env_name / "compile_commands.json"
         for entry in _load_compile_commands(src):
             f = entry.get("file")

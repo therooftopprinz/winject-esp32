@@ -181,19 +181,29 @@ void frameBuildAddr3(uint8_t addr3[6], uint16_t domain)
     addr3[5] = static_cast<uint8_t>(domain);
 }
 
+bool frameAddr3PrefixMatch(const uint8_t* mpdu, size_t len)
+{
+    if (mpdu == nullptr || len < 22)
+    {
+        return false;
+    }
+    FrameRules rules = {};
+    snapshot_rules(&rules);
+    return memcmp(mpdu + 16, rules.prefix, 4) == 0;
+}
+
 bool frameAddr3Accept(const uint8_t* mpdu, size_t len, uint16_t domain)
 {
     if (mpdu == nullptr || len < 22 || domain == 0)
     {
         return false;
     }
-    FrameRules rules = {};
-    snapshot_rules(&rules);
-    if (memcmp(mpdu + 16, rules.prefix, 4) != 0)
+    if (!frameAddr3PrefixMatch(mpdu, len))
     {
         return false;
     }
-    const uint16_t got = static_cast<uint16_t>((mpdu[20] << 8) | mpdu[21]);
+    const uint16_t got =
+        static_cast<uint16_t>((mpdu[20] << 8) | mpdu[21]);
     return got == domain;
 }
 

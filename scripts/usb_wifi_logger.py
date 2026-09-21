@@ -2,7 +2,7 @@
 """Sniff a USB WiFi monitor iface for WInject air frames and decode bw_test.
 
 Captures radiotap + 802.11 on a monitor interface (default: mon0), keeps frames
-whose Addr3 is the tunnel BSSID used by tools/bw_test.py, unwraps the IBSS
+whose Addr3 matches the WInject BSSID, unwraps the IBSS
 body, and tries to parse:
 
   A 00000000 …   /   B 00000000 …     plain bw_test UDP payload
@@ -35,8 +35,12 @@ TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-BSSID_TUNNEL = bytes.fromhex("baddcafebabe")
-BSSID_STANDALONE = bytes.fromhex("deadcafebabe")
+# Firmware Addr3 = 4-byte mode prefix + 2-byte domain (docs/winject.md).
+PREFIX_TUNNEL = bytes.fromhex("baddcafe")       # BFC_TUNNEL_DEVICE
+PREFIX_STANDALONE = bytes.fromhex("cafebabe")   # STANDALONE
+# Legacy full-MAC constants kept for self-test fixtures only.
+BSSID_TUNNEL = PREFIX_TUNNEL + bytes.fromhex("babe")
+BSSID_STANDALONE = PREFIX_STANDALONE + bytes.fromhex("babe")
 BROADCAST = bytes.fromhex("ffffffffffff")
 ETH_P_ALL = 3
 LINKTYPE_IEEE802_11_RADIOTAP = 127
@@ -801,8 +805,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--channel", type=int, default=None, help="set phy channel 1-13 (iw phy set channel)")
     p.add_argument(
         "--bssid",
-        default="tunnel",
-        help="tunnel | standalone | both | aa:bb:cc:dd:ee:ff (default: tunnel BA:DD:CA:FE:BA:BE)",
+        default="standalone",
+        help="tunnel | standalone | both | any | aa:bb:cc:dd:ee:ff "
+        "(match Addr3 prefix; default: standalone CA:FE:BA:BE)",
     )
     p.add_argument("--quiet", action="store_true", help="stats only, no per-frame lines")
     p.add_argument(
@@ -819,17 +824,31 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def bssids_from_arg(text: str) -> set[bytes] | None:
+def prefixes_from_arg(text: str) -> set[bytes] | None:
+    """Return Addr3 4-byte prefixes to match, exact 6-byte MACs as 6-byte
+    'prefixes' (compared fully), or None for any."""
     key = text.strip().lower()
     if key in ("tunnel", "bfc", "bfc_tunnel_device"):
-        return {BSSID_TUNNEL}
+        return {PREFIX_TUNNEL}
     if key in ("standalone", "winject"):
-        return {BSSID_STANDALONE}
+        return {PREFIX_STANDALONE}
     if key in ("both", "all"):
-        return {BSSID_TUNNEL, BSSID_STANDALONE}
+        return {PREFIX_TUNNEL, PREFIX_STANDALONE}
     if key in ("any", "*"):
         return None
-    return {parse_mac(text)}
+    mac = parse_mac(text)
+    return {mac}
+
+
+def addr3_matches(addr3: bytes, filters: set[bytes] | None) -> bool:
+    if filters is None:
+        return True
+    for f in filters:
+        if len(f) == 4 and addr3[:4] == f:
+            return True
+        if len(f) == 6 and addr3 == f:
+            return True
+    return False
 
 
 def main() -> int:
@@ -841,7 +860,7 @@ def main() -> int:
     if args.interval < 0:
         raise SystemExit("--interval must be >= 0")
 
-    bssids = bssids_from_arg(args.bssid)
+    bssids = prefixes_from_arg(args.bssid)
     iface = resolve_iface(args.iface)
     if args.channel is not None:
         set_channel(iface, args.channel)
@@ -849,11 +868,16 @@ def main() -> int:
     sock = open_monitor(iface)
     pcap = PcapWriter(args.pcap) if args.pcap else None
     log = Logger(quiet=args.quiet, hex_bytes=args.hex)
-    bssid_label = (
-        "any"
-        if bssids is None
-        else ", ".join(mac_str(b).upper() for b in sorted(bssids))
-    )
+    if bssids is None:
+        bssid_label = "any"
+    else:
+        parts = []
+        for b in sorted(bssids):
+            if len(b) == 4:
+                parts.append(":".join(f"{x:02X}" for x in b) + ":DH:DL")
+            else:
+                parts.append(mac_str(b).upper())
+        bssid_label = ", ".join(parts)
     phy = wiphy_for(iface) or "?"
     fec_note = "reedsolo" if FEC is not None else "headers only (no reedsolo)"
     print(f"sniff {iface} ({phy})  bssid {bssid_label}  fec {fec_note}")
@@ -888,7 +912,7 @@ def main() -> int:
             if not dot.is_data:
                 log.nondata += 1
                 continue
-            if bssids is not None and dot.bssid not in bssids:
+            if not addr3_matches(dot.bssid, bssids):
                 log.other_bssid += 1
                 continue
             if pcap:

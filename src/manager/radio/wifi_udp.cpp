@@ -64,27 +64,22 @@ void wifi_udp::close()
     forward_port_ = 0;
 }
 
-bool wifi_udp::send(const uint8_t* data, size_t len)
+bool wifi_udp::send(const uint8_t* mpdu, size_t len)
 {
-    if (sock.fd() < 0 || data == nullptr || len == 0)
+    if (sock.fd() < 0 || mpdu == nullptr || len == 0)
     {
         return false;
     }
-    if (len > k_stream_payload_max)
+    if (len < 24 || len > k_mpdu_max)
     {
         return false;
     }
-    size_t framed = 0;
-    if (!seq.stamp(txbuf, sizeof(txbuf), data, len, &framed))
-    {
-        return false;
-    }
-    if (!udp_send_to(sock.fd(), inject, txbuf, framed))
+    if (!udp_send_to(sock.fd(), inject, mpdu, len))
     {
         return false;
     }
     tx_pkt_++;
-    tx_byte_ += framed;
+    tx_byte_ += len;
     return true;
 }
 
@@ -108,21 +103,13 @@ void wifi_udp::on_forward()
             break;
         }
         any = true;
-        const uint8_t* payload = nullptr;
-        size_t plen = 0;
-        if (!seq.accept(buf, static_cast<size_t>(n), &payload, &plen))
-        {
-            continue;
-        }
         rx_pkt_++;
         rx_byte_ += static_cast<uint64_t>(n);
         if (on_rx)
         {
-            on_rx(payload, plen);
+            on_rx(buf, static_cast<size_t>(n));
         }
     }
-    // One scheduler pass after the burst so cumulative/SACK ACK uses the latest
-    // rx state and goes out immediately (do not wait for the timer).
     if (any && on_idle)
     {
         on_idle();

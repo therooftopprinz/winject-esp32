@@ -1,7 +1,7 @@
 #ifndef WINJECT_FRAME_H_
 #define WINJECT_FRAME_H_
 
-#include "packet.h"
+#include "pdu_types.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +23,7 @@ bool frameParseMode(const char* text, WinjectMode* mode);
 void frameGetStaMac(uint8_t mac[6]);
 void frameGetBssidPrefix(uint8_t prefix[4]);
 void frameBuildAddr3(uint8_t addr3[6], uint16_t domain);
+bool frameAddr3PrefixMatch(const uint8_t* mpdu, size_t len);
 bool frameAddr3Accept(const uint8_t* mpdu, size_t len, uint16_t domain);
 
 void framePackSlots(uint8_t addr1[6], uint8_t addr2[6],

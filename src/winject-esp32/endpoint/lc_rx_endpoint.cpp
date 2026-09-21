@@ -32,31 +32,7 @@ bool lc_rx_endpoint::ensure_socket()
     return true;
 }
 
-int lc_rx_endpoint::find_exact(bus_t bus, ip_port_t dest) const
-{
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-    {
-        if (ep[i].used && ep[i].bus == bus && ip_port_eq(ep[i].dest, dest))
-        {
-            return i;
-        }
-    }
-    return -1;
-}
-
-int lc_rx_endpoint::find_free() const
-{
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-    {
-        if (!ep[i].used)
-        {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void lc_rx_endpoint::send_one(entry_s& e, const uint8_t* data, size_t len)
+void lc_rx_endpoint::send_one(ip_port_t d, const uint8_t* data, size_t len)
 {
     if (data == nullptr || len == 0)
     {
@@ -64,13 +40,13 @@ void lc_rx_endpoint::send_one(entry_s& e, const uint8_t* data, size_t len)
     }
     if (!ensure_socket())
     {
-        e.drop_send_fail.fetch_add(1, std::memory_order_relaxed);
+        drop_send_fail.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = e.dest.host;
-    addr.sin_port = htons(e.dest.port);
+    addr.sin_addr.s_addr = d.host;
+    addr.sin_port = htons(d.port);
     const ssize_t n = send_sock.send(data, len, 0,
                                       reinterpret_cast<const sockaddr*>(&addr),
                                       sizeof(addr));
@@ -79,7 +55,7 @@ void lc_rx_endpoint::send_one(entry_s& e, const uint8_t* data, size_t len)
         wifi::instance().note_udp_fwd_pkt();
         return;
     }
-    e.drop_send_fail.fetch_add(1, std::memory_order_relaxed);
+    drop_send_fail.fetch_add(1, std::memory_order_relaxed);
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
     {
         ESP_LOGD(TAG, "sendto failed: %d", errno);
@@ -91,10 +67,9 @@ bool lc_rx_endpoint::init()
     return lock.init();
 }
 
-bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
+bool lc_rx_endpoint::set_endpoint(ip_port_t d)
 {
-    if (dest.port == 0 || dest.host == 0 || dest.host == 0xFFFFFFFFu ||
-        !lock.ready())
+    if (d.port == 0 || d.host == 0 || d.host == 0xFFFFFFFFu || !lock.ready())
     {
         return false;
     }
@@ -104,42 +79,23 @@ bool lc_rx_endpoint::add_endpoint(bus_t bus, ip_port_t dest)
         return false;
     }
 
-    // Same bus+dest is idempotent. Otherwise replace any existing binds for
-    // this bus (terminate then create) so reset/re-apply takes the new values.
-    if (find_exact(bus, dest) >= 0)
+    if (used && ip_port_eq(dest, d))
     {
         return true;
     }
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-    {
-        if (ep[i].used && ep[i].bus == bus)
-        {
-            ep[i].used = false;
-            ep[i].bus = 0;
-            ep[i].dest = {};
-            ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
-        }
-    }
 
-    const int idx = find_free();
-    if (idx < 0)
-    {
-        ESP_LOGE(TAG, "rx bind table full");
-        return false;
-    }
-    ep[idx].used = true;
-    ep[idx].bus = bus;
-    ep[idx].dest = dest;
-    ep[idx].drop_send_fail.store(0, std::memory_order_relaxed);
+    used = true;
+    dest = d;
+    drop_send_fail.store(0, std::memory_order_relaxed);
 
     char ip_str[16];
-    const uint8_t* b = reinterpret_cast<const uint8_t*>(&dest.host);
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&d.host);
     snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
-    ESP_LOGI(TAG, "sur bus=%02X %s:%u", bus, ip_str, dest.port);
+    ESP_LOGI(TAG, "sur %s:%u", ip_str, d.port);
     return true;
 }
 
-bool lc_rx_endpoint::rem_endpoint(bus_t bus)
+bool lc_rx_endpoint::clear()
 {
     if (!lock.ready())
     {
@@ -150,26 +106,15 @@ bool lc_rx_endpoint::rem_endpoint(bus_t bus)
     {
         return false;
     }
-    bool any = false;
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-    {
-        if (ep[i].used && ep[i].bus == bus)
-        {
-            ep[i].used = false;
-            ep[i].bus = 0;
-            ep[i].dest = {};
-            ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
-            any = true;
-        }
-    }
-    (void)any;
+    used = false;
+    dest = {};
+    drop_send_fail.store(0, std::memory_order_relaxed);
     return true;
 }
 
-bool lc_rx_endpoint::load(const lc_rx_bind_s* binds, uint8_t count)
+bool lc_rx_endpoint::get_status(lc_rx_bind_s* out)
 {
-    if (!lock.ready() || count > WIFI_AIRPORT_MAX ||
-        (count > 0 && binds == nullptr))
+    if (out == nullptr || !lock.ready())
     {
         return false;
     }
@@ -178,78 +123,30 @@ bool lc_rx_endpoint::load(const lc_rx_bind_s* binds, uint8_t count)
     {
         return false;
     }
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
+    if (!used)
     {
-        ep[i].used = false;
-        ep[i].bus = 0;
-        ep[i].dest = {};
-        ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
+        return false;
     }
-    for (uint8_t i = 0; i < count; i++)
-    {
-        ep[i].used = true;
-        ep[i].bus = binds[i].bus;
-        ep[i].dest = binds[i].dest;
-        ep[i].drop_send_fail.store(0, std::memory_order_relaxed);
-    }
+    out->dest = dest;
+    out->active = send_sock.valid();
+    out->drop_send_fail = drop_send_fail.load(std::memory_order_relaxed);
     return true;
 }
 
-void lc_rx_endpoint::fill_status(lc_rx_bind_s* out, uint8_t* count)
+void lc_rx_endpoint::forward(packet&& mpdu)
 {
-    if (out == nullptr || count == nullptr)
-    {
-        return;
-    }
-    *count = 0;
-    if (!lock.ready())
-    {
-        return;
-    }
-    bfc::semaphore::lock guard(lock);
-    if (!guard)
-    {
-        return;
-    }
-    for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-    {
-        if (ep[i].used)
-        {
-            const uint8_t n = *count;
-            out[n].bus = ep[i].bus;
-            out[n].dest = ep[i].dest;
-            out[n].active = send_sock.valid();
-            out[n].drop_send_fail =
-                ep[i].drop_send_fail.load(std::memory_order_relaxed);
-            *count = static_cast<uint8_t>(n + 1);
-        }
-    }
-}
-
-void lc_rx_endpoint::forward(bus_t bus, packet&& pdu)
-{
-    entry_s* entries[WIFI_AIRPORT_MAX];
-    uint8_t n = 0;
+    ip_port_t d{};
     {
         bfc::semaphore::lock guard(lock);
-        if (!guard)
+        if (!guard || !used)
         {
             return;
         }
-        for (int i = 0; i < WIFI_AIRPORT_MAX; i++)
-        {
-            if (ep[i].used && ep[i].bus == bus)
-            {
-                entries[n++] = &ep[i];
-            }
-        }
+        d = dest;
     }
-    if (n == 0 || !pdu.is_valid() || pdu.data() == nullptr)
+    if (!mpdu.is_valid() || mpdu.data() == nullptr || mpdu.size() == 0)
     {
         return;
     }
-    for (uint8_t i = 0; i < n; i++)
-    {
-        send_one(*entries[i], pdu.data(), pdu.size());
-    }
+    send_one(d, mpdu.data(), mpdu.size());
 }

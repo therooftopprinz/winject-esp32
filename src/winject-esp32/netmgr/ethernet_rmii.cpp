@@ -2,11 +2,13 @@
 
 #include "config.h"
 #include "dhcp_client.h"
-#include "dhcp_server.h"
+#include "eth_dma_burst.h"
+#include "lc_tx_endpoint.h"
 
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_eth.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_netif_glue.h"
 #include "esp_eth_phy.h"
@@ -29,9 +31,7 @@ ethernet_rmii& ethernet_rmii::instance()
     return inst;
 }
 
-ethernet_rmii::ethernet_rmii()
-    : dhcp_client(dhcp_client::instance()),
-      dhcp_server(dhcp_server::instance())
+ethernet_rmii::ethernet_rmii() : dhcp_client(dhcp_client::instance())
 {
 }
 
@@ -41,67 +41,6 @@ void ethernet_rmii::fill_static_ip(esp_netif_ip_info_t* info, uint32_t ip)
     info->ip.addr = ip;
     esp_netif_set_ip4_addr(&info->netmask, 255, 255, 255, 0);
     info->gw.addr = info->ip.addr;
-}
-
-bool ethernet_rmii::destroy_netif()
-{
-    if (eth_handle == nullptr)
-    {
-        return false;
-    }
-    dhcp_server.mark_inactive();
-    dhcp_server.bind_netif(nullptr);
-    if (esp_eth_stop(eth_handle) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "ETH stop failed");
-        return false;
-    }
-    if (eth_glue != nullptr)
-    {
-        if (esp_eth_del_netif_glue(eth_glue) != ESP_OK)
-        {
-            ESP_LOGE(TAG, "ETH glue delete failed");
-            return false;
-        }
-        eth_glue = nullptr;
-    }
-    if (eth_netif != nullptr)
-    {
-        esp_netif_destroy(eth_netif);
-        eth_netif = nullptr;
-    }
-    netif_is_dhcp_server_ = false;
-    return true;
-}
-
-bool ethernet_rmii::attach_and_start()
-{
-    if (eth_netif == nullptr || eth_handle == nullptr)
-    {
-        return false;
-    }
-    if (esp_netif_set_hostname(eth_netif, DEVICE_HOSTNAME) != ESP_OK)
-    {
-        ESP_LOGW(TAG, "ETH hostname set failed");
-    }
-    eth_glue = esp_eth_new_netif_glue(eth_handle);
-    if (eth_glue == nullptr)
-    {
-        ESP_LOGE(TAG, "ETH glue alloc failed");
-        return false;
-    }
-    if (esp_netif_attach(eth_netif, eth_glue) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "ETH attach failed");
-        return false;
-    }
-    dhcp_server.bind_netif(eth_netif);
-    if (esp_eth_start(eth_handle) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "ETH start failed");
-        return false;
-    }
-    return true;
 }
 
 void ethernet_rmii::eth_event_handler(void* arg, esp_event_base_t event_base,
@@ -121,33 +60,30 @@ void ethernet_rmii::eth_event_handler(void* arg, esp_event_base_t event_base,
             break;
         case ETHERNET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "ETH link up");
-            if (self->netif_is_dhcp_server_ && self->eth_netif != nullptr)
+#if CONFIG_ETH_SOFT_FLOW_CONTROL
+            if (self->eth_handle != nullptr)
             {
-                self->connected_.store(true, std::memory_order_relaxed);
-                esp_netif_ip_info_t info = {};
-                uint32_t ip = 0;
-                if (esp_netif_get_ip_info(self->eth_netif, &info) == ESP_OK)
+                bool fc = true;
+                const esp_err_t fc_err =
+                    esp_eth_ioctl(self->eth_handle, ETH_CMD_S_FLOW_CTRL, &fc);
+                if (fc_err != ESP_OK)
                 {
-                    ip = info.ip.addr;
-                }
-                if (ip != 0)
-                {
-                    self->dhcp_server.start(self->eth_netif, ip);
+                    ESP_LOGW(TAG, "ETH flow control on link-up failed: %s",
+                             esp_err_to_name(fc_err));
                 }
             }
+#endif
             break;
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "ETH link down");
-            if (!self->using_static_.load(std::memory_order_relaxed) &&
-                !self->netif_is_dhcp_server_)
+            if (!self->using_static_.load(std::memory_order_relaxed))
             {
                 self->connected_.store(false, std::memory_order_relaxed);
             }
             break;
         case ETHERNET_EVENT_STOP:
             ESP_LOGI(TAG, "ETH stopped");
-            if (!self->using_static_.load(std::memory_order_relaxed) &&
-                !self->netif_is_dhcp_server_)
+            if (!self->using_static_.load(std::memory_order_relaxed))
             {
                 self->connected_.store(false, std::memory_order_relaxed);
             }
@@ -208,12 +144,16 @@ void ethernet_rmii::begin()
     {
         ESP_LOGW(TAG, "ETH hostname set failed");
     }
-    dhcp_server.bind_netif(eth_netif);
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     // Oscillator (GPIO16-gated) can take >100ms to be accepted on GPIO0,
     // especially with a USB-UART auto-reset load on the strapping pin.
     mac_config.sw_reset_timeout_ms = 1000;
+    // Default emac_rx prio 15 loses to wifi_tx@20 when both land on core 0,
+    // starving EMAC descriptor recycle under concurrent inject. Pin to the
+    // install core (APP/main = CPU1) and outrank wifi_tx so RX keeps up.
+    mac_config.flags |= ETH_MAC_FLAG_PIN_TO_CORE;
+    mac_config.rx_task_prio = WIFI_RADIO_TASK_PRIO + 2;
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
     emac_config.smi_gpio.mdc_num = ETH_PHY_MDC;
@@ -223,17 +163,20 @@ void ethernet_rmii::begin()
     emac_config.smi_mdio_gpio_num = ETH_PHY_MDIO;
 #endif
     emac_config.interface = EMAC_DATA_INTERFACE_RMII;
+    emac_config.dma_burst_len = eth_dma_burst_len_for_init();
+    ESP_LOGI(TAG, "EMAC dma_burst_len beats=%u", eth_dma_burst_beats_stored());
 #if ETH_CLK_MODE == ETH_CLK_GPIO17_OUT
     // GPIO17 is LED4 (WiFi TX activity); clock-out mode leaves that LED unused.
     emac_config.clock_config.rmii.clock_mode = EMAC_CLK_OUT;
     emac_config.clock_config.rmii.clock_gpio = 17;
+    ESP_LOGI(TAG, "RMII REF_CLK GPIO17 out");
 #else
     emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
     emac_config.clock_config.rmii.clock_gpio = 0;
-#endif
-
     // Ensure GPIO0 is free for RMII REF_CLK before EMAC grabs it.
     gpio_reset_pin(GPIO_NUM_0);
+    ESP_LOGI(TAG, "RMII REF_CLK GPIO0 in");
+#endif
 
     esp_eth_mac_t* eth_mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
@@ -276,6 +219,8 @@ void ethernet_rmii::begin()
         ESP_LOGE(TAG, "ETH attach failed");
         return;
     }
+    // Replace glue input with inject hijack (non-sut frames still go to netif).
+    lc_tx_endpoint::instance().attach_eth_input(eth_handle, eth_netif);
     if (esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
                                    &eth_event_handler, this) != ESP_OK ||
         esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
@@ -289,6 +234,22 @@ void ethernet_rmii::begin()
         ESP_LOGE(TAG, "ETH start failed");
         return;
     }
+#if CONFIG_ETH_SOFT_FLOW_CONTROL
+    {
+        bool fc = true;
+        const esp_err_t fc_err =
+            esp_eth_ioctl(eth_handle, ETH_CMD_S_FLOW_CTRL, &fc);
+        if (fc_err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "ETH flow control enable failed: %s",
+                     esp_err_to_name(fc_err));
+        }
+        else
+        {
+            ESP_LOGI(TAG, "ETH soft flow control enabled");
+        }
+    }
+#endif
     ready_.store(true, std::memory_order_relaxed);
 }
 
@@ -316,11 +277,6 @@ bool ethernet_rmii::using_static() const
 void ethernet_rmii::set_using_static(bool using_static)
 {
     using_static_.store(using_static, std::memory_order_relaxed);
-}
-
-bool ethernet_rmii::netif_is_dhcp_server() const
-{
-    return netif_is_dhcp_server_;
 }
 
 esp_netif_t* ethernet_rmii::netif()
@@ -353,7 +309,7 @@ bool ethernet_rmii::apply_static_ip(uint32_t ip)
     {
         return false;
     }
-    if (!netif_is_dhcp_server_ && !dhcp_client.stop(eth_netif))
+    if (!dhcp_client.stop(eth_netif))
     {
         return false;
     }
@@ -368,59 +324,6 @@ bool ethernet_rmii::apply_static_ip(uint32_t ip)
     connected_.store(true, std::memory_order_relaxed);
     ESP_LOGI(TAG, "ETH static " IPSTR "/24", IP2STR(&info.ip));
     return true;
-}
-
-bool ethernet_rmii::rebuild_dhcp_client()
-{
-    if (!destroy_netif())
-    {
-        return false;
-    }
-    esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif = esp_netif_new(&netif_cfg);
-    if (eth_netif == nullptr)
-    {
-        ESP_LOGE(TAG, "ETH netif alloc failed");
-        return false;
-    }
-    netif_is_dhcp_server_ = false;
-    return attach_and_start();
-}
-
-bool ethernet_rmii::rebuild_dhcp_server(uint32_t ip)
-{
-    if (!destroy_netif())
-    {
-        return false;
-    }
-    esp_netif_ip_info_t ip_info = {};
-    fill_static_ip(&ip_info, ip);
-
-    esp_netif_inherent_config_t inherent = ESP_NETIF_INHERENT_DEFAULT_ETH();
-    inherent.flags = static_cast<esp_netif_flags_t>(
-        ESP_NETIF_DHCP_SERVER | ESP_NETIF_FLAG_AUTOUP |
-        ESP_NETIF_FLAG_EVENT_IP_MODIFIED | ESP_NETIF_DEFAULT_ARP_FLAGS);
-    inherent.ip_info = &ip_info;
-
-    const esp_netif_config_t netif_cfg = {
-        .base = &inherent,
-        .driver = nullptr,
-        .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH,
-    };
-    eth_netif = esp_netif_new(&netif_cfg);
-    if (eth_netif == nullptr)
-    {
-        ESP_LOGE(TAG, "ETH dhcps netif alloc failed");
-        return false;
-    }
-    netif_is_dhcp_server_ = true;
-    if (!attach_and_start())
-    {
-        return false;
-    }
-    using_static_.store(true, std::memory_order_relaxed);
-    connected_.store(true, std::memory_order_relaxed);
-    return dhcp_server.start(eth_netif, ip);
 }
 
 bool ethernet_rmii::local_ipv4(uint32_t* out)

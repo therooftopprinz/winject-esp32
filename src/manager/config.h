@@ -31,7 +31,7 @@ struct upstream_config_s
 {
     size_t index = 0;
     upstream_mode_e mode = upstream_mode_e::udp_generic;
-    // Host TX / RX buses (0 = unset). Map to set_upstream_tx / set_upstream_rx.
+    // Host TX / RX buses (0 = unset). Manager stamps/demuxes these into MPDUs.
     // UDP may set only one direction; TCP ARQ needs both.
     uint8_t bus_tx = 0;
     uint8_t bus_rx = 0;
@@ -51,7 +51,7 @@ struct upstream_config_s
 struct config
 {
     std::string device;
-    uint16_t console_port = 2323;
+    uint16_t console_port = 22;
     uint8_t channel = 1;
     std::string modulation = "DSS_1M_L";
     int8_t power_dbm = 20;
@@ -59,9 +59,15 @@ struct config
     // Shared air domain (Addr3); 0 = unset / invalid.
     uint16_t domain = 0;
     uint32_t max_rate_kbps = 10000;
+    // Max DATA MPDUs emitted per 250 us scheduler tick (1–32).
+    size_t max_data_per_tick = 4;
     std::string local_ip;
-    uint16_t forward_base = 9210;
+    uint16_t inject_port = 9000;
+    uint16_t forward_port = 9210;
+    uint16_t forward_base = 9210;  // legacy alias for forward_port
     bool skip_console = false;
+    // Console tx_grant before inject batches (cd-protocol); 0 = no grant gate.
+    bool ci_pace_inject = true;
     // Local UDP management console. Empty = disabled. Both required together.
     // console_in = bind (recv commands); console_out = dest (send replies).
     std::string manager_console_in;

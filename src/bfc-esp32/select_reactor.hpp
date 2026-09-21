@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <fcntl.h>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -126,7 +127,12 @@ public:
             if (lock != nullptr &&
                 xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
             {
-                wake_cbs.push_back(std::move(cb));
+                // Fixed ring — never heap-allocate on the wake path.
+                // Throwing operator new aborts under -fno-exceptions.
+                if (wake_cbs_n < k_wake_cb_cap)
+                {
+                    wake_cbs[wake_cbs_n++] = std::move(cb);
+                }
                 xSemaphoreGive(lock);
             }
         }
@@ -267,8 +273,17 @@ public:
             if (maxfd >= 0)
             {
                 nfds = ::select(maxfd + 1, &readfds, &writefds, nullptr, tvp);
-                if (nfds < 0 && errno == EINTR)
+                if (nfds < 0)
                 {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (errno == EBADF)
+                    {
+                        drop_invalid_watches();
+                    }
+                    vTaskDelay(1);
                     continue;
                 }
             }
@@ -310,18 +325,25 @@ public:
                 }
             }
 
-            std::vector<cb_t> cbs;
+            cb_t cbs[k_wake_cb_cap];
+            size_t n = 0;
             if (lock != nullptr &&
                 xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE)
             {
-                cbs.swap(wake_cbs);
+                n = wake_cbs_n;
+                for (size_t i = 0; i < n; ++i)
+                {
+                    cbs[i] = std::move(wake_cbs[i]);
+                    wake_cbs[i] = nullptr;
+                }
+                wake_cbs_n = 0;
                 xSemaphoreGive(lock);
             }
-            for (auto& cb : cbs)
+            for (size_t i = 0; i < n; ++i)
             {
-                if (cb)
+                if (cbs[i])
                 {
-                    cb();
+                    cbs[i]();
                 }
             }
 
@@ -395,6 +417,26 @@ private:
         xSemaphoreGive(lock);
     }
 
+    void drop_invalid_watches()
+    {
+        for (fd_entry_s& entry : entries)
+        {
+            if (entry.fd < 0 || (!entry.read_active && !entry.write_active))
+            {
+                continue;
+            }
+            if (fcntl(entry.fd, F_GETFL) >= 0)
+            {
+                continue;
+            }
+            entry.read_active = false;
+            entry.read_cb = nullptr;
+            entry.write_active = false;
+            entry.write_armed = false;
+            entry.write_cb = nullptr;
+        }
+    }
+
     void apply_pending_rem()
     {
         std::vector<pending_rem_s> pending;
@@ -453,12 +495,15 @@ private:
         return true;
     }
 
+    static constexpr size_t k_wake_cb_cap = 32;
+
     timer_t timer_;
     socket wake_sock;
     sockaddr_in wake_addr{};
     SemaphoreHandle_t lock = nullptr;
     std::vector<fd_entry_s> entries;
-    std::vector<cb_t> wake_cbs;
+    cb_t wake_cbs[k_wake_cb_cap]{};
+    size_t wake_cbs_n = 0;
     std::vector<pending_rem_s> pending_rem;
     std::atomic<bool> running{false};
     std::atomic<bool> pending_wake{false};

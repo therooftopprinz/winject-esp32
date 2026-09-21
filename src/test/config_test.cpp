@@ -27,7 +27,7 @@ TEST(ConfigTest, LoadsStandaloneUdp)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -46,7 +46,7 @@ upstream-0.tx               = 127.0.0.1:21082
     std::string err;
     ASSERT_TRUE(cfg.load(path, &err)) << err;
     EXPECT_EQ(cfg.device, "192.168.32.1");
-    EXPECT_EQ(cfg.console_port, 2323);
+    EXPECT_EQ(cfg.console_port, 22);
     EXPECT_EQ(cfg.channel, 1);
     EXPECT_EQ(cfg.modulation, "OFDM_24M");
     EXPECT_EQ(cfg.power_dbm, 20);
@@ -67,7 +67,7 @@ TEST(ConfigTest, DefaultMaxRateWhenOmitted)
 
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -92,7 +92,7 @@ TEST(ConfigTest, RejectsSameBusTxRx)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -117,7 +117,7 @@ TEST(ConfigTest, LoadsRsBlockErasure)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -149,7 +149,7 @@ TEST(ConfigTest, FecRejectsBadKn)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -176,7 +176,7 @@ TEST(ConfigTest, FecRejectedOnTcp)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 winject.modulation    = OFDM_24M
 winject.power         = 20
@@ -203,7 +203,7 @@ TEST(ConfigTest, Channel14AcceptsDsss)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 14
 winject.modulation    = DSS_1M_L
 winject.power         = 20
@@ -242,7 +242,7 @@ TEST(ConfigTest, Channel14RejectsOfdm)
 {
     const std::string path = write_conf(R"(
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 14
 winject.modulation    = OFDM_24M
 winject.power         = 20

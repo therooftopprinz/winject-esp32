@@ -30,7 +30,7 @@ public:
     bool apply_live();
 
 private:
-    // Persisted: mode, radio, ethernet, domain, sut/sur/ci.
+    // Persisted: mode, radio, ethernet, domain, single sut/sur, ci.
     struct snapshot_s
     {
         WinjectMode mode;
@@ -41,19 +41,18 @@ private:
         int8_t tx_power_dbm;
         uint32_t fallback_ip;
         NetmgrMode network_mode;
-        bool dhcp_server_enabled;
         uint16_t domain;
-        uint8_t sut_count;
-        lc_tx_bind_s sut[WIFI_AIRPORT_MAX];
-        uint8_t sur_count;
-        lc_rx_bind_s sur[WIFI_AIRPORT_MAX];
+        bool has_sut;
+        uint16_t sut_port;
+        bool has_sur;
+        ip_port_t sur_dest;
         uint8_t ci_count;
         ip_port_t ci[WIFI_AIRPORT_MAX];
     };
 
-    // v5 = v4 header + sut/sur/ci (same layout as v3 after domain).
-    // v4 loads with empty upstreams; v3 loads upstreams.
-    static constexpr uint8_t k_blob_version = 5;
+    // v6 = single upstream_tx/rx (+ ci). v3/v5 multi-bind tables load with
+    // upstreams cleared. v4 has empty upstreams.
+    static constexpr uint8_t k_blob_version = 6;
     static constexpr uint8_t k_blob_version_min = 3;
     static constexpr size_t k_blob_max = 2600;
 

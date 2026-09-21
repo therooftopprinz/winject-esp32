@@ -9,7 +9,6 @@
 #include "freertos/semphr.h"
 
 class dhcp_client;
-class dhcp_server;
 class ethernet;
 
 enum NetmgrMode
@@ -35,12 +34,8 @@ public:
     static const char* network_mode_name(NetmgrMode mode);
     static bool parse_network_mode(const char* text, NetmgrMode* mode);
     bool set_network_mode(NetmgrMode mode);
-    bool dhcp_server_enabled() const;
-    bool dhcp_server_active() const;
-    bool set_dhcp_server_enabled(bool enabled);
     bool set_ip(uint32_t ip);
     bool static_ipv4(uint32_t* out) const;
-    bool dhcp_pool(uint32_t* start, uint32_t* end) const;
     bool local_ipv4(uint32_t* out) const;
 
 private:
@@ -57,17 +52,14 @@ private:
 
     void ensure_static_ip() const;
     uint32_t static_ip() const;
-    bool dhcp_server_should_run() const;
     bool apply_network_locked();
     bool apply_network();
 
     ethernet& eth;
     class dhcp_client& dhcp_client;
-    class dhcp_server& dhcp_server;
     reactor_t reactor_;
     std::atomic<bool> started{false};
     std::atomic<bool> init_ok{false};
-    std::atomic<bool> dhcp_server_wanted{false};
     mutable std::atomic<uint32_t> static_ip_{0};
     std::atomic<uint32_t> auto_gen{0};
     std::atomic<NetmgrMode> network_mode_{NETMGR_MODE_AUTO};

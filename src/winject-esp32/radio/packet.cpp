@@ -129,13 +129,14 @@ packet_allocator& packet_allocator::rx()
     return inst;
 }
 
-bool packet_allocator::init(size_t count)
+bool packet_allocator::init(size_t count, uint8_t* backing, size_t backing_count)
 {
     if (free != nullptr)
     {
         return true;
     }
-    if (count == 0 || count > k_max_count)
+    if (count == 0 || count > k_max_count || backing == nullptr ||
+        backing_count < count)
     {
         return false;
     }
@@ -146,6 +147,8 @@ bool packet_allocator::init(size_t count)
         return false;
     }
     this->count = count;
+    this->storage = backing;
+    this->storage_count = backing_count;
     for (size_t i = 0; i < k_max_count; i++)
     {
         refs[i].store(0, std::memory_order_relaxed);
@@ -156,7 +159,9 @@ bool packet_allocator::init(size_t count)
         {
             vQueueDelete(q);
             free = nullptr;
-            count = 0;
+            this->count = 0;
+            storage = nullptr;
+            storage_count = 0;
             return false;
         }
     }

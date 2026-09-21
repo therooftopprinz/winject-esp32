@@ -1,6 +1,8 @@
 #ifndef WINJECT_MANAGER_APP_H_
 #define WINJECT_MANAGER_APP_H_
 
+#include <cstdint>
+
 #include "config.h"
 
 #include <chrono>
@@ -25,19 +27,22 @@ public:
 
 private:
     bool add_upstream(const upstream_config_s& uc);
+    bool setup_radio();
     bool setup_upstreams();
     bool start_manager_console();
     bool apply_console();
     bool hold_console();
     void begin_console();
     void drop_console();
-    void on_console_connecting();
     void on_console();
     void reconnect_tick();
     void heartbeat_tick();
     void arm_tick();
     void stats_tick();
     void flush_shutdown();
+    void arm_grant_io();
+    void on_grant_io();
+    void maybe_send_grant_request();
 
     bool set_upstream_fec(size_t index, fec_type_e type, int k, int n,
                           std::string* error);
@@ -55,6 +60,8 @@ private:
     static constexpr int k_ping_interval_ticks = 1000;
     static constexpr int k_pong_timeout_ticks = 2000;
     static constexpr int k_reconnect_ticks = 4000;
+    static constexpr uint8_t k_grant_low_water = 24;
+    static constexpr int k_max_outstanding_grants = 4;
 
     config cfg;
     ::reactor reactor;
@@ -62,16 +69,19 @@ private:
     console_service mgr_console;
     channel_info ci;
     tx_scheduler scheduler;
-    std::vector<std::unique_ptr<wifi_udp>> radios;
+    std::unique_ptr<wifi_udp> radio;
     std::vector<std::unique_ptr<stream>> upstreams;
     in_addr device_ip{};
     in_addr local_ip{};
     int reconnect_ticks = 0;
     int heartbeat_ticks = 0;
     bool console_ok = false;
-    bool console_connecting = false;
     bool awaiting_pong = false;
     std::chrono::steady_clock::time_point last_stats{};
+    uint8_t tx_grant_credits_{0};
+    bool grant_io_armed_{false};
+    int grant_outstanding_{0};
+    std::chrono::steady_clock::time_point grant_sent_at_{};
 };
 
 #endif  // WINJECT_MANAGER_APP_H_

@@ -27,21 +27,10 @@ static void ipv4ToString(uint32_t addr, char* out, size_t outLen)
 static esp_err_t handleRoot(httpd_req_t* req)
 {
     char ethStr[16] = "down";
-    char dhcpsNote[48] = "";
     uint32_t ip = 0;
     if (g_netmgr != nullptr && g_netmgr->local_ipv4(&ip))
     {
         ipv4ToString(ip, ethStr, sizeof(ethStr));
-    }
-    if (g_netmgr != nullptr && g_netmgr->dhcp_server_active())
-    {
-        uint32_t fallback = 0;
-        if (g_netmgr->static_ipv4(&fallback))
-        {
-            const uint8_t* b = reinterpret_cast<const uint8_t*>(&fallback);
-            snprintf(dhcpsNote, sizeof(dhcpsNote), " dhcps %u.%u.%u.0/24", b[0],
-                     b[1], b[2]);
-        }
     }
 
     char page[640];
@@ -49,13 +38,13 @@ static esp_err_t handleRoot(httpd_req_t* req)
         page, sizeof(page),
         "<!DOCTYPE html><html><body>"
         "<h1>WInject-ESP32</h1>"
-        "<p>eth %s%s</p>"
+        "<p>eth %s</p>"
         "<p>HTTP POST /update</p>"
         "<form method='POST' action='/update' enctype='multipart/form-data'>"
         "<input type='file' name='firmware'>"
         "<input type='submit' value='Update'>"
         "</form></body></html>",
-        ethStr, dhcpsNote);
+        ethStr);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }

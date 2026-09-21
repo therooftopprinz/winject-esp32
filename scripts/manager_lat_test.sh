@@ -6,7 +6,7 @@
 #   raw      raw UDP (no FEC)
 #   fec10-15 UDP RS_BLOCK_ERASURE k=10 n=15
 #   fec10-11 UDP RS_BLOCK_ERASURE k=10 n=11
-#   tcp      manager TCP ARQ (same ports as manager_tcp_bw_test.sh)
+#   tcp      manager TCP ARQ (same ports as manager_bw_test.sh --tcp)
 #
 # Usage:
 #   ./scripts/manager_lat_test.sh
@@ -126,7 +126,7 @@ while [[ $i -lt ${#LAT_ARGS[@]} ]]; do
 done
 
 if [[ "$HOST_SET" -eq 0 ]]; then
-  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 2323)); print(s.getsockname()[0]); s.close()")"
+  HOST_IP="$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('$RADIO_A', 22)); print(s.getsockname()[0]); s.close()")"
 fi
 
 ensure_winject_manager "$ROOT"

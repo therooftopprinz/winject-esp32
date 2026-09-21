@@ -1,5 +1,5 @@
 winject.device        = 192.168.32.1
-winject.console       = 2323
+winject.console       = 22
 winject.channel       = 1
 # Channel 1-14; channel 14 is 802.11b (DSSS/CCK) only.
 winject.modulation    = OFDM_24M

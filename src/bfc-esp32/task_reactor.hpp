@@ -139,31 +139,38 @@ public:
 
             const bool pending =
                 pending_wake.exchange(false, std::memory_order_acq_rel);
-            uint32_t n = 0;
+            uint32_t notify_n = 0;
             if (!pending)
             {
-                n = ulTaskNotifyTake(pdTRUE, ticks);
+                notify_n = ulTaskNotifyTake(pdTRUE, ticks);
             }
             else
             {
-                n = ulTaskNotifyTake(pdTRUE, 0);
-                n = n > 0 ? n : 1;
+                notify_n = ulTaskNotifyTake(pdTRUE, 0);
+                notify_n = notify_n > 0 ? notify_n : 1;
             }
 
-            std::vector<cb_t> cbs;
+            cb_t cbs[k_wake_cb_cap];
+            size_t cb_n = 0;
             if (wake_lock != nullptr &&
                 xSemaphoreTake(wake_lock, portMAX_DELAY) == pdTRUE)
             {
-                cbs.swap(wake_cbs);
+                cb_n = wake_cbs_n;
+                for (size_t i = 0; i < cb_n; ++i)
+                {
+                    cbs[i] = std::move(wake_cbs[i]);
+                    wake_cbs[i] = nullptr;
+                }
+                wake_cbs_n = 0;
                 xSemaphoreGive(wake_lock);
             }
 
-            const bool woken = pending || n > 0 || !cbs.empty();
-            for (auto& cb : cbs)
+            const bool woken = pending || notify_n > 0 || cb_n > 0;
+            for (size_t i = 0; i < cb_n; ++i)
             {
-                if (cb)
+                if (cbs[i])
                 {
-                    cb();
+                    cbs[i]();
                 }
             }
 
@@ -197,7 +204,10 @@ public:
             if (wake_lock != nullptr &&
                 xSemaphoreTake(wake_lock, portMAX_DELAY) == pdTRUE)
             {
-                wake_cbs.push_back(std::move(cb));
+                if (wake_cbs_n < k_wake_cb_cap)
+                {
+                    wake_cbs[wake_cbs_n++] = std::move(cb);
+                }
                 xSemaphoreGive(wake_lock);
             }
         }
@@ -226,12 +236,15 @@ private:
         vTaskDelete(nullptr);
     }
 
+    static constexpr size_t k_wake_cb_cap = 32;
+
     uint64_t timeout_ms = 100;
     timer_t timer_;
     SemaphoreHandle_t ctx_lock = nullptr;
     SemaphoreHandle_t wake_lock = nullptr;
     std::vector<context*> contexts;
-    std::vector<cb_t> wake_cbs;
+    cb_t wake_cbs[k_wake_cb_cap]{};
+    size_t wake_cbs_n = 0;
     std::atomic<bool> running{false};
     std::atomic<bool> pending_wake{false};
     std::atomic<bool> pinned{false};

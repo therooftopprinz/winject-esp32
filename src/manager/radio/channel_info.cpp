@@ -108,14 +108,27 @@ void channel_info::on_datagram()
         {
             break;
         }
-        if (static_cast<size_t>(n) >= sizeof(flow_ctrl_s) &&
-            buf[0] == static_cast<uint8_t>(type_e::flow_ctrl))
+        if (n >= 3 && buf[0] == static_cast<uint8_t>(type_e::flow_ctrl))
         {
-            flow_ctrl_s sample = {};
-            memcpy(&sample, buf, sizeof(sample));
             flow_.valid = true;
-            flow_.tx_queue_size = sample.tx_queue_size;
-            flow_.tx_queue_capacity = sample.tx_queue_capacity;
+            flow_.tx_queue_size = buf[1];
+            flow_.tx_queue_capacity = buf[2];
+            flow_.inject_accepted_valid = false;
+            flow_.inject_accepted = 0;
+            if (static_cast<size_t>(n) >= sizeof(flow_ctrl_s))
+            {
+                flow_ctrl_s sample = {};
+                memcpy(&sample, buf, sizeof(sample));
+                flow_.inject_accepted = sample.inject_accepted;
+                flow_.inject_accepted_valid = true;
+            }
+            else if (static_cast<size_t>(n) >= 7)
+            {
+                flow_ctrl_s sample = {};
+                memcpy(&sample, buf, 7);
+                flow_.inject_accepted = sample.inject_accepted;
+                flow_.inject_accepted_valid = true;
+            }
             clock_gettime(CLOCK_REALTIME, &flow_.received);
             continue;
         }

@@ -286,6 +286,17 @@ bool config::load(const std::string& path, std::string* error)
     {
         skip_console = *skip == "1" || *skip == "true";
     }
+    if (auto mpt = parser.as<unsigned>("winject.max_data_per_tick"))
+    {
+        if (*mpt >= 1 && *mpt <= 32)
+        {
+            max_data_per_tick = *mpt;
+        }
+    }
+    if (auto pace = parser.arg("winject.ci_pace_inject"))
+    {
+        ci_pace_inject = !(*pace == "0" || *pace == "false");
+    }
     manager_console_in = parser.arg("manager.console_in").value_or("");
     manager_console_out = parser.arg("manager.console_out").value_or("");
     if (manager_console_in.empty() != manager_console_out.empty())
@@ -307,10 +318,22 @@ bool config::load(const std::string& path, std::string* error)
             return false;
         }
     }
+    auto fwd_port = parser.as<unsigned>("winject.forward_port");
     auto fwd_base = parser.as<unsigned>("winject.forward_base");
-    if (fwd_base && *fwd_base > 0 && *fwd_base <= 65535)
+    if (fwd_port && *fwd_port > 0 && *fwd_port <= 65535)
+    {
+        forward_port = static_cast<uint16_t>(*fwd_port);
+        forward_base = forward_port;
+    }
+    else if (fwd_base && *fwd_base > 0 && *fwd_base <= 65535)
     {
         forward_base = static_cast<uint16_t>(*fwd_base);
+        forward_port = forward_base;
+    }
+    auto inj = parser.as<unsigned>("winject.inject_port");
+    if (inj && *inj > 0 && *inj <= 65535)
+    {
+        inject_port = static_cast<uint16_t>(*inj);
     }
     stats_sec = parser.as<unsigned>("winject.stats_sec").value_or(0);
     if (const char* env = std::getenv("WINJECT_STATS_SEC"))

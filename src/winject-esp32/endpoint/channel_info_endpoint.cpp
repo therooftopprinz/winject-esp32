@@ -69,6 +69,10 @@ void channel_info_endpoint::fanout(const void* data, size_t len)
             return;
         }
         n = n_subs;
+        if (n == 0)
+        {
+            return;
+        }
         memcpy(copy, subs, n * sizeof(ip_port_t));
     }
     for (uint8_t i = 0; i < n; i++)
@@ -219,11 +223,13 @@ void channel_info_endpoint::on_rx_air_info(int8_t rssi_dbm, int8_t snr_db)
 }
 
 void channel_info_endpoint::on_flow_ctrl_info(uint8_t queue_size,
-                                             uint8_t queue_cap)
+                                             uint8_t queue_cap,
+                                             uint32_t inject_accepted)
 {
     tx_flow_ctrl_s sample = {};
     sample.info_type = E_CHANNEL_INFO_TYPE_FLOW_CTRL;
     sample.tx_queue_size = queue_size;
     sample.tx_queue_capacity = queue_cap;
+    sample.inject_accepted = inject_accepted;
     fanout(&sample, sizeof(sample));
 }

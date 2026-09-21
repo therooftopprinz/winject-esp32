@@ -148,3 +148,23 @@ TEST_F(FrameTest, Size11RoundTrip)
     EXPECT_EQ(round[4].size, 1);
     EXPECT_EQ(round[1].size, 0);
 }
+
+TEST_F(FrameTest, FullMpduBodyRoundTrip)
+{
+    pdu_slot_t slots[WIFI_PDU_SLOTS] = {};
+    slots[0] = {0xB2, 3};
+    slots[1] = {0xC3, 2};
+    uint8_t mpdu[WIFI_HDR_LEN + 5] = {};
+    frameStampHeader(mpdu, slots, 0x1234);
+    memcpy(mpdu + WIFI_HDR_LEN, "\xAA\xBB\xCC\xDD\xEE", 5);
+
+    pdu_slot_t round[WIFI_PDU_SLOTS] = {};
+    frameUnpackSlots(mpdu + 4, mpdu + 10, round);
+    EXPECT_EQ(round[0].bus, 0xB2);
+    EXPECT_EQ(round[0].size, 3);
+    EXPECT_EQ(round[1].bus, 0xC3);
+    EXPECT_EQ(round[1].size, 2);
+    EXPECT_EQ(frameSlotPayloadBytes(round), 5u);
+    EXPECT_EQ(memcmp(mpdu + WIFI_HDR_LEN, "\xAA\xBB\xCC\xDD\xEE", 5), 0);
+    EXPECT_TRUE(frameAddr3Accept(mpdu, sizeof(mpdu), 0x1234));
+}

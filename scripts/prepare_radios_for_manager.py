@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Configure STANDALONE domain/bus upstreams for manager TCP bw_test.
+"""Configure STANDALONE radio mode/domain + upstream for manager bw_test.
 
-Binds must match configuration/winject-tests/bw_{a,b}.cfg:
-  Pair 1 (A→B): A sut b2 / sur a1, B sut a1 / sur b2
-  Pair 2 (B→A): A sut c3 / sur d4, B sut d4 / sur c3
-Inject ports 9000/9010; forward bases 9210 (A) / 9220 (B).
+Always applied: set_mode STANDALONE, set_domain, sut/sur bind.
+Optional (only if flagged): --channel, --modulation, --power, --cca/--no-cca.
 """
 
 from __future__ import annotations
@@ -18,19 +16,14 @@ sys.path.insert(0, str(TOOLS))
 
 import bw_test as bw  # noqa: E402
 
-# Manager forward_base per radio (must match configuration/winject-tests/bw_*.cfg).
 FWD_A = 9210
 FWD_B = 9220
 DEFAULT_DOMAIN = bw.DEFAULT_DOMAIN
-# Pair 1: A→B. Pair 2: B→A. Must match bw_a.cfg / bw_b.cfg.
-PAIR1_AB = bw.BUS_AB
-PAIR1_BA = bw.BUS_BA
-PAIR2_AB = "c3"
-PAIR2_BA = "d4"
+INJECT = bw.INJECT_PORT
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="prepare radios for manager TCP bw_test")
+    p = argparse.ArgumentParser(description="prepare radios for manager bw_test")
     p.add_argument("--a", default="192.168.253.11")
     p.add_argument("--b", default="192.168.253.12")
     p.add_argument("--host", default="")
@@ -42,72 +35,65 @@ def main() -> int:
     p.add_argument(
         "--channel",
         type=int,
-        default=1,
+        default=None,
         help=f"set_channel {bw.CHANNEL_MIN}-{bw.CHANNEL_MAX} "
-        f"(default 1; 14 is 802.11b-only)",
+        f"(omit to keep existing; 14 is 802.11b-only)",
     )
     p.add_argument(
         "--modulation",
-        default="OFDM_24M",
-        help="set_modulation (default OFDM_24M; DSSS/CCK required on channel 14)",
+        default=None,
+        help="set_modulation (omit to keep existing; DSSS/CCK required on channel 14)",
+    )
+    p.add_argument(
+        "--power",
+        type=int,
+        default=None,
+        help="set_tx_power (omit to keep existing)",
     )
     p.add_argument("--verbose", action="store_true")
     p.add_argument(
         "--cca",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="set_cca_enabled on both radios (default: on)",
+        default=None,
+        help="set_cca_enabled; omit to keep existing",
     )
     args = p.parse_args()
-    if not bw.channel_ok(args.channel):
+    if args.channel is not None and not bw.channel_ok(args.channel):
         raise SystemExit(f"--channel must be {bw.CHANNEL_MIN}-{bw.CHANNEL_MAX}")
-    if not bw.modulation_ok_for_channel(args.modulation, args.channel):
+    if args.modulation is not None and not bw.modulation_ok_for_channel(
+        args.modulation, args.channel
+    ):
         raise SystemExit(
             "channel 14 rejects OFDM/MCS; use a DSSS/CCK --modulation "
             f"(got {args.modulation})"
         )
     host = args.host or bw.detect_host(args.a)
     quiet = not args.verbose
-    cca = 1 if args.cca else 0
     domain = bw.fmt_domain(args.domain)
-    pair1_ab = bw.fmt_bus(PAIR1_AB)
-    pair1_ba = bw.fmt_bus(PAIR1_BA)
-    pair2_ab = bw.fmt_bus(PAIR2_AB)
-    pair2_ba = bw.fmt_bus(PAIR2_BA)
 
-    # (bus_tx, bus_rx, inject, forward) per upstream
-    a_binds = [
-        (pair1_ab, pair1_ba, 9000, FWD_A),
-        (pair2_ab, pair2_ba, 9010, FWD_A + 1),
-    ]
-    b_binds = [
-        (pair1_ba, pair1_ab, 9000, FWD_B),
-        (pair2_ba, pair2_ab, 9010, FWD_B + 1),
-    ]
-
-    def configure_radio(ip: str, binds: list[tuple[str, str, int, int]]) -> bool:
-        # Channel 14: modulation before channel (802.11b-only).
+    def configure_radio(ip: str, forward: int) -> bool:
+        phy_cmds: list[str] = []
         if args.channel == 14:
-            phy_cmds = [
-                f"set_modulation {args.modulation}",
-                f"set_channel {args.channel}",
-            ]
+            if args.modulation is not None:
+                phy_cmds.append(f"set_modulation {args.modulation}")
+            phy_cmds.append(f"set_channel {args.channel}")
         else:
-            phy_cmds = [
-                f"set_channel {args.channel}",
-                f"set_modulation {args.modulation}",
-            ]
+            if args.channel is not None:
+                phy_cmds.append(f"set_channel {args.channel}")
+            if args.modulation is not None:
+                phy_cmds.append(f"set_modulation {args.modulation}")
+        if args.power is not None:
+            phy_cmds.append(f"set_tx_power {args.power}")
+        if args.cca is not None:
+            phy_cmds.append(f"set_cca_enabled {1 if args.cca else 0}")
         cmds = [
+            "wifi_bench_stop",
             "set_mode STANDALONE",
+            "set_inject_sink wifi",
             *phy_cmds,
-            "set_tx_power 20",
-            f"set_cca_enabled {cca}",
             f"set_domain {domain}",
+            *bw.upstream_bind_cmds(host, INJECT, forward, "b2", "a1"),
         ]
-        for bus_tx, bus_rx, inject, forward in binds:
-            cmds.extend(
-                bw.upstream_bind_cmds(host, inject, forward, bus_tx, bus_rx)
-            )
         try:
             replies = bw.console(ip, cmds, quiet=quiet, timeout=5)
         except OSError as err:
@@ -118,13 +104,42 @@ def main() -> int:
             return False
         return True
 
-    print(
-        f"prepare radios domain={domain} ch={args.channel} "
-        f"mod={args.modulation} cca={cca} "
-        f"pair1 {pair1_ab}/{pair1_ba} pair2 {pair2_ab}/{pair2_ba}"
+    inject_tune = (
+        "set_inject_tune flush_batch=8 emac_gap_ticks=0 "
+        "max_in_flight=6 staging_margin=4"
     )
-    ok = configure_radio(args.a, a_binds) and configure_radio(args.b, b_binds)
-    return 0 if ok else 1
+
+    def apply_inject_tune(ip: str) -> bool:
+        try:
+            replies = bw.console(ip, [inject_tune], quiet=quiet, timeout=5)
+        except OSError as err:
+            print(f"{ip}: inject_tune console failed: {err}")
+            return False
+        if not bw.replies_ok(replies):
+            print(f"{ip}: inject_tune failed")
+            return False
+        return True
+
+    ok_a = configure_radio(args.a, FWD_A)
+    ok_b = configure_radio(args.b, FWD_B)
+    if ok_a:
+        ok_a = apply_inject_tune(args.a)
+    if ok_b:
+        ok_b = apply_inject_tune(args.b)
+    if not (ok_a and ok_b):
+        return 1
+    ch = "unchanged" if args.channel is None else str(args.channel)
+    mod = "unchanged" if args.modulation is None else args.modulation
+    pwr = "unchanged" if args.power is None else str(args.power)
+    if args.cca is None:
+        cca = "unchanged"
+    else:
+        cca = "enabled" if args.cca else "disabled"
+    print(
+        f"ok domain={domain} channel={ch} modulation={mod} power={pwr} cca={cca} "
+        f"inject={INJECT} forward A={FWD_A} B={FWD_B} host={host}"
+    )
+    return 0
 
 
 if __name__ == "__main__":

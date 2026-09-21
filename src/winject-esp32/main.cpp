@@ -2,9 +2,7 @@
 #include "config.h"
 #include "console.h"
 #include "frame.h"
-#include "lc_rx.h"
 #include "lc_rx_endpoint.h"
-#include "lc_tx.h"
 #include "lc_tx_endpoint.h"
 #include "ota.h"
 #include "packet.h"
@@ -24,6 +22,9 @@
 static const char* TAG = "winject";
 static manager& g_netmgr = manager::instance();
 static console g_console;
+
+alignas(4) static uint8_t g_tx_pkt_store[WIFI_RADIO_TX_QUEUE * WIFI_TX_PACKET_CAP];
+alignas(4) static uint8_t g_rx_pkt_store[WIFI_RADIO_RX_QUEUE * WIFI_TX_PACKET_CAP];
 
 // Never abort on optional bring-up: a dead component must leave Ethernet +
 // HTTP OTA (+ console) alive for rescue.
@@ -93,20 +94,24 @@ extern "C" void app_main(void)
         return;
     }
 
-    bool packets_ok = packet_allocator::tx().init(WIFI_RADIO_TX_QUEUE) &&
-                      packet_allocator::rx().init(WIFI_RADIO_RX_QUEUE);
+    bool packets_ok =
+        packet_allocator::tx().init(WIFI_RADIO_TX_QUEUE, g_tx_pkt_store,
+                                    WIFI_RADIO_TX_QUEUE) &&
+        packet_allocator::rx().init(WIFI_RADIO_RX_QUEUE, g_rx_pkt_store,
+                                    WIFI_RADIO_RX_QUEUE);
     if (!packets_ok)
     {
         ESP_LOGE(TAG, "packet allocator init failed");
     }
 
-    lc_tx& lctx = lc_tx::instance();
-    lc_rx& lcrx = lc_rx::instance();
+    wifi& radio = wifi::instance();
+    wifi_tx& wtx = radio.tx();
+    wifi_rx& wrx = radio.rx();
     lc_tx_endpoint& tx_ep = lc_tx_endpoint::instance();
     lc_rx_endpoint& rx_ep = lc_rx_endpoint::instance();
     channel_info_endpoint& ci = channel_info_endpoint::instance();
 
-    bool lc_ok = packets_ok && lctx.init() && lcrx.init() && tx_ep.init(lctx) &&
+    bool lc_ok = packets_ok && wtx.init() && wrx.init() && tx_ep.init(wtx) &&
                  rx_ep.init();
     if (!lc_ok)
     {
@@ -114,7 +119,7 @@ extern "C" void app_main(void)
     }
     else
     {
-        lcrx.set_endpoint(rx_ep);
+        wrx.set_endpoint(rx_ep);
     }
     if (!ci.init())
     {
@@ -123,13 +128,13 @@ extern "C" void app_main(void)
     }
     else if (lc_ok)
     {
-        lctx.set_channel_info(ci);
+        wtx.set_channel_info(ci);
     }
 
     bool radio_ok = false;
     if (lc_ok)
     {
-        radio_ok = wifi::instance().initialize();
+        radio_ok = radio.initialize();
         if (!radio_ok)
         {
             ESP_LOGE(TAG, "wifi radio init failed — continuing without radio");
@@ -141,16 +146,6 @@ extern "C" void app_main(void)
         }
     }
 
-    if (radio_ok)
-    {
-        if (!wifi::instance().tx().init(lctx) ||
-            !wifi::instance().rx().init(lcrx))
-        {
-            ESP_LOGE(TAG, "wifi lc wiring failed — continuing without radio");
-            radio_ok = false;
-        }
-    }
-
     if (radio_ok && !settings::instance().apply_live())
     {
         ESP_LOGE(TAG, "settings apply failed");
@@ -158,12 +153,12 @@ extern "C" void app_main(void)
 
     if (lc_ok)
     {
-        if (!tx_ep.start() || !lcrx.start() || !ci.start())
+        if (!tx_ep.start() || !wrx.start() || !ci.start())
         {
             ESP_LOGE(TAG, "endpoint start failed");
         }
     }
-    if (radio_ok && !wifi::instance().tx().start())
+    if (radio_ok && !wtx.start())
     {
         ESP_LOGE(TAG, "wifi_tx start failed");
         radio_ok = false;
