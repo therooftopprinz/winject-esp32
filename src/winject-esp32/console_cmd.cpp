@@ -559,14 +559,15 @@ void console::print_channel_metrics(const wifi_status_s& radio,
     print(
         "promisc data=%u misc=%u misc_len=%u ctrl=%u skip_type=%u "
         "sig_ht=%u sig_legacy=%u sig_other=%u drop_ampdu=%u drop_len=%u "
-        "drop_addr3=%u ht_prefix=%u ht_ok=%u leg_prefix=%u leg_ok=%u "
-        "domain_word=%u\n",
+        "drop_addr3=%u drop_replay=%u ht_prefix=%u ht_ok=%u leg_prefix=%u "
+        "leg_ok=%u domain_word=%u\n",
         (unsigned)radio.promisc_data, (unsigned)radio.promisc_misc,
         (unsigned)radio.promisc_misc_nonempty, (unsigned)radio.promisc_ctrl,
         (unsigned)radio.promisc_skip_type, (unsigned)radio.promisc_ht,
         (unsigned)radio.promisc_legacy, (unsigned)radio.promisc_other_sig,
         (unsigned)radio.promisc_drop_ampdu, (unsigned)radio.promisc_drop_len,
-        (unsigned)radio.promisc_drop_addr3, (unsigned)radio.promisc_ht_prefix,
+        (unsigned)radio.promisc_drop_addr3,
+        (unsigned)radio.promisc_drop_replay, (unsigned)radio.promisc_ht_prefix,
         (unsigned)radio.promisc_ht_addr3_ok,
         (unsigned)radio.promisc_legacy_prefix,
         (unsigned)radio.promisc_legacy_addr3_ok,

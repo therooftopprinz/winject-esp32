@@ -58,7 +58,7 @@ TEST(AirSeqTest, DetectsGap)
     EXPECT_EQ(rx.lost(), 0u);
 }
 
-TEST(AirSeqTest, DuplicateDoesNotCountLost)
+TEST(AirSeqTest, DuplicateReplayRejected)
 {
     air_seq tx;
     air_seq rx;
@@ -67,7 +67,7 @@ TEST(AirSeqTest, DuplicateDoesNotCountLost)
     const uint8_t* body = nullptr;
     size_t plen = 0;
     ASSERT_TRUE(rx.accept(p0.data(), p0.size(), &body, &plen));
-    ASSERT_TRUE(rx.accept(p0.data(), p0.size(), &body, &plen));
+    EXPECT_FALSE(rx.accept(p0.data(), p0.size(), &body, &plen));
     EXPECT_EQ(rx.lost(), 0u);
 }
 

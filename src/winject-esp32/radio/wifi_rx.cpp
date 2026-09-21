@@ -112,6 +112,8 @@ void wifi_rx::reset_promisc_stats()
     promisc_drop_ampdu.store(0, std::memory_order_relaxed);
     promisc_drop_len.store(0, std::memory_order_relaxed);
     promisc_drop_addr3.store(0, std::memory_order_relaxed);
+    promisc_drop_replay.store(0, std::memory_order_relaxed);
+    dedup_valid_ = false;
     promisc_ht_addr3_ok.store(0, std::memory_order_relaxed);
     promisc_ht_prefix.store(0, std::memory_order_relaxed);
     promisc_legacy_prefix.store(0, std::memory_order_relaxed);
@@ -239,6 +241,25 @@ void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
     }
 
     stash_air_sample(pkt->rx_ctrl);
+
+    if (mpdu_len >= WIFI_HDR_LEN)
+    {
+        const uint16_t seq_ctl =
+            static_cast<uint16_t>(pkt->payload[22]) |
+            (static_cast<uint16_t>(pkt->payload[23]) << 8);
+        const uint16_t wlan_seq = seq_ctl >> 4;
+        if (dedup_valid_ && wlan_seq == dedup_wlan_seq_ &&
+            static_cast<uint16_t>(mpdu_len) == dedup_len_ &&
+            memcmp(pkt->payload + 4, dedup_addr10_, sizeof(dedup_addr10_)) == 0)
+        {
+            promisc_drop_replay.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        dedup_wlan_seq_ = wlan_seq;
+        dedup_len_ = static_cast<uint16_t>(mpdu_len);
+        memcpy(dedup_addr10_, pkt->payload + 4, sizeof(dedup_addr10_));
+        dedup_valid_ = true;
+    }
 
     packet p = packet_allocator::rx().allocate();
     if (!p.is_valid())
@@ -395,6 +416,8 @@ void wifi_rx::fill_status(wifi_status_s* status)
     status->promisc_drop_len = promisc_drop_len.load(std::memory_order_relaxed);
     status->promisc_drop_addr3 =
         promisc_drop_addr3.load(std::memory_order_relaxed);
+    status->promisc_drop_replay =
+        promisc_drop_replay.load(std::memory_order_relaxed);
     status->promisc_ht_addr3_ok =
         promisc_ht_addr3_ok.load(std::memory_order_relaxed);
     status->promisc_ht_prefix =

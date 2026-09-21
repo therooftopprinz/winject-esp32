@@ -62,6 +62,7 @@ struct wifi_status_s
     uint32_t promisc_drop_ampdu;
     uint32_t promisc_drop_len;
     uint32_t promisc_drop_addr3;
+    uint32_t promisc_drop_replay;
     uint32_t promisc_ht_addr3_ok;
     uint32_t promisc_ht_prefix;
     uint32_t promisc_legacy_prefix;

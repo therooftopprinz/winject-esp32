@@ -108,6 +108,7 @@ class RecvStats:
     first: float | None = None
     last: float | None = None
     seqs: set[int] = field(default_factory=set)
+    dup_packets: int = 0
 
     def clear(self) -> None:
         self.packets = 0
@@ -115,6 +116,7 @@ class RecvStats:
         self.first = None
         self.last = None
         self.seqs.clear()
+        self.dup_packets = 0
 
     def copy(self) -> RecvStats:
         return RecvStats(
@@ -123,6 +125,7 @@ class RecvStats:
             first=self.first,
             last=self.last,
             seqs=set(self.seqs),
+            dup_packets=self.dup_packets,
         )
 
 
@@ -477,6 +480,26 @@ def parse_seq(data: bytes) -> int | None:
         return None
 
 
+def apply_recv_payload(st: RecvStats, payload: bytes, now: float) -> None:
+    """Count first delivery per sequence; ignore duplicate replays (MPDU/air/manager)."""
+    seq = parse_seq(payload)
+    if seq is not None:
+        if seq in st.seqs:
+            st.dup_packets += 1
+            return
+        st.seqs.add(seq)
+    if st.first is None:
+        st.first = now
+    st.last = now
+    st.packets += 1
+    st.nbytes += len(payload)
+
+
+def recv_delivered(stats: RecvStats) -> int:
+    if stats.seqs:
+        return len(stats.seqs)
+    return stats.packets
+
 
 class Listener:
     """UDP receiver. For standalone air path, payloads are full MPDUs; filter by bus."""
@@ -503,16 +526,7 @@ class Listener:
         self._sock.close()
 
     def _note(self, payload: bytes) -> None:
-        now = time.monotonic()
-        st = self.stats
-        if st.first is None:
-            st.first = now
-        st.last = now
-        st.packets += 1
-        st.nbytes += len(payload)
-        seq = parse_seq(payload)
-        if seq is not None:
-            st.seqs.add(seq)
+        apply_recv_payload(self.stats, payload, time.monotonic())
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -666,16 +680,7 @@ class TcpListener:
                 return
             data = bytes(buf[2:2 + plen])
             del buf[:2 + plen]
-            now = time.monotonic()
-            st = self.stats
-            if st.first is None:
-                st.first = now
-            st.last = now
-            st.packets += 1
-            st.nbytes += len(data)
-            seq = parse_seq(data)
-            if seq is not None:
-                st.seqs.add(seq)
+            apply_recv_payload(self.stats, data, time.monotonic())
 
     def _read_client(self, conn: socket.socket) -> None:
         conn.settimeout(0.2)
@@ -836,7 +841,9 @@ def push_window_loss(
 
 
 def to_phase(sent: int, stats: RecvStats, duration: float) -> PhaseResult:
-    return PhaseResult(sent=sent, recv=stats.packets, kbps=goodput_kbps(stats, duration))
+    return PhaseResult(
+        sent=sent, recv=recv_delivered(stats), kbps=goodput_kbps(stats, duration)
+    )
 
 
 def loss_ok(phase: PhaseResult, limit: float, paced: bool) -> bool:
@@ -1332,7 +1339,7 @@ def main() -> int:
             parts = [f"{elapsed:6.1f}/{args.duration:.0f}s"]
             for i, (dest, _tag, lis) in enumerate(senders):
                 sent_n = sent_live[i][0]
-                recv_n = lis.stats.packets
+                recv_n = recv_delivered(lis.stats)
                 recv_b = lis.stats.nbytes
                 send_rate = live_kbps((sent_n - prev_sent[i]) * args.size, dt)
                 recv_rate = live_kbps(recv_b - prev_nbytes[i], dt)
@@ -1392,7 +1399,7 @@ def main() -> int:
             parts = [f"drain {elapsed:4.1f}/{timeout:.0f}s"]
             for i, (dest, _tag, lis) in enumerate(senders):
                 sent_n = results[i] if results[i] > 0 else sent_live[i][0]
-                recv_n = lis.stats.packets
+                recv_n = recv_delivered(lis.stats)
                 loss_rt = push_window_loss(win_hist[i], now, sent_n, recv_n)
                 parts.append(
                     f"{dir_label(dest)} {recv_n}/{sent_n} "
@@ -1435,7 +1442,7 @@ def main() -> int:
                         drained = True
                         for i, (_dest, _tag, lis) in enumerate(senders):
                             sent_n = results[i] if results[i] > 0 else sent_live[i][0]
-                            if sent_n > 0 and lis.stats.packets < sent_n:
+                            if sent_n > 0 and recv_delivered(lis.stats) < sent_n:
                                 drained = False
                                 break
                         if drained:
@@ -1458,10 +1465,11 @@ def main() -> int:
                     if not drained:
                         for i, (dest, _tag, lis) in enumerate(senders):
                             sent_n = results[i] if results[i] > 0 else sent_live[i][0]
-                            if sent_n > 0 and lis.stats.packets < sent_n:
+                            recv_n = recv_delivered(lis.stats)
+                            if sent_n > 0 and recv_n < sent_n:
                                 print(
                                     f"warning: {dir_label(dest)} drain incomplete "
-                                    f"{lis.stats.packets}/{sent_n} after {timeout:.1f}s"
+                                    f"{recv_n}/{sent_n} after {timeout:.1f}s"
                                 )
                 if not interrupted:
                     try:
@@ -1479,7 +1487,9 @@ def main() -> int:
         for i, (_dest, _tag, lis) in enumerate(senders):
             sent_n = results[i] if results[i] > 0 else sent_live[i][0]
             kbps = (lis.stats.nbytes * 8.0) / measure_s / 1000.0
-            out.append(PhaseResult(sent=sent_n, recv=lis.stats.packets, kbps=kbps))
+            out.append(
+                PhaseResult(sent=sent_n, recv=recv_delivered(lis.stats), kbps=kbps)
+            )
         if interrupted:
             raise TestInterrupted(out)
         return out
@@ -1493,11 +1503,18 @@ def main() -> int:
         except TestInterrupted as err:
             return err.results, True
 
-    def print_snap(prefix: str, pr: PhaseResult) -> None:
-        print(
+    def print_snap(
+        prefix: str, pr: PhaseResult, stats: RecvStats | None = None
+    ) -> None:
+        line = (
             f"{prefix} sent {pr.sent} recv {pr.recv}  "
             f"{pr.kbps:.1f} kbps  loss {pr.loss:.1f}%"
         )
+        if stats is not None and stats.dup_packets > 0:
+            line += f"  dup_ignored {stats.dup_packets}"
+        if pr.recv > pr.sent:
+            line += "  warning: recv>sent (foreign/bus?)"
+        print(line)
 
     all_results: list[ModResult] = []
     interrupted = False
@@ -1576,7 +1593,7 @@ def main() -> int:
             if args.test_ab:
                 snaps, stopped = take_phase([(dest_a, b"A", listen_b)], offer)
                 result.uni_ab = snaps[0]
-                print_snap("A->B", result.uni_ab)
+                print_snap("A->B", result.uni_ab, listen_b.stats)
                 if stopped:
                     mark_int()
                     current = None
@@ -1585,7 +1602,7 @@ def main() -> int:
             if args.test_ba:
                 snaps, stopped = take_phase([(dest_b, b"B", listen_a)], offer)
                 result.uni_ba = snaps[0]
-                print_snap("B->A", result.uni_ba)
+                print_snap("B->A", result.uni_ba, listen_a.stats)
                 if stopped:
                     mark_int()
                     current = None
@@ -1603,8 +1620,8 @@ def main() -> int:
                     bidir_offer,
                 )
                 result.bidir_ab, result.bidir_ba = snaps
-                print_snap("A+B A", result.bidir_ab)
-                print_snap("A+B B", result.bidir_ba)
+                print_snap("A+B A", result.bidir_ab, listen_b.stats)
+                print_snap("A+B B", result.bidir_ba, listen_a.stats)
                 if stopped:
                     mark_int()
                     current = None

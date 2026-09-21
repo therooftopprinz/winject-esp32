@@ -20,6 +20,23 @@ FWD_A = 9210
 FWD_B = 9220
 DEFAULT_DOMAIN = bw.DEFAULT_DOMAIN
 INJECT = bw.INJECT_PORT
+# Same-domain radios not in --a/--b must not forward to manager ports (dupes).
+BENCH_CLEAR_RX = (
+    "192.168.253.9",
+    "192.168.253.11",
+    "192.168.253.12",
+    "192.168.253.14",
+)
+
+
+def clear_stale_forwarders(active: set[str], quiet: bool) -> None:
+    for ip in BENCH_CLEAR_RX:
+        if ip in active:
+            continue
+        try:
+            bw.console(ip, ["unset_upstream_rx"], quiet=quiet, timeout=2.0)
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -120,6 +137,7 @@ def main() -> int:
             return False
         return True
 
+    clear_stale_forwarders({args.a, args.b}, quiet)
     ok_a = configure_radio(args.a, FWD_A)
     ok_b = configure_radio(args.b, FWD_B)
     if ok_a:

@@ -104,6 +104,11 @@ private:
     std::atomic<uint32_t> promisc_drop_ampdu{0};
     std::atomic<uint32_t> promisc_drop_len{0};
     std::atomic<uint32_t> promisc_drop_addr3{0};
+    std::atomic<uint32_t> promisc_drop_replay{0};
+    uint16_t dedup_wlan_seq_{0};
+    uint16_t dedup_len_{0};
+    uint8_t dedup_addr10_[10]{};
+    bool dedup_valid_{false};
     std::atomic<uint32_t> promisc_ht_addr3_ok{0};
     std::atomic<uint32_t> promisc_ht_prefix{0};
     std::atomic<uint32_t> promisc_legacy_prefix{0};

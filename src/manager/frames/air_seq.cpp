@@ -52,7 +52,14 @@ bool air_seq::accept(const uint8_t* data, size_t len, const uint8_t** payload,
     {
         return false;
     }
-    note_rx(load_be16(data));
+    const uint16_t seq = load_be16(data);
+    // Drop exact air-seq replays (radio/manager may see the same stamped PDU
+    // twice). Still count gaps via note_rx for forward progress.
+    if (have_rx_ && seq == rx_)
+    {
+        return false;
+    }
+    note_rx(seq);
     *payload = data + k_len;
     *plen = len - k_len;
     return true;
