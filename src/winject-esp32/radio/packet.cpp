@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <string.h>
 #include <utility>
 
@@ -37,6 +38,7 @@ void packet::steal_from(packet& other) noexcept
 {
     alloc = other.alloc;
     buf = other.buf;
+    heap_owner_ = other.heap_owner_;
     capacity_ = other.capacity_;
     offset_ = other.offset_;
     size_ = other.size_;
@@ -47,6 +49,7 @@ void packet::clear() noexcept
 {
     alloc = nullptr;
     buf = nullptr;
+    heap_owner_ = nullptr;
     capacity_ = 0;
     offset_ = 0;
     size_ = 0;
@@ -80,11 +83,32 @@ void packet::set_packet_size(size_t size)
 
 void packet::reset()
 {
-    if (alloc != nullptr && buf != nullptr)
+    if (heap_owner_ != nullptr)
+    {
+        std::free(heap_owner_);
+        heap_owner_ = nullptr;
+    }
+    else if (alloc != nullptr && buf != nullptr)
     {
         alloc->release(buf);
     }
     clear();
+}
+
+packet packet::adopt_eth_frame(uint8_t* heap_owner, const uint8_t* payload,
+                               size_t len)
+{
+    packet p;
+    if (heap_owner == nullptr || payload == nullptr || len == 0)
+    {
+        return p;
+    }
+    p.heap_owner_ = heap_owner;
+    p.buf = const_cast<uint8_t*>(payload);
+    p.capacity_ = len;
+    p.offset_ = 0;
+    p.size_ = len;
+    return p;
 }
 
 bool packet::is_valid() const

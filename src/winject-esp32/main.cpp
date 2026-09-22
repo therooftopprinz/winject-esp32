@@ -1,9 +1,8 @@
-#include "channel_info_endpoint.h"
 #include "config.h"
 #include "console.h"
 #include "frame.h"
-#include "lc_rx_endpoint.h"
-#include "lc_tx_endpoint.h"
+#include "upstream_rx_endpoint.h"
+#include "upstream_tx_endpoint.h"
 #include "ota.h"
 #include "packet.h"
 #include "settings.h"
@@ -107,32 +106,18 @@ extern "C" void app_main(void)
     wifi& radio = wifi::instance();
     wifi_tx& wtx = radio.tx();
     wifi_rx& wrx = radio.rx();
-    lc_tx_endpoint& tx_ep = lc_tx_endpoint::instance();
-    lc_rx_endpoint& rx_ep = lc_rx_endpoint::instance();
-    channel_info_endpoint& ci = channel_info_endpoint::instance();
+    upstream_tx_endpoint& tx_ep = upstream_tx_endpoint::instance();
+    upstream_rx_endpoint& rx_ep = upstream_rx_endpoint::instance();
 
-    bool lc_ok = packets_ok && wtx.init() && wrx.init() && tx_ep.init(wtx) &&
-                 rx_ep.init();
-    if (!lc_ok)
+    bool upstream_ok = packets_ok && wtx.init() && wrx.init() &&
+                       tx_ep.init(wtx) && rx_ep.init(wrx);
+    if (!upstream_ok)
     {
-        ESP_LOGE(TAG, "lc init failed");
-    }
-    else
-    {
-        wrx.set_endpoint(rx_ep);
-    }
-    if (!ci.init())
-    {
-        ESP_LOGE(TAG, "channel info init failed");
-        lc_ok = false;
-    }
-    else if (lc_ok)
-    {
-        wtx.set_channel_info(ci);
+        ESP_LOGE(TAG, "upstream init failed");
     }
 
     bool radio_ok = false;
-    if (lc_ok)
+    if (upstream_ok)
     {
         radio_ok = radio.initialize();
         if (!radio_ok)
@@ -151,23 +136,20 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "settings apply failed");
     }
 
-    if (lc_ok)
-    {
-        if (!tx_ep.start() || !wrx.start() || !ci.start())
-        {
-            ESP_LOGE(TAG, "endpoint start failed");
-        }
-    }
     if (radio_ok && !wtx.start())
     {
         ESP_LOGE(TAG, "wifi_tx start failed");
         radio_ok = false;
     }
-
-    // Full console if LC endpoints exist; otherwise network-only rescue console.
-    if (lc_ok)
+    if (upstream_ok && !rx_ep.start())
     {
-        if (!g_console.init(tx_ep, rx_ep, ci, g_netmgr))
+        ESP_LOGE(TAG, "upstream_rx start failed");
+    }
+
+    // Full console if upstream endpoints exist; otherwise network-only rescue console.
+    if (upstream_ok)
+    {
+        if (!g_console.init(tx_ep, rx_ep, g_netmgr))
         {
             ESP_LOGE(TAG, "console init failed");
         }

@@ -7,13 +7,12 @@
 #include "bfc-esp32/select_reactor.hpp"
 #include "lwip/sockets.h"
 
-class lc_tx_endpoint;
-class lc_rx_endpoint;
-class channel_info_endpoint;
+class upstream_tx_endpoint;
+class upstream_rx_endpoint;
 class manager;
 struct wifi_status_s;
-struct lc_tx_bind_s;
-struct lc_rx_bind_s;
+struct upstream_tx_bind_s;
+struct upstream_rx_bind_s;
 
 class console
 {
@@ -23,8 +22,8 @@ public:
     console& operator=(const console&) = delete;
 
     bool init(manager& netmgr);
-    bool init(lc_tx_endpoint& tx_ep, lc_rx_endpoint& rx_ep,
-              channel_info_endpoint& ci, manager& netmgr);
+    bool init(upstream_tx_endpoint& tx_ep, upstream_rx_endpoint& rx_ep,
+              manager& netmgr);
 
 private:
     using reactor_t = bfc::select_reactor<>;
@@ -55,11 +54,11 @@ private:
     void reply_done(bool ok, const char* fail);
 
     void print_help();
-    void print_upstreams(const lc_tx_bind_s* sut, bool have_sut,
-                         const lc_rx_bind_s* sur, bool have_sur);
+    void print_upstreams(const upstream_tx_bind_s* sut, bool have_sut,
+                         const upstream_rx_bind_s* sur, bool have_sur);
     void print_channel_metrics(const wifi_status_s& radio,
-                               const lc_tx_bind_s* sut, bool have_sut,
-                               const lc_rx_bind_s* sur, bool have_sur);
+                               const upstream_tx_bind_s* sut, bool have_sut,
+                               const upstream_rx_bind_s* sur, bool have_sur);
     void print_hardware();
     void print_status();
     void handle_datagram(char* buf, size_t n);
@@ -71,9 +70,8 @@ private:
     bool require_radio();
     void reboot_after_ok();
 
-    lc_tx_endpoint* tx_ep = nullptr;
-    lc_rx_endpoint* rx_ep = nullptr;
-    channel_info_endpoint* ci = nullptr;
+    upstream_tx_endpoint* tx_ep = nullptr;
+    upstream_rx_endpoint* rx_ep = nullptr;
     manager* netmgr = nullptr;
     reactor_t* reactor = nullptr;
     bool ready = false;

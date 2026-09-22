@@ -118,34 +118,8 @@ bool app::setup_radio()
 
 bool app::setup_upstreams()
 {
-    scheduler.configure(cfg.max_rate_kbps, cfg.domain, cfg.max_data_per_tick);
-    scheduler.set_may_emit_data(
-        [this]()
-        {
-            if (!cfg.ci_pace_inject)
-            {
-                return true;
-            }
-            if (tx_grant_credits_ > 0)
-            {
-                return true;
-            }
-            maybe_send_grant_request();
-            return false;
-        });
-    scheduler.set_on_data_mpdu_sent(
-        [this]()
-        {
-            if (!cfg.ci_pace_inject || tx_grant_credits_ == 0)
-            {
-                return;
-            }
-            tx_grant_credits_--;
-            if (tx_grant_credits_ < k_grant_low_water)
-            {
-                maybe_send_grant_request();
-            }
-        });
+    scheduler.configure(cfg.max_rate_kbps, cfg.domain, cfg.max_data_per_tick,
+                        cfg.tx_burst_size, cfg.tx_burst_interval_us);
     if (!setup_radio())
     {
         return false;
@@ -321,24 +295,78 @@ bool app::get_modulation(std::string* name, std::string* error)
     return true;
 }
 
+bool app::set_tx_pacing(const uint32_t* max_rate_kbps,
+                        const size_t* max_data_per_tick,
+                        const size_t* tx_burst_size,
+                        const uint32_t* tx_burst_interval_us,
+                        std::string* error)
+{
+    if (max_rate_kbps != nullptr)
+    {
+        cfg.max_rate_kbps = *max_rate_kbps;
+        scheduler.set_max_rate_kbps(*max_rate_kbps);
+    }
+    if (max_data_per_tick != nullptr)
+    {
+        cfg.max_data_per_tick = *max_data_per_tick;
+        scheduler.set_max_data_per_tick(*max_data_per_tick);
+    }
+    if (tx_burst_size != nullptr || tx_burst_interval_us != nullptr)
+    {
+        const size_t bs =
+            tx_burst_size != nullptr ? *tx_burst_size : scheduler.tx_burst_size();
+        const uint32_t bi =
+            tx_burst_interval_us != nullptr ? *tx_burst_interval_us
+                                            : scheduler.tx_burst_interval_us();
+        cfg.tx_burst_size = bs;
+        cfg.tx_burst_interval_us = bi;
+        scheduler.set_tx_burst_pacing(bs, bi);
+    }
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
+}
+
+bool app::get_tx_pacing(uint32_t* max_rate_kbps, size_t* max_data_per_tick,
+                        size_t* tx_burst_size, uint32_t* tx_burst_interval_us,
+                        std::string* error) const
+{
+    if (max_rate_kbps == nullptr || max_data_per_tick == nullptr ||
+        tx_burst_size == nullptr || tx_burst_interval_us == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = "null out";
+        }
+        return false;
+    }
+    *max_rate_kbps = scheduler.max_rate_kbps();
+    *max_data_per_tick = scheduler.max_data_per_tick();
+    *tx_burst_size = scheduler.tx_burst_size();
+    *tx_burst_interval_us = scheduler.tx_burst_interval_us();
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
+}
+
 void app::fill_ci_view(channel_info_view_s* out) const
 {
     if (out == nullptr)
     {
         return;
     }
-    const auto flow = ci.last_flow_ctrl();
-    const auto air = ci.last_rx_air();
-    out->flow_valid = flow.valid;
-    out->tx_queue_size = flow.tx_queue_size;
-    out->tx_queue_capacity = flow.tx_queue_capacity;
-    channel_info::format_stamp(flow.valid, flow.received, out->flow_t,
-                               sizeof(out->flow_t));
-    out->air_valid = air.valid;
-    out->rssi = air.rssi;
-    out->snr = air.snr;
-    channel_info::format_stamp(air.valid, air.received, out->rssi_t,
-                               sizeof(out->rssi_t));
+    out->flow_valid = false;
+    out->tx_queue_size = 0;
+    out->tx_queue_capacity = 0;
+    snprintf(out->flow_t, sizeof(out->flow_t), "-");
+    out->air_valid = false;
+    out->rssi = 0;
+    out->snr = 0;
+    snprintf(out->rssi_t, sizeof(out->rssi_t), "-");
     out->streams.clear();
     out->tx_byte = 0;
     out->rx_byte = 0;
@@ -446,6 +474,22 @@ bool app::start_manager_console()
             {
                 return get_modulation(name, error);
             },
+            [this](const uint32_t* max_rate_kbps,
+                   const size_t* max_data_per_tick, const size_t* tx_burst_size,
+                   const uint32_t* tx_burst_interval_us, std::string* error)
+            {
+                return set_tx_pacing(max_rate_kbps, max_data_per_tick,
+                                     tx_burst_size, tx_burst_interval_us,
+                                     error);
+            },
+            [this](uint32_t* max_rate_kbps, size_t* max_data_per_tick,
+                   size_t* tx_burst_size, uint32_t* tx_burst_interval_us,
+                   std::string* error)
+            {
+                return get_tx_pacing(max_rate_kbps, max_data_per_tick,
+                                     tx_burst_size, tx_burst_interval_us,
+                                     error);
+            },
             &err))
     {
         LOG_ERR("manager console: %s", err.c_str());
@@ -473,11 +517,6 @@ bool app::apply_console()
     }
     if (!console.apply_upstream(cfg, radio->inject_port(), radio->forward_port(),
                                 local_ip, &err))
-    {
-        LOG_ERR("%s", err.c_str());
-        return false;
-    }
-    if (!console.apply_ci(local_ip, ci.port(), &err))
     {
         LOG_ERR("%s", err.c_str());
         return false;
@@ -619,18 +658,6 @@ void app::heartbeat_tick()
 
 void app::reconnect_tick()
 {
-    if (cfg.ci_pace_inject && grant_outstanding_ > 0)
-    {
-        const auto now = std::chrono::steady_clock::now();
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - grant_sent_at_)
-                            .count();
-        if (ms >= 200)
-        {
-            grant_outstanding_ = 0;
-            maybe_send_grant_request();
-        }
-    }
     if (cfg.skip_console)
     {
         return;
@@ -691,35 +718,6 @@ void app::stats_tick()
         ups.push_back(up.get());
     }
     scheduler.log_stats(elapsed_ms / 1000.0, ups);
-    const auto flow = ci.last_flow_ctrl();
-    const auto air = ci.last_rx_air();
-    if (flow.valid || air.valid)
-    {
-        char flow_t[32];
-        char rssi_t[32];
-        channel_info::format_stamp(flow.valid, flow.received, flow_t,
-                                   sizeof(flow_t));
-        channel_info::format_stamp(air.valid, air.received, rssi_t,
-                                   sizeof(rssi_t));
-        if (flow.valid && air.valid)
-        {
-            LOG_INF("RADIO CI flow=%u/%u flow_t=%s rssi=%d snr=%d rssi_t=%s",
-                    flow.tx_queue_size, flow.tx_queue_capacity, flow_t,
-                    static_cast<int>(air.rssi), static_cast<int>(air.snr),
-                    rssi_t);
-        }
-        else if (flow.valid)
-        {
-            LOG_INF("RADIO CI flow=%u/%u flow_t=%s rssi=- snr=- rssi_t=-",
-                    flow.tx_queue_size, flow.tx_queue_capacity, flow_t);
-        }
-        else
-        {
-            LOG_INF("RADIO CI flow=-/- flow_t=- rssi=%d snr=%d rssi_t=%s",
-                    static_cast<int>(air.rssi), static_cast<int>(air.snr),
-                    rssi_t);
-        }
-    }
 }
 
 void app::stop()
@@ -740,87 +738,9 @@ void app::flush_shutdown()
     scheduler.tick();
 }
 
-void app::maybe_send_grant_request()
-{
-    if (!cfg.ci_pace_inject || console.grant_fd() < 0)
-    {
-        return;
-    }
-    if (tx_grant_credits_ >= k_grant_low_water &&
-        grant_outstanding_ >= k_max_outstanding_grants)
-    {
-        return;
-    }
-    while (grant_outstanding_ < k_max_outstanding_grants &&
-           tx_grant_credits_ < k_grant_low_water)
-    {
-        std::string err;
-        if (!console.send_tx_grant_request(&err))
-        {
-            break;
-        }
-        grant_outstanding_++;
-        grant_sent_at_ = std::chrono::steady_clock::now();
-    }
-}
-
-void app::on_grant_io()
-{
-    uint8_t n = 0;
-    bool got = false;
-    while (console.try_consume_tx_grant(&n))
-    {
-        got = true;
-        const uint16_t sum =
-            static_cast<uint16_t>(tx_grant_credits_) + static_cast<uint16_t>(n);
-        tx_grant_credits_ =
-            sum > 255u ? static_cast<uint8_t>(255) : static_cast<uint8_t>(sum);
-        if (grant_outstanding_ > 0)
-        {
-            grant_outstanding_--;
-        }
-    }
-    if (got)
-    {
-        maybe_send_grant_request();
-    }
-}
-
-void app::arm_grant_io()
-{
-    if (!cfg.ci_pace_inject || grant_io_armed_)
-    {
-        return;
-    }
-    const int fd = console.grant_fd();
-    if (fd < 0)
-    {
-        return;
-    }
-    if (!set_nonblock(fd))
-    {
-        LOG_WRN("grant channel nonblock failed");
-        return;
-    }
-    if (!reactor.add_read_rdy(fd,
-                              [this]()
-                              {
-                                  on_grant_io();
-                              }))
-    {
-        LOG_WRN("grant channel epoll add failed");
-        return;
-    }
-    grant_io_armed_ = true;
-}
-
 int app::run()
 {
     if (!setup_upstreams())
-    {
-        return 1;
-    }
-    if (!ci.open(reactor))
     {
         return 1;
     }
@@ -844,8 +764,8 @@ int app::run()
     {
         in_addr console_local = {};
         bool held = false;
-        if (!console.program(cfg, inject_ports, forward_ports, ci.port(),
-                             &console_local, &err))
+        if (!console.program(cfg, inject_ports, forward_ports, &console_local,
+                             &err))
         {
             LOG_ERR("%s", err.c_str());
         }
@@ -881,23 +801,11 @@ int app::run()
         LOG_ERR("winject.skip_console requires winject.local_ip");
         return 1;
     }
-    if (cfg.ci_pace_inject && console.grant_fd() < 0)
-    {
-        if (!console.connect_grant_peer(cfg, &err))
-        {
-            LOG_WRN("tx_grant channel: %s", err.c_str());
-        }
-        else
-        {
-            LOG_INF("tx_grant channel %s:%u", cfg.device.c_str(),
-                    cfg.console_port);
-        }
-    }
-    arm_grant_io();
-    maybe_send_grant_request();
-    LOG_INF("manager running local %s forward_base %u max_rate %u kbps (%s)",
-            ipv4_to_string(local_ip).c_str(), cfg.forward_base,
-            cfg.max_rate_kbps, cfg.modulation.c_str());
+    LOG_INF(
+        "manager running local %s forward_base %u max_rate %u kbps "
+        "burst=%zu burst_us=%u (%s)",
+        ipv4_to_string(local_ip).c_str(), cfg.forward_base, cfg.max_rate_kbps,
+        cfg.tx_burst_size, cfg.tx_burst_interval_us, cfg.modulation.c_str());
     last_stats = std::chrono::steady_clock::now();
     if (cfg.stats_sec > 0)
     {

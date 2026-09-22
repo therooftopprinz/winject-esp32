@@ -34,7 +34,6 @@ class radio_sim
 public:
     static constexpr size_t k_tx_queue = WIFI_RADIO_TX_QUEUE;
     static constexpr size_t k_rx_queue = WIFI_RADIO_RX_QUEUE;
-    static constexpr size_t k_ci_max = WIFI_AIRPORT_MAX;
 
     radio_sim();
     ~radio_sim();
@@ -74,8 +73,6 @@ public:
 private:
     void tx_worker();
     void rx_forward_worker();
-    void maybe_emit_flow_ctrl(size_t qsize);
-    void emit_ci(const void* data, size_t len);
     bool radio_active() const;
     std::string status_text();
     std::string help_text() const;
@@ -84,8 +81,6 @@ private:
     bool clear_upstream_tx();
     bool set_upstream_rx(ip_port_s dest);
     bool clear_upstream_rx();
-    bool add_ci(ip_port_s dest);
-    bool rem_ci(ip_port_s dest);
 
     static int open_udp_bound(const sockaddr_in& addr, bool reuse);
     static bool parse_bool(const char* text, bool* out);
@@ -98,7 +93,6 @@ private:
     int inject_fd_ = -1;
     int air_fd_ = -1;
     int forward_fd_ = -1;
-    int ci_fd_ = -1;
 
     sockaddr_in console_bind_{};
     std::vector<sockaddr_in> air_peers_;
@@ -119,7 +113,8 @@ private:
     uint16_t sut_port_ = 0;
     bool have_sur_ = false;
     ip_port_s sur_{};
-    std::vector<ip_port_s> ci_subs_;
+    bool inject_null_sink_ = false;
+    bool inject_dry_run_ = false;
 
     // Logger (runtime only).
     bool have_logger_ = false;
@@ -138,6 +133,9 @@ private:
     std::deque<mpdu_buf_s> rx_q_;
     std::thread rx_thread_;
 
+    std::atomic<uint32_t> tx_q_hwm_{0};
+    std::atomic<uint32_t> tx_enqueue_ok_{0};
+    std::atomic<uint32_t> tx_enqueue_fail_{0};
     std::atomic<uint32_t> drop_tx_queue_full_{0};
     std::atomic<uint32_t> drop_rx_queue_full_{0};
     std::atomic<uint32_t> drop_inject_size_{0};

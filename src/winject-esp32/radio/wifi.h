@@ -30,6 +30,8 @@ struct wifi_status_s
     uint32_t tx_retry_other;
     uint32_t inject_ok;
     uint32_t inject_fail;
+    uint32_t tx_enqueue_ok;
+    uint32_t tx_enqueue_fail;
     uint16_t tx_in_flight;
     bool inject_wait_valid;
     uint32_t inject_wait_us;
@@ -102,6 +104,7 @@ public:
     bool set_tx_power(int8_t dbm);
     bool set_allow_failed_crc(bool allow);
     void reset_promisc_stats();
+    void reset_channel_stats();
     void set_tx_dry_run(bool enabled);
     bool tx_dry_run() const;
     // Re-apply STA protocol after TX rate / promisc (IDF may clamp to 11b|11g).

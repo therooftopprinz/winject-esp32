@@ -3,7 +3,7 @@
 #include "config.h"
 #include "dhcp_client.h"
 #include "eth_dma_burst.h"
-#include "lc_tx_endpoint.h"
+#include "upstream_tx_endpoint.h"
 
 #include <string.h>
 
@@ -17,6 +17,15 @@
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
+
+static_assert(CONFIG_ETH_DMA_BUFFER_SIZE >= WINJECT_ETH_L2_INJECT_MAX,
+              "ETH DMA buffer smaller than max inject L2 frame");
+static_assert(CONFIG_ETH_DMA_BUFFER_SIZE >= WINJECT_ETH_L2_MTU_MAX,
+              "ETH DMA buffer smaller than 1500 MTU L2 frame");
+static_assert(CONFIG_ETH_DMA_BUFFER_SIZE >=
+                  (14u + 20u + 8u + ETHER_BENCH_MAX),
+              "ETH DMA buffer smaller than max ether_bench L2 frame");
 
 static const char* TAG = "eth";
 
@@ -220,7 +229,7 @@ void ethernet_rmii::begin()
         return;
     }
     // Replace glue input with inject hijack (non-sut frames still go to netif).
-    lc_tx_endpoint::instance().attach_eth_input(eth_handle, eth_netif);
+    upstream_tx_endpoint::instance().attach_eth_input(eth_handle, eth_netif);
     if (esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
                                    &eth_event_handler, this) != ESP_OK ||
         esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,

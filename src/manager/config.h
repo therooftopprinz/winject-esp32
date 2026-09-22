@@ -48,6 +48,13 @@ struct upstream_config_s
     std::string connect_address;
 };
 
+// Matches firmware WIFI_RADIO_TX_QUEUE (manager has no shared header).
+static constexpr size_t k_radio_tx_queue_depth = 20;
+// Burst gate: optional micro-batch cap per scheduler pass. interval_us=0 disables
+// the post-burst cooldown (token bucket + max_data_per_tick remain).
+static constexpr size_t k_default_tx_burst_size = k_radio_tx_queue_depth;
+static constexpr uint32_t k_default_tx_burst_interval_us = 0;
+
 struct config
 {
     std::string device;
@@ -66,8 +73,9 @@ struct config
     uint16_t forward_port = 9210;
     uint16_t forward_base = 9210;  // legacy alias for forward_port
     bool skip_console = false;
-    // Console tx_grant before inject batches (cd-protocol); 0 = no grant gate.
-    bool ci_pace_inject = true;
+    // DATA MPDUs per inject burst (~half radio tx queue); gap before next burst.
+    size_t tx_burst_size = k_default_tx_burst_size;
+    uint32_t tx_burst_interval_us = k_default_tx_burst_interval_us;
     // Local UDP management console. Empty = disabled. Both required together.
     // console_in = bind (recv commands); console_out = dest (send replies).
     std::string manager_console_in;

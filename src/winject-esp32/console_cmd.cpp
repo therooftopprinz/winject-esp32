@@ -13,7 +13,6 @@
 #include <string.h>
 #include <strings.h>
 
-#include "channel_info_endpoint.h"
 #include "eth_dma_burst.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -25,8 +24,8 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "lc_rx_endpoint.h"
-#include "lc_tx_endpoint.h"
+#include "upstream_rx_endpoint.h"
+#include "upstream_tx_endpoint.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "packet.h"
@@ -433,7 +432,7 @@ bool starts_with_cmd(const char* buf, size_t n, const char* name)
 
 bool console::radio_ready() const
 {
-    return tx_ep != nullptr && rx_ep != nullptr && ci != nullptr;
+    return tx_ep != nullptr && rx_ep != nullptr;
 }
 
 bool console::require_radio()
@@ -465,17 +464,18 @@ void console::print_help()
     write("unset_upstream_rx|uur\n");
     write("set_upstream_tx|sut port=<port>\n");
     write("unset_upstream_tx|uut\n");
-    write("set_upstream_ci|suc to=<host>:<port>\n");
-    write("unset_upstream_ci|usuc to=<host>:<port>\n");
     write(
         "set_logger|sl address=<host>:<port> level=<error|warn|info|debug>\n");
     write("unset_logger|ul\n");
     write("set_allow_failed_crc|saf <0|1>\n");
     write("reset_promisc_stats|rps\n");
+    write("reset_channel_stats|rchs\n");
     write("set_channel|sc <channel>\n");
     write("set_modulation|sd <modulation>\n");
     write("set_cca_enabled|sce <0|1>\n");
     write("set_inject_sink|sis <wifi|null|dry>\n");
+    write("set_wifi_tx_tune|swtt burst_size=<1-20> burst_gap_us=<0-1000000> "
+          "max_in_flight=<1-32>\n");
     write("set_tx_power|stp <2-20>\n");
     write("set_network|sn <STATIC|AUTO>\n");
     write("set_ip|sfi <ip>\n");
@@ -489,14 +489,11 @@ void console::print_help()
     write("ether_bench_rx|ebr\n");
     write("ether_bench_stop|ebs\n");
     write("ether_bench_status|ebst\n");
-    write("set_inject_tune|sit flush_batch=<1-64> emac_gap_ticks=<0-50> "
-          "max_in_flight=<1-32> staging_margin=<1-15>\n");
     write("set_eth_dma_burst_len|sedl <32|16|8|4|2|1>  (reboot)\n");
     write("set_wifi_bench_defaults|swbd size=<24-1500> count=<n> kbps=<0-100000>\n");
     write("wifi_bench_tx|wbt [size=<24-1500> count=<n> kbps=<0-100000>]\n");
     write("wifi_bench_stop|wbx\n");
     write("wifi_bench_status|wbs\n");
-    write("tx_grant|tg  (cd-protocol: ok <frames> inject budget)\n");
     write("reset|r\n");
     write("help\n");
     write("modulations: ");
@@ -505,8 +502,8 @@ void console::print_help()
     write("ota: HTTP POST /update\n");
 }
 
-void console::print_upstreams(const lc_tx_bind_s* sut, bool have_sut,
-                              const lc_rx_bind_s* sur, bool have_sur)
+void console::print_upstreams(const upstream_tx_bind_s* sut, bool have_sut,
+                              const upstream_rx_bind_s* sur, bool have_sur)
 {
     if (have_sut && sut != nullptr)
     {
@@ -521,8 +518,8 @@ void console::print_upstreams(const lc_tx_bind_s* sut, bool have_sut,
 }
 
 void console::print_channel_metrics(const wifi_status_s& radio,
-                                    const lc_tx_bind_s* sut, bool have_sut,
-                                    const lc_rx_bind_s* sur, bool have_sur)
+                                    const upstream_tx_bind_s* sut, bool have_sut,
+                                    const upstream_rx_bind_s* sur, bool have_sur)
 {
     char tx_latency[16] = "-";
     if (radio.tx_latency_valid)
@@ -537,11 +534,12 @@ void console::print_channel_metrics(const wifi_status_s& radio,
                  (unsigned)radio.inject_wait_us);
     }
     print(
-        "channel_tx queue=%u queue_hwm=%u pool_free=%u pool_free_min=%u "
-        "drop_nomem=%u retry_count=%u "
+        "channel_tx queue=%u queue_hwm=%u enqueue_ok=%u enqueue_fail=%u "
+        "pool_free=%u pool_free_min=%u drop_nomem=%u retry_count=%u "
         "retry_nomem=%u retry_other=%u inject_ok=%u inject_fail=%u "
         "in_flight=%u tx_latency=%s inject_wait=%s udp_tx=%u sink=%s\n",
         (unsigned)radio.tx_queue, (unsigned)radio.tx_queue_hwm,
+        (unsigned)radio.tx_enqueue_ok, (unsigned)radio.tx_enqueue_fail,
         (unsigned)radio.tx_pool_free, (unsigned)radio.tx_pool_free_min,
         (unsigned)radio.drop_tx_nomem,
         (unsigned)radio.tx_retry_count, (unsigned)radio.tx_retry_nomem,
@@ -573,13 +571,6 @@ void console::print_channel_metrics(const wifi_status_s& radio,
         (unsigned)radio.promisc_legacy_addr3_ok,
         (unsigned)radio.promisc_domain_word_ok);
 
-    lc_tx_endpoint& lct = lc_tx_endpoint::instance();
-    print("inject_tune flush_batch=%u emac_gap_ticks=%u staging_margin=%u "
-          "max_in_flight=%u\n",
-          (unsigned)lct.flush_batch(), (unsigned)lct.emac_gap_ticks(),
-          (unsigned)lct.staging_pressure_margin(),
-          (unsigned)wifi::instance().tx().max_in_flight_cap());
-
     if (have_sut && sut != nullptr)
     {
         print("channels_tx drop_no_pkt_pool=%u drop_queue_full=%u "
@@ -588,6 +579,11 @@ void console::print_channel_metrics(const wifi_status_s& radio,
               (unsigned)sut->pool_free_min,
               sut->null_sink ? "null"
                              : (radio.inject_dry_run ? "dry" : "wifi"));
+        print("channels_eth eth_rx_cb=%u eth_inject_l2=%u "
+              "eth_inject_len_drop=%u eth_inject_null_sink=%u\n",
+              (unsigned)sut->eth_rx_cb, (unsigned)sut->eth_inject_l2,
+              (unsigned)sut->eth_inject_len_drop,
+              (unsigned)sut->eth_inject_null_sink);
     }
     if (have_sur && sur != nullptr)
     {
@@ -696,19 +692,16 @@ void console::print_hardware()
 void console::print_status()
 {
     wifi_status_s radio = {};
-    lc_tx_bind_s sut = {};
-    lc_rx_bind_s sur = {};
-    static ip_port_t ci_binds[WIFI_AIRPORT_MAX];
+    upstream_tx_bind_s sut = {};
+    upstream_rx_bind_s sur = {};
     bool have_sut = false;
     bool have_sur = false;
-    uint8_t ci_count = 0;
     const bool have_radio = radio_ready();
     if (have_radio)
     {
         wifi::instance().get_status(&radio);
         have_sut = tx_ep->get_status(&sut);
         have_sur = rx_ep->get_status(&sur);
-        ci->fill_status(ci_binds, &ci_count);
         if (have_sut)
         {
             radio.inject_null_sink = sut.null_sink;
@@ -783,6 +776,14 @@ void console::print_status()
     print("wifi_tx modulation=%s cca=%s tx_power=%d\n",
           radio.modulation != nullptr ? radio.modulation : "-",
           radio.cca_enabled ? "enabled" : "disabled", radio.tx_power_dbm);
+    if (have_radio)
+    {
+        wifi_tx& tx = wifi::instance().tx();
+        print("wifi_tx_tune burst_size=%u burst_gap_us=%u max_in_flight=%u\n",
+              static_cast<unsigned>(tx.tx_burst_size()),
+              static_cast<unsigned>(tx.tx_burst_gap_us()),
+              static_cast<unsigned>(tx.max_in_flight_cap()));
+    }
     if (radio.rx_air_valid)
     {
         print("wifi_rx radio rssi=%d snr=%d allow_failed_crc=%s\n",
@@ -820,33 +821,6 @@ void console::print_status()
         }
     }
 
-    if (ci_count == 0)
-    {
-        return;
-    }
-
-    write("# channel_info\n");
-    char line[256];
-    size_t used = 0;
-    int n = snprintf(line, sizeof(line), "channel_info subscribers=");
-    if (n > 0)
-    {
-        used = static_cast<size_t>(n);
-    }
-    for (uint8_t i = 0; i < ci_count; i++)
-    {
-        char host_str[16];
-        ipv4_to_string(ci_binds[i].host, host_str, sizeof(host_str));
-        n = snprintf(line + used, sizeof(line) - used, "%s%s:%u",
-                     i == 0 ? "" : ",", host_str, ci_binds[i].port);
-        if (n < 0 || static_cast<size_t>(n) >= sizeof(line) - used)
-        {
-            break;
-        }
-        used += static_cast<size_t>(n);
-    }
-    snprintf(line + used, sizeof(line) - used, "\n");
-    write(line);
 }
 
 void console::handle_datagram(char* buf, size_t n)
@@ -1140,64 +1114,6 @@ void console::handle_line(char* line)
         reply_ok_args(args);
         return;
     }
-    if (cmd_is(cmd, "set_inject_tune", "sit"))
-    {
-        bool any = false;
-        bool ok = true;
-        for (char* a = strtok_r(nullptr, " \t", &save); a != nullptr;
-             a = strtok_r(nullptr, " \t", &save))
-        {
-            const char* value = nullptr;
-            long v = 0;
-            lc_tx_endpoint& lct = lc_tx_endpoint::instance();
-            if (parse_kv(a, "flush_batch=", &value) &&
-                parse_long(value, 10, 1, 64, &v))
-            {
-                any = true;
-                ok = ok && lct.set_flush_batch(static_cast<uint8_t>(v));
-                continue;
-            }
-            if (parse_kv(a, "emac_gap_ticks=", &value) &&
-                parse_long(value, 10, 0, 50, &v))
-            {
-                any = true;
-                ok = ok && lct.set_emac_gap_ticks(static_cast<uint8_t>(v));
-                continue;
-            }
-            if (parse_kv(a, "staging_margin=", &value) &&
-                parse_long(value, 10, 1, LC_TX_STAGING_DEPTH - 1, &v))
-            {
-                any = true;
-                ok = ok && lct.set_staging_pressure_margin(static_cast<uint8_t>(v));
-                continue;
-            }
-            if (parse_kv(a, "max_in_flight=", &value) &&
-                parse_long(value, 10, 1, 32, &v))
-            {
-                any = true;
-                ok = ok &&
-                     wifi::instance().tx().set_max_in_flight(
-                         static_cast<uint32_t>(v));
-                continue;
-            }
-            reply_usage("set_inject_tune flush_batch=<1-64> emac_gap_ticks=<0-50> "
-                        "max_in_flight=<1-32> staging_margin=<1-15>");
-            return;
-        }
-        if (!any)
-        {
-            reply_usage("set_inject_tune flush_batch=<1-64> emac_gap_ticks=<0-50> "
-                        "max_in_flight=<1-32> staging_margin=<1-15>");
-            return;
-        }
-        if (!ok)
-        {
-            reply_nok("inject tune out of range");
-            return;
-        }
-        reply_ok();
-        return;
-    }
     if (cmd_is(cmd, "set_wifi_bench_defaults", "swbd"))
     {
         char* a1 = strtok_r(nullptr, " \t", &save);
@@ -1357,6 +1273,78 @@ void console::handle_line(char* line)
         return;
     }
 
+    if (cmd_is(cmd, "set_wifi_tx_tune", "swtt"))
+    {
+        if (!require_radio())
+        {
+            return;
+        }
+        bool have_bs = false;
+        bool have_gap = false;
+        bool have_mif = false;
+        uint8_t bs = 0;
+        uint32_t gap = 0;
+        uint32_t mif = 0;
+        bool any = false;
+        for (char* a = strtok_r(nullptr, " \t", &save); a != nullptr;
+             a = strtok_r(nullptr, " \t", &save))
+        {
+            const char* value = nullptr;
+            long v = 0;
+            if (parse_kv(a, "burst_size=", &value) &&
+                parse_long(value, 10, 1, WIFI_RADIO_TX_QUEUE, &v))
+            {
+                bs = static_cast<uint8_t>(v);
+                have_bs = true;
+                any = true;
+                continue;
+            }
+            if (parse_kv(a, "burst_gap_us=", &value) &&
+                parse_long(value, 10, 0, 1000000L, &v))
+            {
+                gap = static_cast<uint32_t>(v);
+                have_gap = true;
+                any = true;
+                continue;
+            }
+            if (parse_kv(a, "max_in_flight=", &value) &&
+                parse_long(value, 10, 1, 32L, &v))
+            {
+                mif = static_cast<uint32_t>(v);
+                have_mif = true;
+                any = true;
+                continue;
+            }
+            reply_usage("set_wifi_tx_tune burst_size=<1-20> burst_gap_us=<0-1000000> "
+                        "max_in_flight=<1-32>");
+            return;
+        }
+        if (!any)
+        {
+            reply_usage("set_wifi_tx_tune burst_size=<1-20> burst_gap_us=<0-1000000> "
+                        "max_in_flight=<1-32>");
+            return;
+        }
+        wifi_tx& tx = wifi::instance().tx();
+        if (have_bs || have_gap)
+        {
+            const uint8_t use_bs = have_bs ? bs : tx.tx_burst_size();
+            const uint32_t use_gap = have_gap ? gap : tx.tx_burst_gap_us();
+            if (!tx.set_tx_burst(use_bs, use_gap))
+            {
+                reply_nok("bad burst");
+                return;
+            }
+        }
+        if (have_mif && !tx.set_max_in_flight(mif))
+        {
+            reply_nok("bad max_in_flight");
+            return;
+        }
+        reply_ok();
+        return;
+    }
+
     char* arg1 = strtok_r(nullptr, " \t", &save);
     char* arg2 = strtok_r(nullptr, " \t", &save);
     char* arg3 = strtok_r(nullptr, " \t", &save);
@@ -1486,43 +1474,6 @@ void console::handle_line(char* line)
         return;
     }
 
-    if (cmd_is(cmd, "set_upstream_ci", "suc"))
-    {
-        ip_port_t dest = {};
-        if (!require_radio())
-        {
-            return;
-        }
-        if (!parse_to_arg(arg1, &dest) || arg2 != nullptr)
-        {
-            reply_usage("set_upstream_ci to=<host>:<port>");
-            return;
-        }
-        reply_done(ci->add_subscriber(dest), "failed to add ci subscriber");
-        return;
-    }
-
-    if (cmd_is(cmd, "unset_upstream_ci", "usuc"))
-    {
-        ip_port_t dest = {};
-        if (!require_radio())
-        {
-            return;
-        }
-        if (!parse_to_arg(arg1, &dest) || arg2 != nullptr)
-        {
-            reply_usage("unset_upstream_ci to=<host>:<port>");
-            return;
-        }
-        if (!ci->rem_subscriber(dest))
-        {
-            reply_nok("ci subscriber not found");
-            return;
-        }
-        reply_ok();
-        return;
-    }
-
     if (cmd_is(cmd, "set_logger", "sl"))
     {
         ip_port_t dest = {};
@@ -1601,6 +1552,22 @@ void console::handle_line(char* line)
             return;
         }
         wifi::instance().reset_promisc_stats();
+        reply_ok();
+        return;
+    }
+
+    if (cmd_is(cmd, "reset_channel_stats", "rchs"))
+    {
+        if (arg1 != nullptr)
+        {
+            reply_usage("reset_channel_stats");
+            return;
+        }
+        if (!require_radio())
+        {
+            return;
+        }
+        wifi::instance().reset_channel_stats();
         reply_ok();
         return;
     }
@@ -1796,27 +1763,6 @@ void console::handle_line(char* line)
         }
         reply_ok();
         reboot_after_ok();
-        return;
-    }
-
-    if (cmd_is(cmd, "tx_grant", "tg"))
-    {
-        if (!require_radio())
-        {
-            return;
-        }
-        if (arg1 != nullptr)
-        {
-            reply_usage("tx_grant");
-            return;
-        }
-        lc_tx_endpoint& lct = lc_tx_endpoint::instance();
-        const uint8_t slots = wifi::instance().tx().compute_tx_slots();
-        const uint16_t grant = slots;
-        lct.issue_inject_grant(grant);
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(grant));
-        reply_ok_args(buf);
         return;
     }
 

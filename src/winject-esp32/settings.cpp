@@ -20,9 +20,8 @@ settings& settings::instance()
 }
 
 settings::settings()
-    : sut(lc_tx_endpoint::instance()),
-      sur(lc_rx_endpoint::instance()),
-      ci(channel_info_endpoint::instance()),
+    : sut(upstream_tx_endpoint::instance()),
+      sur(upstream_rx_endpoint::instance()),
       netmgr(manager::instance())
 {
 }
@@ -89,29 +88,24 @@ bool settings::capture_live(snapshot_s* snap)
     }
     snap->network_mode = netmgr.network_mode();
 
-    lc_tx_bind_s tx = {};
+    upstream_tx_bind_s tx = {};
     if (sut.get_status(&tx))
     {
         snap->has_sut = true;
         snap->sut_port = tx.udp_port;
     }
-    lc_rx_bind_s rx = {};
+    upstream_rx_bind_s rx = {};
     if (sur.get_status(&rx))
     {
         snap->has_sur = true;
         snap->sur_dest = rx.dest;
     }
-    ci.fill_status(snap->ci, &snap->ci_count);
     return true;
 }
 
 bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
 {
     if (buf == nullptr || len == nullptr)
-    {
-        return false;
-    }
-    if (snap.ci_count > WIFI_AIRPORT_MAX)
     {
         return false;
     }
@@ -166,13 +160,6 @@ bool settings::pack_blob(const snapshot_s& snap, uint8_t* buf, size_t* len)
         put32(snap.sur_dest.host);
         put16(snap.sur_dest.port);
     }
-    put8(snap.ci_count);
-    for (uint8_t i = 0; i < snap.ci_count; i++)
-    {
-        put32(snap.ci[i].host);
-        put16(snap.ci[i].port);
-    }
-
     *len = static_cast<size_t>(p - buf);
     return *len <= k_blob_max;
 }
@@ -316,13 +303,16 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
             (void)host;
             (void)port;
         }
-        if (!get8(&snap->ci_count) || snap->ci_count > WIFI_AIRPORT_MAX)
+        uint8_t ci_count = 0;
+        if (!get8(&ci_count) || ci_count > WIFI_AIRPORT_MAX)
         {
             return false;
         }
-        for (uint8_t i = 0; i < snap->ci_count; i++)
+        for (uint8_t i = 0; i < ci_count; i++)
         {
-            if (!get32(&snap->ci[i].host) || !get16(&snap->ci[i].port))
+            uint32_t host = 0;
+            uint16_t port = 0;
+            if (!get32(&host) || !get16(&port))
             {
                 return false;
             }
@@ -363,15 +353,21 @@ bool settings::unpack_blob(const uint8_t* buf, size_t len, snapshot_s* snap)
             return false;
         }
     }
-    if (!get8(&snap->ci_count) || snap->ci_count > WIFI_AIRPORT_MAX)
+    if (version == 6)
     {
-        return false;
-    }
-    for (uint8_t i = 0; i < snap->ci_count; i++)
-    {
-        if (!get32(&snap->ci[i].host) || !get16(&snap->ci[i].port))
+        uint8_t ci_count = 0;
+        if (!get8(&ci_count) || ci_count > WIFI_AIRPORT_MAX)
         {
             return false;
+        }
+        for (uint8_t i = 0; i < ci_count; i++)
+        {
+            uint32_t host = 0;
+            uint16_t port = 0;
+            if (!get32(&host) || !get16(&port))
+            {
+                return false;
+            }
         }
     }
     return p == end;
@@ -499,11 +495,6 @@ bool settings::apply_snapshot(const snapshot_s& snap)
         return false;
     }
     if (snap.has_sur && !sur.set_endpoint(snap.sur_dest))
-    {
-        ESP_LOGE(TAG, "endpoint apply failed");
-        return false;
-    }
-    if (!ci.load(snap.ci, snap.ci_count))
     {
         ESP_LOGE(TAG, "endpoint apply failed");
         return false;

@@ -34,10 +34,16 @@ public:
     size_t offset() const;
     size_t capacity() const;
 
+    // EMAC input delivers a malloc'd frame; payload points inside it. Frees
+    // heap_owner on reset (see upstream_tx L2 hijack — no pool memcpy on that path).
+    static packet adopt_eth_frame(uint8_t* heap_owner, const uint8_t* payload,
+                                  size_t len);
+
 private:
     friend class packet_allocator;
     friend class wifi_tx;
     friend class wifi_rx;
+    friend class upstream_rx_endpoint;
     packet() = default;
     packet(packet_allocator& alloc, uint8_t* buf, size_t capacity);
 
@@ -46,6 +52,7 @@ private:
 
     packet_allocator* alloc = nullptr;
     uint8_t* buf = nullptr;
+    uint8_t* heap_owner_ = nullptr;
     size_t capacity_ = 0;
     size_t offset_ = 0;
     size_t size_ = 0;

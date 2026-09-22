@@ -144,8 +144,7 @@ bool radio_sim::start(const sockaddr_in& console_bind,
         return false;
     }
     forward_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-    ci_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (forward_fd_ < 0 || ci_fd_ < 0)
+    if (forward_fd_ < 0)
     {
         stop();
         return false;
@@ -174,7 +173,6 @@ void radio_sim::stop()
     close_fd(&console_fd_);
     close_fd(&air_fd_);
     close_fd(&forward_fd_);
-    close_fd(&ci_fd_);
     {
         std::lock_guard<std::mutex> g(tx_mu_);
         tx_q_.clear();
@@ -323,82 +321,6 @@ bool radio_sim::clear_upstream_rx()
     return true;
 }
 
-bool radio_sim::add_ci(ip_port_s dest)
-{
-    if (dest.port == 0 || dest.host == 0 || dest.host == 0xFFFFFFFFu)
-    {
-        return false;
-    }
-    std::lock_guard<std::mutex> g(state_mu_);
-    for (const auto& s : ci_subs_)
-    {
-        if (s.host == dest.host && s.port == dest.port)
-        {
-            return true;
-        }
-    }
-    if (ci_subs_.size() >= k_ci_max)
-    {
-        return false;
-    }
-    ci_subs_.push_back(dest);
-    return true;
-}
-
-bool radio_sim::rem_ci(ip_port_s dest)
-{
-    std::lock_guard<std::mutex> g(state_mu_);
-    for (auto it = ci_subs_.begin(); it != ci_subs_.end(); ++it)
-    {
-        if (it->host == dest.host && it->port == dest.port)
-        {
-            ci_subs_.erase(it);
-            return true;
-        }
-    }
-    return false;
-}
-
-void radio_sim::emit_ci(const void* data, size_t len)
-{
-    if (ci_fd_ < 0 || data == nullptr || len == 0)
-    {
-        return;
-    }
-    std::vector<ip_port_s> copy;
-    {
-        std::lock_guard<std::mutex> g(state_mu_);
-        copy = ci_subs_;
-    }
-    for (const auto& d : copy)
-    {
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = d.host;
-        addr.sin_port = htons(d.port);
-        ::sendto(ci_fd_, data, len, 0, reinterpret_cast<sockaddr*>(&addr),
-                 sizeof(addr));
-    }
-}
-
-void radio_sim::maybe_emit_flow_ctrl(size_t qsize)
-{
-    if (qsize * 2 <= k_tx_queue)
-    {
-        return;
-    }
-    struct
-    {
-        uint8_t info_type;
-        uint8_t tx_queue_size;
-        uint8_t tx_queue_capacity;
-    } __attribute__((packed)) sample{};
-    sample.info_type = 1;  // E_CHANNEL_INFO_TYPE_FLOW_CTRL
-    sample.tx_queue_size = static_cast<uint8_t>(qsize);
-    sample.tx_queue_capacity = static_cast<uint8_t>(k_tx_queue);
-    emit_ci(&sample, sizeof(sample));
-}
-
 void radio_sim::tx_worker()
 {
     while (!stop_.load())
@@ -435,6 +357,17 @@ void radio_sim::tx_worker()
                     .count()),
             std::memory_order_relaxed);
         tx_latency_valid_.store(true, std::memory_order_relaxed);
+
+        bool dry = false;
+        {
+            std::lock_guard<std::mutex> g(state_mu_);
+            dry = inject_dry_run_;
+        }
+        if (dry)
+        {
+            inject_ok_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
 
         bool any_ok = false;
         for (const auto& peer : air_peers_)
@@ -547,19 +480,35 @@ void radio_sim::on_inject_readable()
             continue;
         }
         pkt.len = static_cast<size_t>(n);
+        bool null_sink = false;
+        {
+            std::lock_guard<std::mutex> g(state_mu_);
+            null_sink = inject_null_sink_;
+        }
+        if (null_sink)
+        {
+            continue;
+        }
         size_t qsize = 0;
         {
             std::lock_guard<std::mutex> g(tx_mu_);
             if (tx_q_.size() >= k_tx_queue)
             {
                 drop_tx_queue_full_.fetch_add(1, std::memory_order_relaxed);
+                tx_enqueue_fail_.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
             tx_q_.push_back(std::move(pkt));
             qsize = tx_q_.size();
+            tx_enqueue_ok_.fetch_add(1, std::memory_order_relaxed);
+            uint32_t hwm = tx_q_hwm_.load(std::memory_order_relaxed);
+            if (qsize > hwm)
+            {
+                tx_q_hwm_.store(static_cast<uint32_t>(qsize),
+                                std::memory_order_relaxed);
+            }
         }
         tx_cv_.notify_one();
-        maybe_emit_flow_ctrl(qsize);
     }
 }
 
@@ -610,18 +559,6 @@ void radio_sim::on_air_readable()
             continue;
         }
         air_rx_pkt_.fetch_add(1, std::memory_order_relaxed);
-
-        // Synthetic RX_AIR sample for CI subscribers.
-        struct
-        {
-            uint8_t info_type;
-            int8_t rssi;
-            int8_t snr;
-        } __attribute__((packed)) air{};
-        air.info_type = 2;
-        air.rssi = -40;
-        air.snr = 25;
-        emit_ci(&air, sizeof(air));
 
         {
             std::lock_guard<std::mutex> g(rx_mu_);
@@ -703,8 +640,7 @@ std::string radio_sim::help_text() const
       << "unset_upstream_rx|uur\n"
       << "set_upstream_tx|sut port=<port>\n"
       << "unset_upstream_tx|uut\n"
-      << "set_upstream_ci|suc to=<host>:<port>\n"
-      << "unset_upstream_ci|usuc to=<host>:<port>\n"
+      << "set_inject_sink|sis <wifi|null|dry>\n"
       << "set_logger|sl address=<host>:<port> level=<error|warn|info|debug>\n"
       << "unset_logger|ul\n"
       << "set_allow_failed_crc|saf <0|1>\n"
@@ -801,16 +737,24 @@ std::string radio_sim::status_text()
                  static_cast<unsigned long long>(
                      last_tx_latency_us_.load()));
     }
-    o << "channel_tx queue=" << txq
-      << " drop_nomem=0 retry_count=0 retry_nomem=0 retry_other=0 inject_ok="
+    const char* sink =
+        inject_null_sink_ ? "null" : (inject_dry_run_ ? "dry" : "wifi");
+    o << "channel_tx queue=" << txq << " queue_hwm=" << tx_q_hwm_.load()
+      << " enqueue_ok=" << tx_enqueue_ok_.load()
+      << " enqueue_fail=" << tx_enqueue_fail_.load()
+      << " pool_free=255 pool_free_min=255 drop_nomem=0 retry_count=0 "
+         "retry_nomem=0 retry_other=0 inject_ok="
       << inject_ok_.load() << " inject_fail=" << inject_fail_.load()
-      << " in_flight=0 tx_latency=" << lat << " inject_wait=-\n";
+      << " in_flight=0 tx_latency=" << lat << " inject_wait=- udp_tx="
+      << udp_tx_pkt_.load() << " sink=" << sink << "\n";
     o << "channel_rx queue=" << rxq << " drop_no_pkt_pool=0 drop_queue_full="
-      << drop_rx_queue_full_.load() << " drop_crc_error=0\n";
+      << drop_rx_queue_full_.load() << " drop_crc_error=0 wifi_accept="
+      << air_rx_pkt_.load() << " udp_fwd=" << udp_fwd_pkt_.load() << "\n";
     if (have_sut_)
     {
         o << "channels_tx drop_no_pkt_pool=0 drop_queue_full="
-          << drop_tx_queue_full_.load() << "\n";
+          << drop_tx_queue_full_.load() << " pool_free_min=255 sink=" << sink
+          << "\n";
     }
     if (have_sur_)
     {
@@ -823,21 +767,6 @@ std::string radio_sim::status_text()
         o << "# logger\n";
         o << "logger address=" << h << ":" << logger_.port
           << " level=" << logger_level_ << " emitted=0 dropped=0\n";
-    }
-    if (!ci_subs_.empty())
-    {
-        o << "# channel_info\nchannel_info subscribers=";
-        for (size_t i = 0; i < ci_subs_.size(); ++i)
-        {
-            char h[16];
-            ipv4_to_string(ci_subs_[i].host, h, sizeof(h));
-            if (i)
-            {
-                o << ",";
-            }
-            o << h << ":" << ci_subs_[i].port;
-        }
-        o << "\n";
     }
     return o.str();
 }
@@ -901,7 +830,8 @@ std::string radio_sim::handle_command(const char* line_in)
         clear_upstream_rx();
         {
             std::lock_guard<std::mutex> g(state_mu_);
-            ci_subs_.clear();
+            inject_null_sink_ = false;
+            inject_dry_run_ = false;
             domain_ = 0;
             channel_ = WIFI_DEFAULT_CHANNEL;
             modulation_ = WIFI_DEFAULT_MODULATION;
@@ -1043,43 +973,33 @@ std::string radio_sim::handle_command(const char* line_in)
         return ok();
     }
 
-    if (cmd_is(cmd, "set_upstream_ci", "suc") ||
-        cmd_is(cmd, "unset_upstream_ci", "usuc"))
+    if (cmd_is(cmd, "set_inject_sink", "sis"))
     {
         if (!require_radio())
         {
             return nok("unavailable in OTA mode");
         }
-        if (args.size() != 1 || !starts_with(args[0].c_str(), "to="))
+        if (args.size() != 1)
         {
-            return usage(cmd_is(cmd, "set_upstream_ci", "suc")
-                             ? "set_upstream_ci to=<host>:<port>"
-                             : "unset_upstream_ci to=<host>:<port>");
+            return usage("set_inject_sink <wifi|null|dry>");
         }
-        const char* hp = args[0].c_str() + 3;
-        const char* colon = strchr(hp, ':');
-        if (colon == nullptr)
+        bool null_sink = false;
+        bool dry_run = false;
+        if (strcasecmp(args[0].c_str(), "null") == 0)
         {
-            return nok("bad to=");
+            null_sink = true;
         }
-        std::string host(hp, colon);
-        ip_port_s dest{};
-        if (!parse_host(host.c_str(), &dest.host) ||
-            !parse_port(colon + 1, &dest.port))
+        else if (strcasecmp(args[0].c_str(), "dry") == 0)
         {
-            return nok("bad to=");
+            dry_run = true;
         }
-        if (cmd_is(cmd, "set_upstream_ci", "suc"))
+        else if (strcasecmp(args[0].c_str(), "wifi") != 0)
         {
-            if (!add_ci(dest))
-            {
-                return nok("failed to add ci subscriber");
-            }
+            return usage("set_inject_sink <wifi|null|dry>");
         }
-        else if (!rem_ci(dest))
-        {
-            return nok("ci subscriber not found");
-        }
+        std::lock_guard<std::mutex> g(state_mu_);
+        inject_null_sink_ = null_sink;
+        inject_dry_run_ = dry_run;
         return ok();
     }
 

@@ -1,17 +1,16 @@
 #ifndef WINJECT_SETTINGS_H_
 #define WINJECT_SETTINGS_H_
 
-#include "channel_info_endpoint.h"
 #include "config.h"
 #include "frame.h"
-#include "lc_rx_endpoint.h"
-#include "lc_tx_endpoint.h"
 #include "packet.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #include "manager.h"
+#include "upstream_rx_endpoint.h"
+#include "upstream_tx_endpoint.h"
 
 class settings
 {
@@ -30,7 +29,7 @@ public:
     bool apply_live();
 
 private:
-    // Persisted: mode, radio, ethernet, domain, single sut/sur, ci.
+    // Persisted: mode, radio, ethernet, domain, single sut/sur.
     struct snapshot_s
     {
         WinjectMode mode;
@@ -46,13 +45,10 @@ private:
         uint16_t sut_port;
         bool has_sur;
         ip_port_t sur_dest;
-        uint8_t ci_count;
-        ip_port_t ci[WIFI_AIRPORT_MAX];
     };
 
-    // v6 = single upstream_tx/rx (+ ci). v3/v5 multi-bind tables load with
-    // upstreams cleared. v4 has empty upstreams.
-    static constexpr uint8_t k_blob_version = 6;
+    // v7 = single upstream_tx/rx (no channel_info). v6 includes ci subscribers.
+    static constexpr uint8_t k_blob_version = 7;
     static constexpr uint8_t k_blob_version_min = 3;
     static constexpr size_t k_blob_max = 2600;
 
@@ -69,9 +65,8 @@ private:
     bool read_blob(uint8_t slot, snapshot_s* snap);
     bool write_blob(uint8_t slot, const snapshot_s& snap);
 
-    lc_tx_endpoint& sut;
-    lc_rx_endpoint& sur;
-    channel_info_endpoint& ci;
+    upstream_tx_endpoint& sut;
+    upstream_rx_endpoint& sur;
     manager& netmgr;
     uint8_t current_slot_ = 0;
     bool has_loaded = false;

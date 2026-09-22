@@ -80,7 +80,6 @@ def prep_radio_a(ip: str, host: str, inject_port: int = 9000) -> None:
         "unset_upstream_rx",
         f"set_upstream_tx port={inject_port}",
         f"set_upstream_rx host={host} port=9210",
-        "set_inject_tune flush_batch=8 emac_gap_ticks=0 max_in_flight=6 staging_margin=4",
     ):
         cons_long(ip, c)
 
@@ -198,7 +197,6 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 winject.max_rate_kbps = {int(args.kbps)}
 winject.stats_sec     = 1
-winject.ci_pace_inject = 1
 winject.skip_console  = 1
 winject.forward_base  = 9210
 upstream.size = 2

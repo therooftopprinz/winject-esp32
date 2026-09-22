@@ -544,6 +544,12 @@ void wifi::reset_promisc_stats()
     rx_.reset_promisc_stats();
 }
 
+void wifi::reset_channel_stats()
+{
+    tx_.reset_channel_stats();
+    rx_.reset_channel_stats();
+}
+
 void wifi::set_tx_dry_run(bool enabled)
 {
     tx_.set_dry_run(enabled);

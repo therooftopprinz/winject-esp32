@@ -48,7 +48,9 @@ CONFIG_LWIP_DHCPS=y
 CONFIG_LWIP_DHCPS_MAX_STATION_NUM=64
 
 CONFIG_ETH_USE_ESP32_EMAC=y
-CONFIG_ETH_DMA_BUFFER_SIZE=1600
+# Standard 1500-byte IP MTU → 1514-byte L2 frame (no FCS in driver buffer).
+# Saves ~3.8 KiB EMAC DMA RAM vs 1600 (28 RX + 16 TX bufs on lan-module).
+CONFIG_ETH_DMA_BUFFER_SIZE=1514
 # Extra RX descriptors so EMAC can hold frames while WiFi TX owns the bus.
 # 24 + deep staging starved heap (~5KB) and hung .9 — keep at 20.
 CONFIG_ETH_DMA_RX_BUFFER_NUM=28

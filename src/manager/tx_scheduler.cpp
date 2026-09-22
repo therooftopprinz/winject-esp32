@@ -13,18 +13,9 @@ namespace
 {
 }  // namespace
 
-void tx_scheduler::set_may_emit_data(std::function<bool()> gate)
-{
-    may_emit_data_ = std::move(gate);
-}
-
-void tx_scheduler::set_on_data_mpdu_sent(std::function<void()> hook)
-{
-    on_data_mpdu_sent_ = std::move(hook);
-}
-
 void tx_scheduler::configure(uint32_t max_rate_kbps, uint16_t domain,
-                             size_t max_data_per_tick)
+                             size_t max_data_per_tick, size_t tx_burst_size,
+                             uint32_t tx_burst_interval_us)
 {
     rate_kbps = max_rate_kbps < 64 ? 64 : max_rate_kbps;
     domain_ = domain;
@@ -33,11 +24,70 @@ void tx_scheduler::configure(uint32_t max_rate_kbps, uint16_t domain,
     {
         max_data_per_tick_ = 32;
     }
-    // Small burst keeps manager→radio ETH aligned with lc_tx staging (depth 16);
-    // a 32-packet token bucket caused EMAC loss vs host-paced standalone inject.
+    tx_burst_size_ = tx_burst_size < 1 ? 1 : tx_burst_size;
+    if (tx_burst_size_ > k_radio_tx_queue_depth)
+    {
+        tx_burst_size_ = k_radio_tx_queue_depth;
+    }
+    tx_burst_interval_us_ = tx_burst_interval_us;
     burst = k_wifi_payload_max * 2;
     tokens = burst;
+    burst_data_sent_ = 0;
+    burst_cooldown_until_ = {};
     last_refill = std::chrono::steady_clock::now();
+}
+
+bool tx_scheduler::set_max_rate_kbps(uint32_t max_rate_kbps)
+{
+    rate_kbps = max_rate_kbps < 64 ? 64 : max_rate_kbps;
+    return true;
+}
+
+bool tx_scheduler::set_max_data_per_tick(size_t max_data_per_tick)
+{
+    max_data_per_tick_ = max_data_per_tick < 1 ? 1 : max_data_per_tick;
+    if (max_data_per_tick_ > 32)
+    {
+        max_data_per_tick_ = 32;
+    }
+    return true;
+}
+
+bool tx_scheduler::set_tx_burst_pacing(size_t tx_burst_size,
+                                       uint32_t tx_burst_interval_us)
+{
+    tx_burst_size_ = tx_burst_size < 1 ? 1 : tx_burst_size;
+    if (tx_burst_size_ > k_radio_tx_queue_depth)
+    {
+        tx_burst_size_ = k_radio_tx_queue_depth;
+    }
+    tx_burst_interval_us_ = tx_burst_interval_us;
+    burst_data_sent_ = 0;
+    burst_cooldown_until_ = {};
+    return true;
+}
+
+bool tx_scheduler::data_burst_allows() const
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (now < burst_cooldown_until_)
+    {
+        return false;
+    }
+    return burst_data_sent_ < tx_burst_size_;
+}
+
+void tx_scheduler::note_data_burst_emit()
+{
+    burst_data_sent_++;
+    if (burst_data_sent_ < tx_burst_size_)
+    {
+        return;
+    }
+    burst_cooldown_until_ =
+        std::chrono::steady_clock::now() +
+        std::chrono::microseconds(tx_burst_interval_us_);
+    burst_data_sent_ = 0;
 }
 
 void tx_scheduler::add(stream* up, wifi_udp* radio, uint8_t bus_tx,
@@ -106,7 +156,7 @@ bool tx_scheduler::emit_mpdu(size_t primary, bool acks_only,
     }
     else
     {
-        if (may_emit_data_ && !may_emit_data_())
+        if (!data_burst_allows())
         {
             return false;
         }
@@ -282,10 +332,7 @@ bool tx_scheduler::emit_mpdu(size_t primary, bool acks_only,
     if (any_data)
     {
         (*data_sent)++;
-        if (on_data_mpdu_sent_)
-        {
-            on_data_mpdu_sent_();
-        }
+        note_data_burst_emit();
     }
     return true;
 }

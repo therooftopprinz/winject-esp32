@@ -8,12 +8,11 @@ ESP-IDF firmware for Wireless-Tag **WT32-ETH01** (ESP32 + LAN8720): a **bfc-tunn
 host  -- full MPDU ------>  WT32-ETH01  -- TX inject -->  peer radios
 host  <- full MPDU -------  WT32-ETH01  <- RX forward --  peer radios
 host  <- console :22 --->  WT32-ETH01
-host  <- channel_info ---  WT32-ETH01
 ```
 
 UDP payloads on the single inject/forward pair are **complete 802.11 MPDUs** (24-byte header + body). Max MPDU **1500** bytes. Max present PDUs per MPDU: **5**. Max concatenated body **1476** bytes.
 
-**Data path:** `lc_tx_endpoint` (L2-hijack staging + flush task with EMAC timeshare) → `wifi_tx` queue → inject as-is. Air RX: `wifi_rx` promiscuous (domain/BSSID filter) → `wifi_rx` queue → `lc_rx_endpoint` (single forward). **CPU0** runs the WiFi driver + inject task; **CPU1** runs Ethernet/lwIP, UDP console, OTA, and endpoint tasks. See [ETH→WiFi TX performance](#ethwifi-tx-performance) for the EMAC/WiFi DMA timeshare that lifted inject from ~8 Mbps-class to ≥16 Mbps on-air (and ≥30 Mbps radio inject on MCS7 flood).
+**Data path:** `upstream_tx_endpoint` (L2 hijack adopts the EMAC frame into `packet`) → `wifi_tx` queue → inject as-is. Air RX: **`wifi_rx` promisc CB** (filter, pool **`memcpy`**, enqueue) → **`upstream_rx`** task → UDP forward. See [flow_refactor.md](flow_refactor.md).
 
 # 802.11 frame
 
@@ -114,8 +113,6 @@ Commands:
 - `unset_upstream_tx|uut` — unbind the inject socket.
 - `set_upstream_rx|sur host=<ip> port=<port>` — forward every accepted air MPDU to host:port. Replaces any previous dest.
 - `unset_upstream_rx|uur` — remove the forward dest.
-- `set_upstream_ci|suc to=<host>:<port>` — subscribe to channel-info UDP.
-- `unset_upstream_ci|usuc to=<host>:<port>` — remove that subscriber.
 - `set_logger|sl address=<host>:<port> level=<error|warn|info|debug>` — one UDP text logger (replaces the previous dest). Rate-limited (~50 Hz). Runtime only. Works in `OTA`.
 - `unset_logger|ul` — clear the UDP logger.
 - `set_allow_failed_crc|saf <allow>` — legacy; RX no longer drops on `rx_state` / `WIFI_PKT_MISC`. Promiscuous filter keeps `FCSFAIL` so inject frames reach the callback; `rx_state==0x41` is counted in `drop_crc_error` only (ESP32 often sets it falsely on good raw-inject frames — do not software-CRC).
@@ -123,8 +120,9 @@ Commands:
 - `set_modulation|sd <modulation>` — TX PHY rate (see table).
 - `set_network|sn <mode>` — `STATIC`: use `set_ip` immediately. `AUTO` (default): DHCP client; after **5 s** without a lease, apply `set_ip` as static (bench DORA ~40 ms + ESP DHCP ARP check ~1 s, plus boot-time margin while WiFi comes up). The radio never runs a DHCP server — the host/manager must be on a network that can reach the radio (LAN DHCP lease, or a static address on the radio’s `/24`).
 - `set_ip|sfi <ip>` / `set_fallback_ip|sfi <ip>` — static / fallback address (`/24`). Used in `STATIC`, and as the AUTO fallback when no lease arrives.
-- `save|sv <slot>` — write NVS slot `0`–`9` (current slot if omitted) and make it current. Blob **v6**: mode, radio, network/ethernet, domain, single `sut`/`sur`, CI subscribers. Logger is runtime only. Boot / `use` clears existing upstreams and recreates them from the blob. v3/v5 blobs load with upstreams cleared; v4 loads with empty upstreams.
+- `save|sv <slot>` — write NVS slot `0`–`9` (current slot if omitted) and make it current. Blob **v7**: mode, radio, network/ethernet, domain, single `sut`/`sur` (no channel-info subscribers). Logger is runtime only. Boot / `use` clears existing upstreams and recreates them from the blob. Older blobs load with CI subscribers ignored (v6) or upstreams cleared (v3–v5).
 - `use|u <slot>` — load slot `0`–`9`, apply it, make it current. Empty slot is `nok slot empty`. To/from `OTA` reboots.
+- `set_wifi_tx_tune|swtt burst_size=<1-20> burst_gap_us=<0-1000000> max_in_flight=<1-32>` — runtime `wifi_tx` burst drain and outstanding TX cap (any subset of keys). Shown on `status` as `wifi_tx_tune …`.
 - `set_cca_enabled|sce <is_enabled>` — TX CCA / CSMA. `0` injects without waiting for idle.
 - `set_tx_power|stp <dbm>` — maximum Wi-Fi TX power `2`–`20` dBm. Default `20`. ESP32 maps this to 0.25 dBm units.
 - `status|s` — snapshot (see Status).
@@ -173,7 +171,7 @@ Commands:
 | OFDM_MCS6_SGI | 64-QAM HT20 | 65.0 Mbps |
 | OFDM_MCS7_SGI | 64-QAM HT20 | 72.2 Mbps |
 
-Defaults: channel `1`, modulation `DSS_1M_L`, CCA enabled, TX power `20` dBm, `allow_failed_crc` off, network `AUTO`, static/fallback `192.168.32.1`, domain unset, no upstreams, no CI subscribers, logger unset. Boot loads the last-used NVS slot (default `0`); an empty slot `0` keeps these defaults. TX packet pool / `wifi_tx` queue depth **20**; RX pool / `wifi_rx` queue depth **8**.
+Defaults: channel `1`, modulation `DSS_1M_L`, CCA enabled, TX power `20` dBm, `allow_failed_crc` off, network `AUTO`, static/fallback `192.168.32.1`, domain unset, no upstreams, logger unset. Boot loads the last-used NVS slot (default `0`); an empty slot `0` keeps these defaults. TX packet pool / `wifi_tx` queue depth **20**; RX pool / **`wifi_rx` queue** depth **8**. Inject pacing: manager burst settings and `wifi_tx` in-firmware limits (see [cd-protocol.md](cd-protocol.md)).
 
 # Domain and bus
 
@@ -210,15 +208,6 @@ set_upstream_rx host=192.168.32.11 port=9001
 ## `OTA`
 
 Ethernet, UDP console, and HTTP OTA. Radio, LC, and endpoints stay down. Radio console commands reply `nok unavailable in OTA mode`. Logger commands still run. `set_mode` to/from `OTA` persists and reboots.
-
-# Channel info
-
-UDP telemetry to `set_upstream_ci` subscribers (packed little-endian structs):
-
-| `info_type` | Payload | When |
-|-------------|---------|------|
-| `1` `E_CHANNEL_INFO_TYPE_FLOW_CTRL` | `tx_queue_size`, `tx_queue_capacity` | `wifi_tx` occupancy above half capacity |
-| `2` `E_CHANNEL_INFO_TYPE_RX_AIR` | `rssi`, `snr` | every 100 ms while air RX is valid |
 
 # UDP logger
 
@@ -265,11 +254,9 @@ channels_tx drop_no_pkt_pool=<n> drop_queue_full=<n>
 channels_rx drop_send_fail=<n>
 # logger
 logger address=<host>:<port> level=<error|warn|info|debug> emitted=<n> dropped=<n>
-# channel_info
-channel_info subscribers=<host:port[,…]>
 ```
 
-`# upstreams` / `# logger` / `# channel_info` are omitted when unset (no binds / no dest / no subscribers). In `OTA`, after network/ota lines status prints `# radio` / `radio disabled (OTA mode)` and returns.
+`# upstreams` / `# logger` are omitted when unset (no binds / no dest). In `OTA`, after network/ota lines status prints `# radio` / `radio disabled (OTA mode)` and returns.
 
 | Line | Meaning |
 |------|---------|
@@ -355,21 +342,19 @@ ESP32 **EMAC RX and WiFi TX share DMA / bus time**. Continuous `esp_wifi_80211_t
 
 Soft flow-control on the manager does not fix this — the miss is on-radio between EMAC and WiFi.
 
-## Fix (radio-side timeshare)
+## Mitigation (current firmware)
 
-Keep WiFi inject fast, but **pause upstream flush** so EMAC can refill staging while WiFi DMA is idle. The gap lives on the **`sut` / `lc_tx` path**, not inside the `wifi_tx` inject loop (so `wifi_bench` stays unconstrained).
+ETH inject goes **directly** into `wifi_tx` (no L2 staging task). The **`wifi_tx`** task drains the queue in **bursts** with a short **gap** between bursts so EMAC RX can win DMA time. **`upstream_tx`** drops when the queue is full (`channels_tx drop_queue_full`).
 
 | Knob | Where | Role |
 |------|--------|------|
-| `LC_TX_FLUSH_BATCH` (20) | `config.h` / `lc_tx_endpoint` | Move this many staged MPDUs into `wifi_tx`, then pause |
-| `LC_TX_EMAC_GAP_TICKS` (1) | same | 1 ms tick idle after a batch (~14% duty at MCS7) |
-| `LC_TX_STAGING_DEPTH` (16) | same | Absorb short WiFi stalls without ballooning heap |
-| `WIFI_RADIO_MAX_IN_FLIGHT` (4) | `wifi_tx` | Cap outstanding 802.11 TX; cuts `NO_MEM` storms that thrash DMA and starve EMAC |
-| `WIFI_RADIO_INJECT_NOMEM_YIELD` (48) | `wifi_tx` | Prefer yields over 1 ms sleeps under `NO_MEM` |
-| `emac_rx` prio = `WIFI_RADIO_TASK_PRIO+2` | `ethernet_rmii.cpp` | Prefer EMAC RX over default when both contend |
-| WiFi dynamic TX buffers **16** (not 32); ETH DMA RX **28** | `sdkconfig.defaults` / `lan-module` | Leave RAM for staging + ETH RX descriptors |
+| `WIFI_TX_BURST_SIZE_DEFAULT`, `WIFI_TX_BURST_GAP_US` | `config.h` / `wifi_tx` | Burst drain + idle gap between bursts |
+| `WIFI_RADIO_MAX_IN_FLIGHT` (4) | `wifi_tx` | Cap outstanding 802.11 TX |
+| `WIFI_RADIO_TX_QUEUE` (20) | `wifi_tx` | Driver queue depth |
+| `emac_rx` prio = `WIFI_RADIO_TASK_PRIO+2` | `ethernet_rmii.cpp` | Prefer EMAC RX when both contend |
+| WiFi dynamic TX buffers **16**; ETH DMA **1514 B** × RX **28** / TX **16** | `sdkconfig.defaults` / `lan-module` | One buffer per standard 1500 MTU frame |
 
-Flush loop (conceptually): batch → wait until `wifi_tx` queue is nearly empty → `vTaskDelay(LC_TX_EMAC_GAP_TICKS)` → repeat.
+Older **`lc_tx`** batch/gap/staging tuning (`set_inject_tune`, `LC_TX_*`) was removed in the upstream refactor; see [flow_refactor.md](flow_refactor.md).
 
 ## Verified results (bench, 1400 B, CCA off)
 

@@ -20,7 +20,6 @@ add_executable(winject-manager
     frames/basic_fec.cpp
     frames/air_seq.cpp
     net_util.cpp
-    radio/channel_info.cpp
     radio/mpdu.cpp
     radio/wifi_udp.cpp
     tx_scheduler.cpp

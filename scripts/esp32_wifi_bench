@@ -36,12 +36,6 @@ WIFI_HDR_LEN = 24
 PREFIX_STANDALONE = bytes.fromhex("cafebabe")
 PREFIX_TUNNEL = bytes.fromhex("baddcafe")
 
-# wifi_bench → wifi_tx only (no lc_tx). Raise max_in_flight above firmware
-# default (4); no EMAC on this path so 12 is safe for peak inject.
-WIFI_BENCH_INJECT_TUNE = (
-    "set_inject_tune emac_gap_ticks=0 max_in_flight=12 staging_margin=4 flush_batch=8"
-)
-
 # Rough floor for flood-mode wait timeout (bytes / assumed Mbps).
 FLOOD_EST_MBPS = 28.0
 
@@ -96,7 +90,6 @@ def prep_radio(
     modulation: str,
     domain: str,
     tx_power_dbm: int | None = None,
-    inject_tune: str | None = WIFI_BENCH_INJECT_TUNE,
 ) -> None:
     bench_stop(ip)
     cmds: list[str] = [
@@ -115,8 +108,6 @@ def prep_radio(
             "unset_upstream_rx",
         )
     )
-    if inject_tune:
-        cmds.append(inject_tune)
     for cmd in cmds:
         reply = cons(ip, cmd, timeout=8.0)
         if not reply.strip().lower().startswith("ok"):
@@ -541,10 +532,9 @@ def run_direction(
     usb_prefixes: tuple[bytes, ...],
     air_domain: int,
     tx_power_dbm: int | None = None,
-    inject_tune: str | None = WIFI_BENCH_INJECT_TUNE,
 ) -> BenchRow:
-    prep_radio(sender, channel, modulation, domain, tx_power_dbm, inject_tune)
-    prep_radio(receiver, channel, modulation, domain, tx_power_dbm, inject_tune)
+    prep_radio(sender, channel, modulation, domain, tx_power_dbm)
+    prep_radio(receiver, channel, modulation, domain, tx_power_dbm)
     cons(receiver, "reset_promisc_stats", timeout=8.0)
 
     inj0 = gi(cons(sender, "status", timeout=10.0), "inject_ok")
@@ -730,17 +720,6 @@ def parse_args() -> argparse.Namespace:
         default="standalone",
         help="Addr3 prefix filter for USB: standalone | tunnel | both",
     )
-    p.add_argument(
-        "--no-inject-tune",
-        action="store_true",
-        help="skip set_inject_tune (firmware default max_in_flight=4)",
-    )
-    p.add_argument(
-        "--inject-tune",
-        default=WIFI_BENCH_INJECT_TUNE,
-        metavar="CMD",
-        help="console set_inject_tune line (default: max_in_flight=6 for wifi_bench)",
-    )
     return p.parse_args()
 
 
@@ -751,7 +730,6 @@ def main() -> int:
         return 2
     run_ab = args.test_ab or (not args.test_ab and not args.test_ba)
     run_ba = args.test_ba or (not args.test_ab and not args.test_ba)
-    inject_tune: str | None = None if args.no_inject_tune else args.inject_tune
     bench_kbps = args.kbps if args.paced else 0
     if not args.paced:
         print("wifi_bench: flood mode (kbps=0); use --paced --kbps N for offer tests")
@@ -799,7 +777,6 @@ def main() -> int:
                 usb_prefixes=usb_prefixes,
                 air_domain=air_domain,
                 tx_power_dbm=args.tx_power,
-                inject_tune=inject_tune,
             )
         except Exception as exc:
             print(f"FAIL: {exc}", file=sys.stderr)

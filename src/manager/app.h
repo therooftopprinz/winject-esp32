@@ -12,7 +12,6 @@
 
 #include "console_client.h"
 #include "console_service.h"
-#include "radio/channel_info.h"
 #include "radio/wifi_udp.h"
 #include "reactor.h"
 #include "stream/stream.h"
@@ -40,9 +39,6 @@ private:
     void arm_tick();
     void stats_tick();
     void flush_shutdown();
-    void arm_grant_io();
-    void on_grant_io();
-    void maybe_send_grant_request();
 
     bool set_upstream_fec(size_t index, fec_type_e type, int k, int n,
                           std::string* error);
@@ -54,20 +50,24 @@ private:
                                        std::string* error);
     bool set_modulation(const std::string& name, std::string* error);
     bool get_modulation(std::string* name, std::string* error);
+    bool set_tx_pacing(const uint32_t* max_rate_kbps,
+                       const size_t* max_data_per_tick,
+                       const size_t* tx_burst_size,
+                       const uint32_t* tx_burst_interval_us,
+                       std::string* error);
+    bool get_tx_pacing(uint32_t* max_rate_kbps, size_t* max_data_per_tick,
+                       size_t* tx_burst_size, uint32_t* tx_burst_interval_us,
+                       std::string* error) const;
     void fill_ci_view(channel_info_view_s* out) const;
 
-    // Reactor tick is 500 us; 500 ms between pings, 1 s pong deadline.
     static constexpr int k_ping_interval_ticks = 1000;
     static constexpr int k_pong_timeout_ticks = 2000;
     static constexpr int k_reconnect_ticks = 4000;
-    static constexpr uint8_t k_grant_low_water = 24;
-    static constexpr int k_max_outstanding_grants = 4;
 
     config cfg;
     ::reactor reactor;
     console_client console;
     console_service mgr_console;
-    channel_info ci;
     tx_scheduler scheduler;
     std::unique_ptr<wifi_udp> radio;
     std::vector<std::unique_ptr<stream>> upstreams;
@@ -78,10 +78,6 @@ private:
     bool console_ok = false;
     bool awaiting_pong = false;
     std::chrono::steady_clock::time_point last_stats{};
-    uint8_t tx_grant_credits_{0};
-    bool grant_io_armed_{false};
-    int grant_outstanding_{0};
-    std::chrono::steady_clock::time_point grant_sent_at_{};
 };
 
 #endif  // WINJECT_MANAGER_APP_H_

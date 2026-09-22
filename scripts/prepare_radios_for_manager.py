@@ -20,12 +20,27 @@ FWD_A = 9210
 FWD_B = 9220
 DEFAULT_DOMAIN = bw.DEFAULT_DOMAIN
 INJECT = bw.INJECT_PORT
-# Same-domain radios not in --a/--b must not forward to manager ports (dupes).
+# Bench inject FW (radio-em0→em1): see docs/inject-pacing-investigation.md
+PROFILE_10MBPS_INJECT = (
+    "flush_batch=6 emac_gap_ticks=0 max_in_flight=6 staging_margin=4"
+)
+PROFILE_10MBPS_WIFI = "burst_size=6 burst_gap_us=0 max_in_flight=6"
+PROFILE_15MBPS_INJECT = (
+    "flush_batch=8 emac_gap_ticks=1 max_in_flight=6 staging_margin=4"
+)
+PROFILE_15MBPS_WIFI = "burst_size=8 burst_gap_us=1000 max_in_flight=6"
+PROFILE_WIFI_BY_NAME = {
+    "10mbps": PROFILE_10MBPS_WIFI,
+    "15mbps": PROFILE_15MBPS_WIFI,
+}
+PROFILE_INJECT_BY_NAME = {
+    "10mbps": PROFILE_10MBPS_INJECT,
+    "15mbps": PROFILE_15MBPS_INJECT,
+}
+# Same-domain radios not in --a/--b (offline bench spares only).
 BENCH_CLEAR_RX = (
-    "192.168.253.9",
     "192.168.253.11",
     "192.168.253.12",
-    "192.168.253.14",
 )
 
 
@@ -34,7 +49,7 @@ def clear_stale_forwarders(active: set[str], quiet: bool) -> None:
         if ip in active:
             continue
         try:
-            bw.console(ip, ["unset_upstream_rx"], quiet=quiet, timeout=2.0)
+            bw.console(ip, ["unset_upstream_rx"], quiet=quiet, timeout=0.8)
         except OSError:
             pass
 
@@ -73,6 +88,12 @@ def main() -> int:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="set_cca_enabled; omit to keep existing",
+    )
+    p.add_argument(
+        "--profile",
+        choices=tuple(PROFILE_INJECT_BY_NAME),
+        default=None,
+        help="apply radio TX pacing for a paced host offer (see docs/inject-pacing-investigation.md)",
     )
     args = p.parse_args()
     if args.channel is not None and not bw.channel_ok(args.channel):
@@ -121,31 +142,33 @@ def main() -> int:
             return False
         return True
 
-    inject_tune = (
-        "set_inject_tune flush_batch=8 emac_gap_ticks=0 "
-        "max_in_flight=6 staging_margin=4"
-    )
-
-    def apply_inject_tune(ip: str) -> bool:
+    def apply_profile(ip: str, profile: str) -> bool:
+        help_text = "\n".join(bw.console(ip, ["help"], quiet=quiet, timeout=3))
+        if "set_wifi_tx_tune" in help_text or "swtt" in help_text:
+            tune_cmd = f"set_wifi_tx_tune {PROFILE_WIFI_BY_NAME[profile]}"
+        else:
+            tune_cmd = f"set_inject_tune {PROFILE_INJECT_BY_NAME[profile]}"
         try:
-            replies = bw.console(ip, [inject_tune], quiet=quiet, timeout=5)
+            replies = bw.console(ip, [tune_cmd], quiet=quiet, timeout=5)
         except OSError as err:
-            print(f"{ip}: inject_tune console failed: {err}")
+            print(f"{ip}: profile tune failed: {err}")
             return False
         if not bw.replies_ok(replies):
-            print(f"{ip}: inject_tune failed")
+            print(f"{ip}: {tune_cmd} failed")
             return False
         return True
 
     clear_stale_forwarders({args.a, args.b}, quiet)
     ok_a = configure_radio(args.a, FWD_A)
     ok_b = configure_radio(args.b, FWD_B)
-    if ok_a:
-        ok_a = apply_inject_tune(args.a)
-    if ok_b:
-        ok_b = apply_inject_tune(args.b)
     if not (ok_a and ok_b):
         return 1
+    if args.profile is not None:
+        if not (
+            apply_profile(args.a, args.profile)
+            and apply_profile(args.b, args.profile)
+        ):
+            return 1
     ch = "unchanged" if args.channel is None else str(args.channel)
     mod = "unchanged" if args.modulation is None else args.modulation
     pwr = "unchanged" if args.power is None else str(args.power)
@@ -153,9 +176,10 @@ def main() -> int:
         cca = "unchanged"
     else:
         cca = "enabled" if args.cca else "disabled"
+    prof = args.profile or "none"
     print(
         f"ok domain={domain} channel={ch} modulation={mod} power={pwr} cca={cca} "
-        f"inject={INJECT} forward A={FWD_A} B={FWD_B} host={host}"
+        f"profile={prof} inject={INJECT} forward A={FWD_A} B={FWD_B} host={host}"
     )
     return 0
 

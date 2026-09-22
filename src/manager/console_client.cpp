@@ -19,251 +19,8 @@ console_client::~console_client()
 void console_client::close()
 {
     close_socket(&sock);
-    close_grant_channel();
     pending.clear();
     pong_seen_ = false;
-}
-
-void console_client::close_grant_channel()
-{
-    close_socket(&grant_sock);
-}
-
-bool console_client::connect_grant_peer(const config& cfg, std::string* error)
-{
-    close_grant_channel();
-    in_addr ip = {};
-    if (!parse_host(cfg.device, &ip))
-    {
-        if (error != nullptr)
-        {
-            *error = "cannot resolve " + cfg.device;
-        }
-        return false;
-    }
-    sockaddr_in peer = {};
-    peer.sin_family = AF_INET;
-    peer.sin_addr = ip;
-    peer.sin_port = htons(cfg.console_port);
-    grant_sock = make_udp4();
-    if (grant_sock.fd() < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = strerror(errno);
-        }
-        return false;
-    }
-    if (grant_sock.connect(peer) < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = std::string("grant console: ") + strerror(errno);
-        }
-        close_grant_channel();
-        return false;
-    }
-    return true;
-}
-
-bool console_client::open_grant_channel(std::string* error)
-{
-    close_grant_channel();
-    if (sock.fd() < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = "console not connected";
-        }
-        return false;
-    }
-    sockaddr_in peer = {};
-    socklen_t len = sizeof(peer);
-    if (getpeername(sock.fd(), reinterpret_cast<sockaddr*>(&peer), &len) != 0)
-    {
-        if (error != nullptr)
-        {
-            *error = strerror(errno);
-        }
-        return false;
-    }
-    grant_sock = make_udp4();
-    if (grant_sock.fd() < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = strerror(errno);
-        }
-        return false;
-    }
-    if (grant_sock.connect(peer) < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = std::string("grant console: ") + strerror(errno);
-        }
-        close_grant_channel();
-        return false;
-    }
-    return true;
-}
-
-namespace
-{
-bool parse_tx_grant_line(const char* buf, size_t n, uint8_t* frames)
-{
-    if (frames == nullptr || n == 0)
-    {
-        return false;
-    }
-    std::string line(buf, n);
-    const auto nl = line.find('\n');
-    if (nl != std::string::npos)
-    {
-        line.resize(nl);
-    }
-    if (line.rfind("ok ", 0) != 0)
-    {
-        return false;
-    }
-    const unsigned long v = strtoul(line.c_str() + 3, nullptr, 10);
-    if (v > 255)
-    {
-        return false;
-    }
-    *frames = static_cast<uint8_t>(v);
-    return true;
-}
-}  // namespace
-
-bool console_client::send_tx_grant_request(std::string* error)
-{
-    if (grant_sock.fd() < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = "grant channel not open";
-        }
-        return false;
-    }
-    while (true)
-    {
-        char junk[256];
-        const ssize_t n =
-            recv(grant_sock.fd(), junk, sizeof(junk), MSG_DONTWAIT);
-        if (n < 0)
-        {
-            break;
-        }
-    }
-    static const char k_wire[] = "tx_grant\n";
-    const ssize_t sn =
-        send(grant_sock.fd(), k_wire, sizeof(k_wire) - 1,
-             MSG_NOSIGNAL | MSG_DONTWAIT);
-    if (sn == static_cast<ssize_t>(sizeof(k_wire) - 1))
-    {
-        return true;
-    }
-    if (sn < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-    {
-        pollfd pfd = {};
-        pfd.fd = grant_sock.fd();
-        pfd.events = POLLOUT;
-        const int pr = poll(&pfd, 1, 50);
-        if (pr > 0)
-        {
-            const ssize_t sn2 =
-                send(grant_sock.fd(), k_wire, sizeof(k_wire) - 1, MSG_NOSIGNAL);
-            if (sn2 == static_cast<ssize_t>(sizeof(k_wire) - 1))
-            {
-                return true;
-            }
-        }
-    }
-    if (error != nullptr)
-    {
-        *error = "tx_grant send failed";
-    }
-    return false;
-}
-
-bool console_client::try_consume_tx_grant(uint8_t* frames)
-{
-    if (grant_sock.fd() < 0 || frames == nullptr)
-    {
-        return false;
-    }
-    char buf[128];
-    const ssize_t n = recv(grant_sock.fd(), buf, sizeof(buf) - 1, MSG_DONTWAIT);
-    if (n <= 0)
-    {
-        return false;
-    }
-    return parse_tx_grant_line(buf, static_cast<size_t>(n), frames);
-}
-
-bool console_client::request_tx_grant(uint8_t* frames, std::string* error)
-{
-    if (frames == nullptr)
-    {
-        if (error != nullptr)
-        {
-            *error = "frames is null";
-        }
-        return false;
-    }
-    if (grant_sock.fd() < 0)
-    {
-        if (error != nullptr)
-        {
-            *error = "grant channel not open";
-        }
-        return false;
-    }
-    if (!send_tx_grant_request(error))
-    {
-        return false;
-    }
-    using clock = std::chrono::steady_clock;
-    const auto deadline = clock::now() + std::chrono::milliseconds(80);
-    while (clock::now() < deadline)
-    {
-        pollfd pfd = {};
-        pfd.fd = grant_sock.fd();
-        pfd.events = POLLIN;
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              deadline - clock::now())
-                              .count();
-        if (left <= 0)
-        {
-            break;
-        }
-        const int pr = poll(&pfd, 1, static_cast<int>(left));
-        if (pr <= 0)
-        {
-            continue;
-        }
-        char buf[128];
-        const ssize_t n = recv(grant_sock.fd(), buf, sizeof(buf) - 1, 0);
-        if (n <= 0)
-        {
-            continue;
-        }
-        if (!parse_tx_grant_line(buf, static_cast<size_t>(n), frames))
-        {
-            if (error != nullptr)
-            {
-                *error = "tx_grant: bad reply";
-            }
-            return false;
-        }
-        return true;
-    }
-    if (error != nullptr)
-    {
-        *error = "tx_grant timeout";
-    }
-    return false;
 }
 
 bool console_client::start_connect(const config& cfg, std::string* error)
@@ -662,8 +419,7 @@ bool console_client::release_inject_port(uint16_t port, std::string* error)
 bool console_client::program(const config& cfg,
                              const std::vector<uint16_t>& inject_ports,
                              const std::vector<uint16_t>& forward_ports,
-                             uint16_t ci_port, in_addr* local_ip_out,
-                             std::string* error)
+                             in_addr* local_ip_out, std::string* error)
 {
     if (local_ip_out == nullptr)
     {
@@ -718,25 +474,7 @@ bool console_client::program(const config& cfg,
         close();
         return false;
     }
-    if (ci_port != 0)
-    {
-        const std::string suc =
-            "set_upstream_ci to=" + ipv4_to_string(local_ip_) + ":" +
-            std::to_string(ci_port);
-        if (!send_cmd(suc, error))
-        {
-            close();
-            return false;
-        }
-        LOG_INF("channel_info subscribed %s:%u",
-                ipv4_to_string(local_ip_).c_str(), ci_port);
-    }
     pending.clear();
-    if (!open_grant_channel(error))
-    {
-        close();
-        return false;
-    }
     return true;
 }
 
@@ -791,24 +529,6 @@ bool console_client::apply_upstream(const config& cfg, uint16_t inject_port,
     }
     LOG_INF("radio upstream inject=%u forward=%s:%u", inject_port,
             ipv4_to_string(local_ip).c_str(), forward_port);
-    return true;
-}
-
-bool console_client::apply_ci(in_addr local_ip, uint16_t ci_port,
-                              std::string* error)
-{
-    if (ci_port == 0)
-    {
-        return true;
-    }
-    const std::string suc = "set_upstream_ci to=" + ipv4_to_string(local_ip) +
-                            ":" + std::to_string(ci_port);
-    if (!send_cmd(suc, error))
-    {
-        return false;
-    }
-    LOG_INF("channel_info subscribed %s:%u", ipv4_to_string(local_ip).c_str(),
-            ci_port);
     return true;
 }
 

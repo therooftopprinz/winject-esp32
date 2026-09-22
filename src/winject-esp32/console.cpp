@@ -342,15 +342,13 @@ bool console::init(manager& netmgr)
 {
     tx_ep = nullptr;
     rx_ep = nullptr;
-    ci = nullptr;
     return init_common(netmgr);
 }
 
-bool console::init(lc_tx_endpoint& tx_ep, lc_rx_endpoint& rx_ep,
-                   channel_info_endpoint& ci, manager& netmgr)
+bool console::init(upstream_tx_endpoint& tx_ep, upstream_rx_endpoint& rx_ep,
+                   manager& netmgr)
 {
     this->tx_ep = &tx_ep;
     this->rx_ep = &rx_ep;
-    this->ci = &ci;
     return init_common(netmgr);
 }

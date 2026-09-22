@@ -52,10 +52,10 @@ bool wifi_bench::start_tx(uint16_t size, uint32_t count, uint32_t kbps)
     elapsed_us_ = 0;
     running_ = true;
 
-    // Same core as lc_tx drain so wifi_tx (core 0) is the only WiFi producer
+    // Same core as upstream_rx drain so wifi_tx (core 0) is the only WiFi producer
     // path under test — no Ethernet UDP involved.
     if (xTaskCreatePinnedToCore(task, "wifi_bench", 4096, this,
-                                LC_TX_DRAIN_TASK_PRIO, nullptr,
+                                UPSTREAM_RX_TASK_PRIO, nullptr,
                                 APP_TASK_CORE) != pdPASS)
     {
         running_ = false;

@@ -205,6 +205,13 @@ def run_ab(
 
 
 def main() -> int:
+    print(
+        "obsolete: set_inject_tune / flush_batch sweeps were removed; "
+        "tune winject.tx_burst_size / tx_burst_interval_us instead.",
+        file=sys.stderr,
+    )
+    return 2
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--a", default="192.168.253.9")
     p.add_argument("--b", default="192.168.253.14")

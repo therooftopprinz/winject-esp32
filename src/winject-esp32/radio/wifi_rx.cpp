@@ -1,9 +1,7 @@
 #include "wifi_rx.h"
 
-#include "channel_info_endpoint.h"
 #include "config.h"
 #include "frame.h"
-#include "lc_rx_endpoint.h"
 #include "packet.h"
 #include "wifi.h"
 
@@ -21,6 +19,47 @@
 static const char* TAG = "wifi_rx";
 
 wifi_rx::wifi_rx(wifi& radio) : radio(radio) {}
+
+bool wifi_rx::init()
+{
+    return q.init();
+}
+
+bool wifi_rx::try_enqueue(packet&& mpdu)
+{
+    if (!q.ready() || !mpdu.is_valid())
+    {
+        return false;
+    }
+    return q.try_push(std::optional<packet>(std::move(mpdu)));
+}
+
+packet wifi_rx::pop(TickType_t wait)
+{
+    packet out;
+    std::optional<packet> slot;
+    if (!q.pop(&slot, wait) || !slot.has_value())
+    {
+        return out;
+    }
+    out = std::move(*slot);
+    return out;
+}
+
+void wifi_rx::on_upstream_deliver()
+{
+    apply_stashed_air();
+    radio.pulse_rx_led();
+}
+
+uint8_t wifi_rx::queue_size() const
+{
+    if (!q.ready())
+    {
+        return 0;
+    }
+    return q.size();
+}
 
 int8_t wifi_rx::clamp_i8(int value)
 {
@@ -63,7 +102,6 @@ void wifi_rx::note_air(const wifi_pkt_rx_ctrl_t& ctrl)
     rssi.store(rssi_dbm, std::memory_order_relaxed);
     snr.store(snr_db, std::memory_order_relaxed);
     air_valid.store(true, std::memory_order_relaxed);
-    channel_info_endpoint::instance().on_rx_air_info(rssi_dbm, snr_db);
 }
 
 void wifi_rx::stash_air_sample(const wifi_pkt_rx_ctrl_t& ctrl)
@@ -90,15 +128,6 @@ void wifi_rx::apply_stashed_air()
     note_air(ctrl);
 }
 
-bool wifi_rx::enqueue(packet&& pkt)
-{
-    if (!q.ready() || !pkt.is_valid())
-    {
-        return false;
-    }
-    return q.try_push(std::optional<packet>(std::move(pkt)));
-}
-
 void wifi_rx::reset_promisc_stats()
 {
     promisc_data.store(0, std::memory_order_relaxed);
@@ -119,6 +148,15 @@ void wifi_rx::reset_promisc_stats()
     promisc_legacy_prefix.store(0, std::memory_order_relaxed);
     promisc_legacy_addr3_ok.store(0, std::memory_order_relaxed);
     promisc_domain_word_ok.store(0, std::memory_order_relaxed);
+}
+
+void wifi_rx::reset_channel_stats()
+{
+    udp_rx_pkt.store(0, std::memory_order_relaxed);
+    drop_crc_error.store(0, std::memory_order_relaxed);
+    drop_rx_no_pkt_pool.store(0, std::memory_order_relaxed);
+    drop_rx_queue_full.store(0, std::memory_order_relaxed);
+    udp_fwd_pkt.store(0, std::memory_order_relaxed);
 }
 
 void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
@@ -269,93 +307,18 @@ void wifi_rx::on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type)
     }
     udp_rx_pkt.fetch_add(1, std::memory_order_relaxed);
     p.set_packet_offset(0);
-    memcpy(p.data(), pkt->payload, static_cast<size_t>(len));
-    p.set_packet_size(static_cast<size_t>(len));
-    if (!enqueue(std::move(p)))
+    memcpy(p.data(), pkt->payload, mpdu_len);
+    p.set_packet_size(mpdu_len);
+    if (!try_enqueue(std::move(p)))
     {
         drop_rx_queue_full.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
 }
 
 void wifi_rx::promiscuous_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 {
     wifi::instance().rx().on_promiscuous(buf, type);
-}
-
-bool wifi_rx::init()
-{
-    return q.init();
-}
-
-void wifi_rx::set_endpoint(lc_rx_endpoint& ep_ref)
-{
-    ep = &ep_ref;
-}
-
-void wifi_rx::task(void* arg)
-{
-    static_cast<wifi_rx*>(arg)->run();
-}
-
-bool wifi_rx::start(BaseType_t core, UBaseType_t prio, uint32_t stack_bytes)
-{
-    if (!q.ready())
-    {
-        ESP_LOGE(TAG, "wifi_rx start without queue");
-        return false;
-    }
-    if (xTaskCreatePinnedToCore(task, "wifi_rx", stack_bytes, this, prio,
-                                nullptr, core) != pdPASS)
-    {
-        ESP_LOGE(TAG, "wifi_rx task failed");
-        return false;
-    }
-    return true;
-}
-
-void wifi_rx::handle_mpdu(packet&& mpdu)
-{
-    if (mpdu.size() < WIFI_RADIO_INJECT_MIN || !mpdu.is_valid())
-    {
-        bad_mpdu_count_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    apply_stashed_air();
-    radio.pulse_rx_led();
-    if (ep == nullptr)
-    {
-        return;
-    }
-    ep->forward(std::move(mpdu));
-}
-
-packet wifi_rx::pop(TickType_t wait)
-{
-    packet out;
-    std::optional<packet> slot;
-    if (!q.pop(&slot, wait) || !slot.has_value())
-    {
-        return out;
-    }
-    out = std::move(*slot);
-    return out;
-}
-
-void wifi_rx::run()
-{
-    for (;;)
-    {
-        packet mpdu = pop(portMAX_DELAY);
-        if (mpdu.is_valid())
-        {
-            handle_mpdu(std::move(mpdu));
-        }
-    }
-}
-
-uint8_t wifi_rx::queue_size() const
-{
-    return q.size();
 }
 
 bool wifi_rx::apply_monitor()

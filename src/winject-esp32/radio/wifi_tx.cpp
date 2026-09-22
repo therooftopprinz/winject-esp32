@@ -1,15 +1,15 @@
-#include "wifi_tx.h"
-
-#include "channel_info_endpoint.h"
 #include "config.h"
+#include "packet.h"
 #include "udp_logger.h"
 #include "wifi.h"
+#include "wifi_tx.h"
 
 #include <atomic>
 #include <string.h>
 #include <utility>
 
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -117,21 +117,12 @@ bool wifi_tx::init()
     return q.init();
 }
 
-void wifi_tx::set_channel_info(channel_info_endpoint& ci_ref)
+void wifi_tx::notify_inject_work()
 {
-    ci = &ci_ref;
-}
-
-void wifi_tx::report_inject_staging(uint8_t staging_count)
-{
-    lc_staging_.store(staging_count, std::memory_order_relaxed);
-    publish_flow_ctrl();
-}
-
-void wifi_tx::set_lc_tx_yield(bool blocked)
-{
-    lc_tx_yield_.store(blocked, std::memory_order_relaxed);
-    publish_flow_ctrl();
+    if (task_handle_ != nullptr)
+    {
+        xTaskNotifyGive(task_handle_);
+    }
 }
 
 uint32_t wifi_tx::tx_in_flight_count() const
@@ -151,122 +142,77 @@ bool wifi_tx::set_max_in_flight(uint32_t n)
         return false;
     }
     max_in_flight_cap_.store(n, std::memory_order_relaxed);
-    publish_flow_ctrl();
     return true;
 }
 
-bool wifi_tx::may_feed_from_lc_tx() const
+uint8_t wifi_tx::tx_burst_size() const
 {
-    if (queue_size() + 2 >= k_queue_cap)
+    return burst_size_.load(std::memory_order_relaxed);
+}
+
+uint32_t wifi_tx::tx_burst_gap_us() const
+{
+    return burst_gap_us_.load(std::memory_order_relaxed);
+}
+
+bool wifi_tx::set_tx_burst(uint8_t size, uint32_t gap_us)
+{
+    if (size < 1 || size > k_queue_cap || gap_us > 1000000u)
     {
         return false;
     }
-    const uint32_t infl = tx_in_flight_count();
-    const uint32_t cap =
-        max_in_flight_cap_.load(std::memory_order_relaxed);
-    if (infl >= cap)
-    {
-        return false;
-    }
-    // EMAC timeshare is lc_tx batch+gap after moving frames, not stalling
-    // staging drain at half in-flight (that let L2 hijack staging overflow).
+    burst_size_.store(size, std::memory_order_relaxed);
+    burst_gap_us_.store(gap_us, std::memory_order_relaxed);
     return true;
 }
 
-uint8_t wifi_tx::compute_tx_slots() const
+static void delay_us(uint32_t us)
 {
-    const uint8_t staging = lc_staging_.load(std::memory_order_relaxed);
-    uint8_t staging_free = 0;
-    if (staging < LC_TX_STAGING_DEPTH)
+    if (us == 0)
     {
-        staging_free = static_cast<uint8_t>(LC_TX_STAGING_DEPTH - staging);
+        return;
     }
-    size_t pool_n = packet_allocator::tx().available();
-    uint8_t pool_free = pool_n > 255u ? 255u : static_cast<uint8_t>(pool_n);
-
-    // AVAILABLE_FOR_TX: host inject accepts into staging (hijack) then pool.
-    // wifi_tx queue / in-flight are enforced inside lc_tx flush, not here.
-    uint8_t slots = staging_free;
-    if (pool_free < slots)
+    if (us >= 1000u)
     {
-        slots = pool_free;
+        vTaskDelay(pdMS_TO_TICKS((us + 999u) / 1000u));
+        return;
     }
-    return slots;
+    esp_rom_delay_us(us);
 }
 
-void wifi_tx::publish_flow_ctrl()
+bool wifi_tx::queue_full() const
 {
-    if (ci == nullptr)
+    if (!q.ready())
     {
-        return;
+        return true;
     }
-    const uint8_t size = queue_size();
-    const uint32_t infl =
-        in_flight.load(std::memory_order_relaxed);
-    const uint8_t staging =
-        lc_staging_.load(std::memory_order_relaxed);
-    const uint8_t wifi_pressure =
-        size > static_cast<uint8_t>(infl)
-            ? size
-            : static_cast<uint8_t>(infl > 255u ? 255u : infl);
-    const uint8_t combined_cap =
-        static_cast<uint8_t>(
-            k_queue_cap + LC_TX_STAGING_DEPTH > 255u
-                ? 255u
-                : k_queue_cap + LC_TX_STAGING_DEPTH);
-    uint16_t combined = static_cast<uint16_t>(wifi_pressure) + staging;
-    if (lc_tx_yield_.load(std::memory_order_relaxed))
-    {
-        combined = combined_cap;
-    }
-    if (combined > 255u)
-    {
-        combined = 255u;
-    }
+    return queue_size() >= k_queue_cap;
+}
 
-    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-    uint64_t prev = flow_ctrl_last_us.load(std::memory_order_relaxed);
-    const bool heartbeat =
-        prev == 0 || now <= prev || (now - prev) >= 10000ull;
-    const uint32_t accepted =
-        udp_tx_pkt.load(std::memory_order_relaxed);
-    const uint32_t prev_inject =
-        flow_ctrl_last_inject_.load(std::memory_order_relaxed);
-    const bool inject_advanced = accepted != prev_inject;
-    const bool pressured =
-        staging > 0 || combined > combined_cap / 4u ||
-        wifi_pressure > k_queue_cap / 2u ||
-        infl >= max_in_flight_cap_.load(std::memory_order_relaxed) / 2u;
-    if (!heartbeat && !pressured && !inject_advanced)
-    {
-        return;
-    }
-    // Rate-limit under sustained pressure (not on heartbeats / inject ticks).
-    if (!heartbeat && !inject_advanced && prev != 0 && now > prev &&
-        (now - prev) < 5000ull)
-    {
-        return;
-    }
-    flow_ctrl_last_us.store(now, std::memory_order_relaxed);
-    flow_ctrl_last_inject_.store(accepted, std::memory_order_relaxed);
-    ci->on_flow_ctrl_info(static_cast<uint8_t>(combined), combined_cap,
-                          accepted);
+bool wifi_tx::on_inject_task() const
+{
+    return task_handle_ != nullptr &&
+           xTaskGetCurrentTaskHandle() == task_handle_;
 }
 
 bool wifi_tx::enqueue(packet&& pkt)
 {
     if (!q.ready() || !pkt.is_valid())
     {
-        publish_flow_ctrl();
+        tx_enqueue_fail.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (!q.try_push(std::optional<packet>(std::move(pkt))))
     {
-        publish_flow_ctrl();
+        tx_enqueue_fail.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    tx_enqueue_ok.fetch_add(1, std::memory_order_relaxed);
     note_queue_sample(queue_size());
-    publish_flow_ctrl();
+    if (!on_inject_task())
+    {
+        notify_inject_work();
+    }
     return true;
 }
 
@@ -294,7 +240,6 @@ packet wifi_tx::pop(TickType_t wait)
         return out;
     }
     out = std::move(*slot);
-    publish_flow_ctrl();
     return out;
 }
 
@@ -314,17 +259,9 @@ bool wifi_tx::inject_retry(const uint8_t* frame, size_t len)
     {
         uint16_t seq = 0;
         const bool have_seq = seq_of(frame, len, &seq);
+        if (have_seq)
         {
-            bfc::semaphore::lock lock(radio.lock, pdMS_TO_TICKS(50));
-            if (!lock)
-            {
-                vTaskDelay(1);
-                continue;
-            }
-            if (have_seq)
-            {
-                note_submit(seq);
-            }
+            note_submit(seq);
         }
         // Do not hold radio.lock across 80211_tx: that call posts into the
         // Wi-Fi task (same core as TX-done / promiscuous). A lock inversion
@@ -477,26 +414,35 @@ void wifi_tx::run()
             continue;
         }
 
-        // dry: dequeue + free only (no esp_wifi_80211_tx). Isolates queue/task
-        // cost from RF/driver work when comparing ETH miss under load.
         if (dry_run_.load(std::memory_order_relaxed))
         {
             inject_ok.fetch_add(1, std::memory_order_relaxed);
-            taskYIELD();
-            continue;
-        }
-
-        const bool ok = inject_retry(out.data(), out.size());
-        if (ok)
-        {
-            radio.pulse_tx_led();
-            // EMAC quiet windows are owned by lc_tx upstream flush (batch +
-            // gap), not here — keeps timeshare on the sut/upstream_tx path.
-            taskYIELD();
         }
         else
         {
-            drop_tx_nomem.fetch_add(1, std::memory_order_relaxed);
+            const bool ok = inject_retry(out.data(), out.size());
+            if (ok)
+            {
+                radio.pulse_tx_led();
+            }
+            else
+            {
+                drop_tx_nomem.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        burst_sent_++;
+        const uint8_t burst_cap =
+            burst_size_.load(std::memory_order_relaxed);
+        const bool queue_drained = queue_size() == 0;
+        if (burst_sent_ >= burst_cap || queue_drained)
+        {
+            delay_us(burst_gap_us_.load(std::memory_order_relaxed));
+            burst_sent_ = 0;
+        }
+        else
+        {
+            taskYIELD();
         }
     }
 }
@@ -514,7 +460,7 @@ bool wifi_tx::start(BaseType_t core, UBaseType_t prio, uint32_t stack_bytes)
         return false;
     }
     if (xTaskCreatePinnedToCore(task, "wifi_tx", stack_bytes, this, prio,
-                                nullptr, core) != pdPASS)
+                                &task_handle_, core) != pdPASS)
     {
         ESP_LOGE(TAG, "wifi_tx task failed");
         return false;
@@ -537,6 +483,8 @@ void wifi_tx::fill_status(wifi_status_s* status)
     status->tx_retry_other = tx_retry_other.load(std::memory_order_relaxed);
     status->inject_ok = inject_ok.load(std::memory_order_relaxed);
     status->inject_fail = inject_fail.load(std::memory_order_relaxed);
+    status->tx_enqueue_ok = tx_enqueue_ok.load(std::memory_order_relaxed);
+    status->tx_enqueue_fail = tx_enqueue_fail.load(std::memory_order_relaxed);
     status->tx_in_flight =
         static_cast<uint16_t>(in_flight.load(std::memory_order_relaxed));
     status->tx_queue = static_cast<uint16_t>(queue_size());
@@ -583,6 +531,25 @@ void wifi_tx::fill_status(wifi_status_s* status)
 void wifi_tx::note_udp_tx_pkt()
 {
     udp_tx_pkt.fetch_add(1, std::memory_order_relaxed);
+}
+
+void wifi_tx::reset_channel_stats()
+{
+    // Metrics only — never zero in_flight or pending slots while 802.11 TX may
+    // still complete (e.g. bw_test reset between A→B and B→A legs).
+    udp_tx_pkt.store(0, std::memory_order_relaxed);
+    drop_tx_nomem.store(0, std::memory_order_relaxed);
+    tx_retry_count.store(0, std::memory_order_relaxed);
+    tx_retry_nomem.store(0, std::memory_order_relaxed);
+    tx_retry_other.store(0, std::memory_order_relaxed);
+    inject_ok.store(0, std::memory_order_relaxed);
+    inject_fail.store(0, std::memory_order_relaxed);
+    tx_enqueue_ok.store(0, std::memory_order_relaxed);
+    tx_enqueue_fail.store(0, std::memory_order_relaxed);
+    tx_q_hwm.store(0, std::memory_order_relaxed);
+    latency_count.store(0, std::memory_order_relaxed);
+    inject_wait_count.store(0, std::memory_order_relaxed);
+    inject_wait_next.store(0, std::memory_order_relaxed);
 }
 
 bool wifi_tx::set_cca_enabled(bool enabled)

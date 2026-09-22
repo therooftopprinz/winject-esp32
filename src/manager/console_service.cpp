@@ -4,12 +4,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <string>
 
 #include "log.h"
 
 namespace
 {
+bool parse_kv(const char* text, const char* key, const char** value)
+{
+    if (text == nullptr || key == nullptr || value == nullptr)
+    {
+        return false;
+    }
+    const size_t n = strlen(key);
+    if (strncasecmp(text, key, n) != 0)
+    {
+        return false;
+    }
+    *value = text + n;
+    return true;
+}
+
 bool parse_u(const char* text, unsigned long* out)
 {
     if (text == nullptr || out == nullptr || *text == '\0')
@@ -95,6 +111,8 @@ bool console_service::start(::reactor& reactor, const sockaddr_in& console_in,
                             get_budget_fn get_budget, get_ci_fn get_ci,
                             set_modulation_fn set_modulation,
                             get_modulation_fn get_modulation,
+                            set_tx_pacing_fn set_tx_pacing,
+                            get_tx_pacing_fn get_tx_pacing,
                             std::string* error)
 {
     auto fail = [&](const char* msg) -> bool
@@ -106,7 +124,7 @@ bool console_service::start(::reactor& reactor, const sockaddr_in& console_in,
         return false;
     };
     if (!set_fec || !set_budget || !get_fec || !get_budget || !get_ci ||
-        !set_modulation || !get_modulation)
+        !set_modulation || !get_modulation || !set_tx_pacing || !get_tx_pacing)
     {
         return fail("invalid manager console args");
     }
@@ -119,6 +137,8 @@ bool console_service::start(::reactor& reactor, const sockaddr_in& console_in,
     this->get_ci = std::move(get_ci);
     this->set_modulation = std::move(set_modulation);
     this->get_modulation = std::move(get_modulation);
+    this->set_tx_pacing = std::move(set_tx_pacing);
+    this->get_tx_pacing = std::move(get_tx_pacing);
     out_addr = console_out;
     sock = make_udp4();
     if (sock.fd() < 0)
@@ -265,6 +285,10 @@ void console_service::handle_line(const char* line)
             "get_upstream_scheduler_budget|gus <index>\n"
             "set_modulation|sd <modulation>\n"
             "get_modulation|gd\n"
+            "set_tx_pacing|stp "
+            "max_rate_kbps=N max_data_per_tick=N tx_burst_size=N "
+            "tx_burst_interval_us=N\n"
+            "get_tx_pacing|gtp\n"
             "get_channel_info|gci\n"
             "ping\n"
             "help\n");
@@ -430,6 +454,103 @@ void console_service::handle_line(const char* line)
             return;
         }
         reply_ok_args(name.c_str());
+        return;
+    }
+
+    if (cmd_is(cmd, "set_tx_pacing", "stp"))
+    {
+        uint32_t rate = 0;
+        size_t mpt = 0;
+        size_t burst = 0;
+        uint32_t burst_us = 0;
+        bool have_rate = false;
+        bool have_mpt = false;
+        bool have_burst = false;
+        bool have_burst_us = false;
+        bool any = false;
+        for (char* a = strtok_r(nullptr, " \t", &save); a != nullptr;
+             a = strtok_r(nullptr, " \t", &save))
+        {
+            const char* value = nullptr;
+            unsigned long v = 0;
+            if (parse_kv(a, "max_rate_kbps=", &value) && parse_u(value, &v))
+            {
+                rate = static_cast<uint32_t>(v);
+                have_rate = true;
+                any = true;
+                continue;
+            }
+            if (parse_kv(a, "max_data_per_tick=", &value) && parse_u(value, &v) &&
+                v >= 1 && v <= 32)
+            {
+                mpt = static_cast<size_t>(v);
+                have_mpt = true;
+                any = true;
+                continue;
+            }
+            if (parse_kv(a, "tx_burst_size=", &value) && parse_u(value, &v) &&
+                v >= 1 && v <= k_radio_tx_queue_depth)
+            {
+                burst = static_cast<size_t>(v);
+                have_burst = true;
+                any = true;
+                continue;
+            }
+            if (parse_kv(a, "tx_burst_interval_us=", &value) &&
+                parse_u(value, &v))
+            {
+                burst_us = static_cast<uint32_t>(v);
+                have_burst_us = true;
+                any = true;
+                continue;
+            }
+            reply_nok("usage set_tx_pacing max_rate_kbps=N max_data_per_tick=N "
+                      "tx_burst_size=N tx_burst_interval_us=N");
+            return;
+        }
+        if (!any)
+        {
+            reply_nok("usage set_tx_pacing max_rate_kbps=N max_data_per_tick=N "
+                      "tx_burst_size=N tx_burst_interval_us=N");
+            return;
+        }
+        std::string err;
+        if (!set_tx_pacing(have_rate ? &rate : nullptr,
+                           have_mpt ? &mpt : nullptr,
+                           have_burst ? &burst : nullptr,
+                           have_burst_us ? &burst_us : nullptr, &err))
+        {
+            reply_nok(err.empty() ? "failed" : err.c_str());
+            return;
+        }
+        reply_ok();
+        return;
+    }
+
+    if (cmd_is(cmd, "get_tx_pacing", "gtp"))
+    {
+        char* extra = strtok_r(nullptr, " \t", &save);
+        if (extra != nullptr)
+        {
+            reply_nok("usage get_tx_pacing");
+            return;
+        }
+        uint32_t rate = 0;
+        size_t mpt = 0;
+        size_t burst = 0;
+        uint32_t burst_us = 0;
+        std::string err;
+        if (!get_tx_pacing(&rate, &mpt, &burst, &burst_us, &err))
+        {
+            reply_nok(err.empty() ? "failed" : err.c_str());
+            return;
+        }
+        char args[160];
+        snprintf(args, sizeof(args),
+                 "max_rate_kbps=%u max_data_per_tick=%zu tx_burst_size=%zu "
+                 "tx_burst_interval_us=%u",
+                 rate, mpt, burst, burst_us);
+        reply_ok_args(args);
         return;
     }
 

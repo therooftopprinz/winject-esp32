@@ -293,9 +293,19 @@ bool config::load(const std::string& path, std::string* error)
             max_data_per_tick = *mpt;
         }
     }
-    if (auto pace = parser.arg("winject.ci_pace_inject"))
+    if (auto bs = parser.as<unsigned>("winject.tx_burst_size"))
     {
-        ci_pace_inject = !(*pace == "0" || *pace == "false");
+        if (*bs >= 1 && *bs <= k_radio_tx_queue_depth)
+        {
+            tx_burst_size = *bs;
+        }
+    }
+    if (auto bi = parser.as<unsigned>("winject.tx_burst_interval_us"))
+    {
+        if (*bi <= 1000000u)
+        {
+            tx_burst_interval_us = static_cast<uint32_t>(*bi);
+        }
     }
     manager_console_in = parser.arg("manager.console_in").value_or("");
     manager_console_out = parser.arg("manager.console_out").value_or("");

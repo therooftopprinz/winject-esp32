@@ -9,36 +9,34 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "esp_wifi_types.h"
-#include "freertos/FreeRTOS.h"
 #include "bfc-esp32/wait_free_queue.hpp"
+#include "esp_wifi_types.h"
 
 class wifi;
-class lc_rx_endpoint;
+class upstream_rx_endpoint;
 struct wifi_status_s;
 
 class wifi_rx
 {
     friend class wifi;
+    friend class upstream_rx_endpoint;
 
 public:
-    static constexpr uint8_t k_queue_cap = WIFI_RADIO_RX_QUEUE;
-
     wifi_rx(const wifi_rx&) = delete;
     wifi_rx& operator=(const wifi_rx&) = delete;
 
     bool init();
-    bool start(BaseType_t core = APP_TASK_CORE,
-               UBaseType_t prio = UPSTREAM_TASK_PRIO,
-               uint32_t stack_bytes = 6144);
-
-    void set_endpoint(lc_rx_endpoint& ep);
 
     uint8_t queue_size() const;
     uint8_t queue_capacity() const
     {
         return k_queue_cap;
     }
+
+    bool try_enqueue(packet&& mpdu);
+    packet pop(TickType_t wait);
+    void on_upstream_deliver();
+    void reset_channel_stats();
 
 private:
     explicit wifi_rx(wifi& radio);
@@ -60,19 +58,10 @@ private:
     void on_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type);
     bool accept_mpdu(const uint8_t* mpdu, size_t len) const;
 
-    // Wait-free. From promiscuous CB only: enqueue and return.
-    // Do not allocate, take mutexes, or call wake_up here — that runs on
-    // the Wi-Fi task, which also completes esp_wifi_80211_tx.
-    bool enqueue(packet&& pkt);
-
-    static void task(void* arg);
-    void run();
-    void handle_mpdu(packet&& mpdu);
-    packet pop(TickType_t wait);
+    static constexpr uint8_t k_queue_cap = WIFI_RADIO_RX_QUEUE;
 
     wifi& radio;
     bfc::wait_free_queue<std::optional<packet>, k_queue_cap> q;
-    lc_rx_endpoint* ep = nullptr;
     std::atomic<uint16_t> domain_{0};
     std::atomic<bool> allow_failed_crc{false};
     std::atomic<uint32_t> udp_rx_pkt{0};
@@ -92,7 +81,6 @@ private:
     std::atomic<int8_t> stash_rssi_{0};
     std::atomic<int8_t> stash_noise_{0};
 
-    // Promiscuous-path diagnostics (any on-air source, pre-Addr3).
     std::atomic<uint32_t> promisc_data{0};
     std::atomic<uint32_t> promisc_misc{0};
     std::atomic<uint32_t> promisc_ctrl{0};

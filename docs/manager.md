@@ -86,9 +86,7 @@ Each `upstream-N` owns one host socket. All streams share one ESP32 inject/forwa
 - Bidirectional peers swap: A’s TX bus is B’s RX bus, and vice versa. Unidirectional peers share one bus (source TX, sink RX).
 - `BFC_TUNNEL_DEVICE`: `upstream.size` must be 1 (same domain/bus rules).
 
-The manager issues PHY knobs (`set_channel` / `set_modulation` / `set_tx_power`), then `set_domain`, then once `set_upstream_tx port=<inject>` and `set_upstream_rx host=<local_ip> port=<forward>`. It also binds an ephemeral UDP port and issues `set_upstream_ci to=<local_ip>:<ci_port>` so the radio fans out channel-info (TX flow-control queue depth and RX rssi/snr). The manager caches the last samples with their receive times and prints them (`flow_t` / `rssi_t`) from `gci` and periodic `winject.stats_sec` logging; the TX scheduler gates DATA MPDUs when a fresh FLOW_CTRL sample shows the
-radio TX queue above half full (`skip_console` tests use
-`tools/configure_manager_ci.py` to subscribe the radio to the manager CI port).
+The manager issues PHY knobs (`set_channel` / `set_modulation` / `set_tx_power`), then `set_domain`, then once `set_upstream_tx port=<inject>` and `set_upstream_rx host=<local_ip> port=<forward>`. Radio **channel-info UDP** is removed; `get_channel_info` / `gci` on the **manager** console reports stream counters and radio byte/packet totals from the manager process. Inject pacing uses `tx_scheduler` rate/burst settings (see [cd-protocol.md](cd-protocol.md)), not console grants or CI flow-control.
 
 UDP upstream TX uses `peek_tx` / `commit_tx` so a failed non-blocking
 `sendto` to the radio inject port does not drop payloads that were already
@@ -166,6 +164,8 @@ Replies:
 | `set_upstream_scheduler_budget <index> <budget>` | `sus` | budget `> 0` |
 | `set_modulation <modulation>` | `sd` | radio TX rate (`set_modulation` on the radio UDP console) |
 | `get_modulation` | `gd` | last applied / configured modulation |
+| `set_tx_pacing …` | `stp` | runtime scheduler: `max_rate_kbps`, `max_data_per_tick`, `tx_burst_size`, `tx_burst_interval_us` (any subset, `key=value` tokens) |
+| `get_tx_pacing` | `gtp` | current scheduler pacing knobs |
 
 `help` prints:
 
@@ -176,6 +176,8 @@ set_upstream_scheduler_budget|sus <index> <budget>
 get_upstream_scheduler_budget|gus <index>
 set_modulation|sd <modulation>
 get_modulation|gd
+set_tx_pacing|stp max_rate_kbps=N max_data_per_tick=N tx_burst_size=N tx_burst_interval_us=N
+get_tx_pacing|gtp
 get_channel_info|gci
 ping
 help

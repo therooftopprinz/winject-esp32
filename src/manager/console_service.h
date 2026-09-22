@@ -70,6 +70,14 @@ public:
         std::function<bool(const std::string& name, std::string* error)>;
     using get_modulation_fn =
         std::function<bool(std::string* name, std::string* error)>;
+    using set_tx_pacing_fn = std::function<bool(
+        const uint32_t* max_rate_kbps, const size_t* max_data_per_tick,
+        const size_t* tx_burst_size, const uint32_t* tx_burst_interval_us,
+        std::string* error)>;
+    using get_tx_pacing_fn = std::function<bool(
+        uint32_t* max_rate_kbps, size_t* max_data_per_tick,
+        size_t* tx_burst_size, uint32_t* tx_burst_interval_us,
+        std::string* error)>;
 
     ~console_service();
 
@@ -78,7 +86,9 @@ public:
                set_budget_fn set_budget, get_fec_fn get_fec,
                get_budget_fn get_budget, get_ci_fn get_ci,
                set_modulation_fn set_modulation,
-               get_modulation_fn get_modulation, std::string* error);
+               get_modulation_fn get_modulation,
+               set_tx_pacing_fn set_tx_pacing, get_tx_pacing_fn get_tx_pacing,
+               std::string* error);
     void stop();
 
 private:
@@ -102,6 +112,8 @@ private:
     get_ci_fn get_ci;
     set_modulation_fn set_modulation;
     get_modulation_fn get_modulation;
+    set_tx_pacing_fn set_tx_pacing;
+    get_tx_pacing_fn get_tx_pacing;
 };
 
 #endif  // WINJECT_MANAGER_CONSOLE_SERVICE_H_

@@ -35,8 +35,9 @@ PREP_EXTRA=()
 MODULATION_SET=0
 CHANNEL_SET=0
 ALL_MODULATIONS=0
-INJECT_TUNE_A=""
-
+MGR_MAX_DATA_PER_TICK=""
+MGR_MAX_RATE_KBPS=""
+BENCH_PROFILE=""
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -152,12 +153,30 @@ while [[ $# -gt 0 ]]; do
       PREP_EXTRA+=(--power "${1#--power=}")
       shift
       ;;
-    --inject-tune-a)
-      INJECT_TUNE_A="${2:?--inject-tune-a needs tune args (e.g. flush_batch=1 emac_gap_ticks=0)}"
+    --max-data-per-tick)
+      MGR_MAX_DATA_PER_TICK="${2:?--max-data-per-tick needs a value}"
       shift 2
       ;;
-    --inject-tune-a=*)
-      INJECT_TUNE_A="${1#--inject-tune-a=}"
+    --max-data-per-tick=*)
+      MGR_MAX_DATA_PER_TICK="${1#--max-data-per-tick=}"
+      shift
+      ;;
+    --max-rate-kbps)
+      MGR_MAX_RATE_KBPS="${2:?--max-rate-kbps needs a value}"
+      shift 2
+      ;;
+    --max-rate-kbps=*)
+      MGR_MAX_RATE_KBPS="${1#--max-rate-kbps=}"
+      shift
+      ;;
+    --profile)
+      BENCH_PROFILE="${2:?--profile needs a value}"
+      PREP_EXTRA+=(--profile "$BENCH_PROFILE")
+      shift 2
+      ;;
+    --profile=*)
+      BENCH_PROFILE="${1#--profile=}"
+      PREP_EXTRA+=(--profile "$BENCH_PROFILE")
       shift
       ;;
     *)
@@ -191,22 +210,6 @@ ensure_winject_manager "$ROOT"
 echo "configuring radios (domain/bus pairs, forward ports 9210/9220)..."
 python3 "$ROOT/scripts/prepare_radios_for_manager.py" --a "$RADIO_A" --b "$RADIO_B" --host "$HOST_IP" --verbose "${PREP_EXTRA[@]+"${PREP_EXTRA[@]}"}" || exit 1
 
-if [[ -n "$INJECT_TUNE_A" ]]; then
-  echo "post-prepare set_inject_tune on A ($RADIO_A): $INJECT_TUNE_A"
-  python3 - "$RADIO_A" "$INJECT_TUNE_A" "$ROOT" <<'PY' || exit 1
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(sys.argv[3]) / "tools"))
-import bw_test as bw
-
-radio, tune = sys.argv[1], sys.argv[2]
-cmd = f"set_inject_tune {tune}"
-if not bw.replies_ok(bw.console(radio, [cmd], quiet=False)):
-    raise SystemExit(f"{radio}: {cmd} failed")
-PY
-fi
-
 if [[ "$USE_TCP" -eq 1 ]]; then
   CONF_A="$CONF_TCP_A"
   CONF_B="$CONF_TCP_B"
@@ -220,16 +223,48 @@ else
 fi
 
 patch_conf() {
-  local file="$1" device="$2"
+  local file="$1" device="$2" gci_in="$3" gci_out="$4"
   sed -e "s/^winject\.device.*/winject.device        = ${device}/" \
       -e "s/^winject\.local_ip.*/winject.local_ip      = ${HOST_IP}/" \
       "$file"
+  printf 'manager.console_in    = 127.0.0.1:%s\n' "$gci_in"
+  printf 'manager.console_out   = 127.0.0.1:%s\n' "$gci_out"
 }
 
 CONF_A_RUN="$LOG_DIR/winject_a.conf"
 CONF_B_RUN="$LOG_DIR/winject_b.conf"
-patch_conf "$CONF_A" "$RADIO_A" >"$CONF_A_RUN"
-patch_conf "$CONF_B" "$RADIO_B" >"$CONF_B_RUN"
+patch_conf "$CONF_A" "$RADIO_A" 2400 2401 >"$CONF_A_RUN"
+patch_conf "$CONF_B" "$RADIO_B" 2410 2411 >"$CONF_B_RUN"
+# 10 Mbps profile sweep: manager tick cap 4 on A side (default in tree).
+if [[ "$BENCH_PROFILE" == "10mbps" && -z "$MGR_MAX_DATA_PER_TICK" ]]; then
+  if grep -q '^winject\.max_data_per_tick' "$CONF_A_RUN"; then
+    sed -i 's/^winject\.max_data_per_tick.*/winject.max_data_per_tick = 4/' "$CONF_A_RUN"
+  else
+    printf 'winject.max_data_per_tick = 4\n' >>"$CONF_A_RUN"
+  fi
+fi
+if [[ "$BENCH_PROFILE" == "15mbps" ]]; then
+  if [[ -z "$MGR_MAX_RATE_KBPS" ]]; then
+    sed -i 's/^winject\.max_rate_kbps.*/winject.max_rate_kbps = 15000/' "$CONF_A_RUN"
+  fi
+  if [[ -z "$MGR_MAX_DATA_PER_TICK" ]]; then
+    if grep -q '^winject\.max_data_per_tick' "$CONF_A_RUN"; then
+      sed -i 's/^winject\.max_data_per_tick.*/winject.max_data_per_tick = 4/' "$CONF_A_RUN"
+    else
+      printf 'winject.max_data_per_tick = 4\n' >>"$CONF_A_RUN"
+    fi
+  fi
+fi
+if [[ -n "$MGR_MAX_RATE_KBPS" ]]; then
+  sed -i "s/^winject\.max_rate_kbps.*/winject.max_rate_kbps = ${MGR_MAX_RATE_KBPS}/" "$CONF_A_RUN"
+fi
+if [[ -n "$MGR_MAX_DATA_PER_TICK" ]]; then
+  if grep -q '^winject\.max_data_per_tick' "$CONF_A_RUN"; then
+    sed -i "s/^winject\.max_data_per_tick.*/winject.max_data_per_tick = ${MGR_MAX_DATA_PER_TICK}/" "$CONF_A_RUN"
+  else
+    printf 'winject.max_data_per_tick = %s\n' "$MGR_MAX_DATA_PER_TICK" >>"$CONF_A_RUN"
+  fi
+fi
 
 cleanup() {
   if [[ -n "${PID_A:-}" ]]; then kill "$PID_A" 2>/dev/null || true
@@ -272,7 +307,7 @@ python3 "$ROOT/tools/configure_manager_ci.py" --radio "$RADIO_A" --host "$HOST_I
 python3 "$ROOT/tools/configure_manager_ci.py" --radio "$RADIO_B" --host "$HOST_IP" \
   --log "$LOG_DIR/manager_b.log" --quiet || true
 
-echo "running bw_test $PATH_FLAG --a $RADIO_A --b $RADIO_B --host $HOST_IP ${BW_ARGS[*]}"
+echo "running bw_test $PATH_FLAG --a $RADIO_A --b $RADIO_B --host $HOST_IP --drop-stages ${BW_ARGS[*]}"
 # Do not exec: the EXIT trap must run to kill managers.
 set +e
 python3 "$ROOT/tools/bw_test.py" \
@@ -280,6 +315,7 @@ python3 "$ROOT/tools/bw_test.py" \
   --a "$RADIO_A" \
   --b "$RADIO_B" \
   --host "$HOST_IP" \
+  --drop-stages \
   "${BW_ARGS[@]}"
 status=$?
 set -e

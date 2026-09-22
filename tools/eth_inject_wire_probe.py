@@ -88,7 +88,6 @@ winject.mode          = STANDALONE
 winject.domain        = 1234
 winject.max_rate_kbps = {int(args.kbps)}
 winject.stats_sec     = 1
-winject.ci_pace_inject = 1
 winject.skip_console  = 1
 winject.forward_base  = 9210
 manager.console_in    = 127.0.0.1:2424

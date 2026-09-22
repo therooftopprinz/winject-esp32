@@ -39,6 +39,12 @@ def ci_port_from_log(path: Path) -> int:
 
 
 def main() -> int:
+    print(
+        "obsolete: radio channel_info / set_upstream_ci was removed (settings v7).",
+        file=sys.stderr,
+    )
+    return 2
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--radio", required=True, help="radio IP (console UDP :22)")
     p.add_argument("--host", required=True, help="manager host IP (local_ip)")

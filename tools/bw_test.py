@@ -39,6 +39,11 @@ CHANNEL_MIN = 1
 CHANNEL_MAX = 14  # matches firmware WIFI_CHANNEL_*; 14 is 802.11b-only
 TCP_SEND_A = 29000  # manager A TCP_SERVER (host sends A->B)
 TCP_SEND_B = 29001  # manager B TCP_SERVER (host sends B->A)
+# Manager gci: bind console_out, send gci to console_in (scripts/manager_bw_test.sh).
+MGR_GCI_A_BIND = ("127.0.0.1", 2401)
+MGR_GCI_A_DEST = ("127.0.0.1", 2400)
+MGR_GCI_B_BIND = ("127.0.0.1", 2411)
+MGR_GCI_B_DEST = ("127.0.0.1", 2410)
 # Manager ARQ can stop reading when the window fills and reverse ACKs starve;
 # without a send timeout, sendall blocks forever and phase() never returns.
 TCP_SEND_TIMEOUT_S = 3.0
@@ -994,6 +999,11 @@ def parse_args() -> argparse.Namespace:
         help="run simultaneous A+B bandwidth phase",
     )
     p.add_argument("--verbose", action="store_true", help="print full console replies")
+    p.add_argument(
+        "--drop-stages",
+        action="store_true",
+        help="print per-stage drop counts after each unidirectional phase (manager gci + radio status)",
+    )
     return p.parse_args()
 
 
@@ -1494,14 +1504,90 @@ def main() -> int:
             raise TestInterrupted(out)
         return out
 
+    def direction_label(dest: tuple[str, int]) -> str:
+        if dest == dest_a:
+            return "A->B"
+        if dest == dest_b:
+            return "B->A"
+        return f"{dest[0]}:{dest[1]}"
+
+    def drop_path_meta(
+        dest: tuple[str, int],
+    ) -> tuple[str, str, tuple[tuple[str, int], tuple[str, int]], tuple[tuple[str, int], tuple[str, int]], int, int]:
+        if dest == dest_a:
+            return (
+                args.a,
+                args.b,
+                (MGR_GCI_A_BIND, MGR_GCI_A_DEST),
+                (MGR_GCI_B_BIND, MGR_GCI_B_DEST),
+                0,
+                0,
+            )
+        return (
+            args.b,
+            args.a,
+            (MGR_GCI_B_BIND, MGR_GCI_B_DEST),
+            (MGR_GCI_A_BIND, MGR_GCI_A_DEST),
+            1,
+            1,
+        )
+
+    def report_drop_stages(
+        snap_before: object,
+        dest: tuple[str, int],
+        pr: PhaseResult,
+    ) -> None:
+        from drop_path_probe import capture_drop_path_snap, drop_path_delta, print_drop_path_stages
+
+        tx_r, rx_r, mtx_p, mrx_p, stx, srx = drop_path_meta(dest)
+        try:
+            snap_after = capture_drop_path_snap(tx_r, rx_r, mtx_p, mrx_p, stx, srx)
+            dp = drop_path_delta(snap_before, snap_after, pr.sent, pr.recv)
+            print_drop_path_stages(direction_label(dest), dp)
+        except OSError as err:
+            print(f"warning: drop-stages snap end failed: {err}")
+
+    def reset_radio_phase_stats(tx_radio: str, rx_radio: str) -> None:
+        for ip in (tx_radio, rx_radio):
+            try:
+                console(
+                    ip,
+                    ["reset_channel_stats", "reset_promisc_stats"],
+                    quiet=quiet,
+                    timeout=3,
+                )
+            except OSError:
+                pass
+
     def take_phase(
         senders: list[tuple[tuple[str, int], bytes, Listener | TcpListener]],
         kbps: float,
     ) -> tuple[list[PhaseResult], bool]:
+        drop_before = None
+        drop_dest: tuple[str, int] | None = None
+        if args.drop_stages and not args.direct and len(senders) == 1:
+            from drop_path_probe import capture_drop_path_snap
+
+            drop_dest = senders[0][0]
+            tx_r, rx_r, mtx_p, mrx_p, stx, srx = drop_path_meta(drop_dest)
+            # Let wifi_tx / 802.11 completions drain after the prior leg.
+            time.sleep(0.5)
+            reset_radio_phase_stats(tx_r, rx_r)
+            time.sleep(0.15)
+            try:
+                drop_before = capture_drop_path_snap(tx_r, rx_r, mtx_p, mrx_p, stx, srx)
+            except OSError as err:
+                print(f"warning: drop-stages snap start failed: {err}")
         try:
-            return phase(senders, kbps), False
+            results = phase(senders, kbps)
         except TestInterrupted as err:
-            return err.results, True
+            results = err.results
+            if drop_before is not None and drop_dest is not None and results:
+                report_drop_stages(drop_before, drop_dest, results[0])
+            return results, True
+        if drop_before is not None and drop_dest is not None and results:
+            report_drop_stages(drop_before, drop_dest, results[0])
+        return results, False
 
     def print_snap(
         prefix: str, pr: PhaseResult, stats: RecvStats | None = None

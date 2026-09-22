@@ -40,7 +40,12 @@
 // Dedicated Ethernet flood bench (not console RTT). UDP payload incl. 8-byte hdr.
 #define ETHER_BENCH_PORT 2223
 #define ETHER_BENCH_HDR 8
+// IPv4/UDP L2 size = 14+20+8+payload; must fit CONFIG_ETH_DMA_BUFFER_SIZE (1514).
 #define ETHER_BENCH_MAX 1472
+// Max L2 frame for 1400 B inject UDP (bw_test / manager path).
+#define WINJECT_ETH_L2_INJECT_MAX (14u + 20u + 8u + 1400u)
+// 1500-byte IP MTU Ethernet frame (L2 header only; FCS not in DMA buffer).
+#define WINJECT_ETH_L2_MTU_MAX (14u + 1500u)
 #define ETHER_BENCH_MAGIC 0xEB01u
 // Must stay below CONFIG_LWIP_TCPIP_TASK_PRIO (18) or the flood starves
 // lwIP/EMAC and exhausts RX buffers ("esp.emac: no mem for receive buffer").
@@ -77,21 +82,8 @@
 #define WIFI_RADIO_TASK_PRIO 20
 #define UPSTREAM_TASK_PRIO 18
 #define NETMGR_TASK_PRIO 6
-// Inject flush. Below CONFIG_LWIP_TCPIP_TASK_PRIO (18).
-#define LC_TX_DRAIN_TASK_PRIO 17
-#define LC_TX_DRAIN_TASK_STACK 4096
-// Inject UDP SO_RCVBUF (bytes). bfc::socket::open_udp defaults to 64 KiB;
-// keep this ≥ that. Pair with CONFIG_LWIP_UDP_RECVMBOX_SIZE so the mailbox
-// can hold ~RCVBUF/MTU datagrams under WiFi TX backpressure.
-#define LC_TX_SOCK_RCVBUF (64 * 1024)
-// Staging ring: raw UDP callback copies here; flush task feeds wifi_tx.
-// Must absorb short WiFi TX stalls (mbox is no longer in the path).
-#define LC_TX_STAGING_DEPTH 16
-// Upstream (sut) flush: move this many frames to wifi_tx, then pause so
-// EMAC can RX while WiFi DMA is idle. Same duty as the former wifi_tx gap
-// (~14% at MCS7) — lives on the upstream_tx path, not in the radio TX task.
-#define LC_TX_FLUSH_BATCH 8
-#define LC_TX_EMAC_GAP_TICKS 0
+#define UPSTREAM_RX_TASK_PRIO 17
+#define UPSTREAM_RX_TASK_STACK 4096
 
 // Raw 802.11 radio.
 #define WIFI_RADIO_MAX_FRAME 1600
@@ -100,6 +92,9 @@
 // Pool storage is sized per-direction (see packet_allocator init).
 #define WIFI_RADIO_RX_QUEUE 8
 #define WIFI_RADIO_TX_QUEUE 20
+// wifi_tx: EMAC/WiFi timeshare — drain a small batch then idle (see winject.md).
+#define WIFI_TX_BURST_SIZE_DEFAULT 8
+#define WIFI_TX_BURST_GAP_US 1000
 #define WIFI_RADIO_INJECT_RETRIES 8
 // Cap outstanding 802.11 TX before submitting another — avoids NO_MEM storms
 // that thrash the WiFi DMA and starve EMAC RX. Do not raise without re-checking
